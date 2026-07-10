@@ -12,6 +12,22 @@ beforeEach(() => { dir = realpathSync(mkdtempSync(join(tmpdir(), "pm-replay-veri
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe("sealed deterministic replay", () => {
+  it("replays the exact production TOKEN_SETTLEMENT payload without leaderId", async () => {
+    const dbPath = join(dir, "token-settlement.db"); const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig(); config.app.global.risk.startingCapitalUsd = 10;
+    store.applyCopyFill("whale", "winner", "BUY", 2, 0.5); store.adjustCash(-1, 10);
+    const exp = store.startOrResumeExperiment({ accountId: "token-settlement", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "token-settlement-observation:winner",
+      payload: { type: "TOKEN_SETTLEMENT", tokenId: "winner", settlement: { settled: true, payoutPerShare: 1, conditionId: "condition" } },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionRawEventIds([raw.rawEventId]);
+    store.audit({ action: "DETECT", tokenId: "winner", side: "REDEEM", price: 1, reason: "token settlement detected", preview: true });
+    store.recordTokenSettlement("winner", 1, true, 10, { settlementSource: "token_resolution", conditionId: "condition" });
+    store.setDecisionRawEventIds([]); store.close();
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "token-settlement-archive") });
+    expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath }).match).toBe(true);
+  });
   it("reconstructs a known BUY, SELL, and REDEEM sequence", async () => {
     const dbPath = join(dir, "source.db");
     const store = new StateStore(dbPath);
@@ -37,7 +53,8 @@ describe("sealed deterministic replay", () => {
     const sell = store.applyCopyFill("whale", "token-a", "SELL", 2, 0.75);
     expect(sell.realizedPnl).toBe(0.5);
     store.adjustCash(1.5, 10);
-    store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled", exactTerms: { leaderId: "whale", tokenId: "token-a", conditionId: "condition-a", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1 }, decidedAt: 5 });
+    store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM" }, decidedAt: 5 });
+    store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled", exactTerms: { leaderId: "whale", tokenId: "token-a", conditionId: "condition-a", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1 }, decidedAt: 6 });
     store.applyCopyFill("whale", "token-a", "SELL", 2, 1);
     store.adjustCash(2, 10);
     store.close();
@@ -89,8 +106,9 @@ describe("sealed deterministic replay", () => {
       store.recordDecision({ rawEventId: raws[index]!.rawEventId, action: "COPY", reasonCode: "copy_executed", exactTerms: { leaderId: "whale", tokenId, side: "BUY", requestedShares: 2, requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0 }, decidedAt: index * 2 + 2 });
       store.applyCopyFill("whale", tokenId, "BUY", 2, 0.5); store.adjustCash(-1, 10);
     }
+    store.recordDecision({ rawEventId: raws[2]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM" }, decidedAt: 5 });
     store.recordDecision({ rawEventId: raws[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled",
-      exactTerms: { leaderId: "whale", conditionId: "condition-a", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1 }, decidedAt: 5 });
+      exactTerms: { leaderId: "whale", conditionId: "condition-a", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1 }, decidedAt: 6 });
     store.applyCopyFill("whale", "token-a", "SELL", 2, 1); store.adjustCash(2, 10);
     store.close();
     const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "conditions-archive") });

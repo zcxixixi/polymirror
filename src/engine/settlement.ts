@@ -353,7 +353,7 @@ export async function processSettlements(
     const raw = store.getActiveExperiment()
       ? store.recordRawEvent({
           sourceId: key,
-          payload: activity,
+          payload: { ...activity, leaderId },
           sourceTimestamp: activity.timestamp,
           observedTimestamp: Date.now(),
         })

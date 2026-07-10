@@ -23,7 +23,7 @@ import {
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 5;
+export const STATE_SCHEMA_VERSION = 6;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 
@@ -529,7 +529,8 @@ export class StateStore {
         action TEXT NOT NULL,
         reason_code TEXT NOT NULL,
         exact_terms_json TEXT NOT NULL,
-        decided_at INTEGER NOT NULL
+        decided_at INTEGER NOT NULL,
+        decision_order INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_decisions_raw_event ON decisions(raw_event_id, decided_at);
       CREATE TABLE IF NOT EXISTS experiment_archives (
@@ -539,10 +540,14 @@ export class StateStore {
         archived_at INTEGER NOT NULL,
         archive_path TEXT,
         verified_at INTEGER,
-        verification_status TEXT NOT NULL DEFAULT 'VERIFIED'
+        verification_status TEXT NOT NULL DEFAULT 'PENDING_VERIFY'
       );
       CREATE TRIGGER IF NOT EXISTS experiment_archives_no_update
-        BEFORE UPDATE ON experiment_archives BEGIN SELECT RAISE(ABORT, 'experiment archive records are immutable'); END;
+        BEFORE UPDATE ON experiment_archives
+        WHEN NOT (OLD.verification_status='PENDING_VERIFY' AND NEW.verification_status IN ('VERIFIED','FAILED')
+          AND NEW.experiment_id=OLD.experiment_id AND NEW.snapshot_sha256=OLD.snapshot_sha256
+          AND NEW.manifest_sha256=OLD.manifest_sha256 AND NEW.archive_path=OLD.archive_path)
+        BEGIN SELECT RAISE(ABORT, 'experiment archive records are immutable'); END;
       CREATE TRIGGER IF NOT EXISTS experiment_archives_no_delete
         BEFORE DELETE ON experiment_archives BEGIN SELECT RAISE(ABORT, 'experiment archive records are append-only'); END;
       CREATE TRIGGER IF NOT EXISTS decisions_no_update
@@ -623,6 +628,12 @@ export class StateStore {
         WHEN (SELECT e.sealed_at IS NOT NULL OR e.archive_status='PREPARING' FROM raw_events r
           JOIN experiments e ON e.experiment_id=r.experiment_id WHERE r.raw_event_id=NEW.raw_event_id)
         BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_archives_no_update;
+        CREATE TRIGGER experiment_archives_no_update BEFORE UPDATE ON experiment_archives
+        WHEN NOT (OLD.verification_status='PENDING_VERIFY' AND NEW.verification_status IN ('VERIFIED','FAILED')
+          AND NEW.experiment_id=OLD.experiment_id AND NEW.snapshot_sha256=OLD.snapshot_sha256
+          AND NEW.manifest_sha256=OLD.manifest_sha256 AND NEW.archive_path=OLD.archive_path)
+        BEGIN SELECT RAISE(ABORT, 'experiment archive records are immutable'); END;
         DROP INDEX IF EXISTS idx_experiments_active_account;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
           ON experiments(account_id) WHERE state = 'ACTIVE' AND ended_at IS NULL;
@@ -878,13 +889,14 @@ export class StateStore {
     const raw = this.getRawEvent(input.rawEventId);
     if (!raw) throw new Error(`Raw event not found: ${input.rawEventId}`);
     const exactTermsJson = normalizedPayloadJson(input.exactTerms);
+    const decisionOrder = (this.db.prepare("SELECT COALESCE(MAX(decision_order), 0) + 1 AS next FROM decisions WHERE experiment_id=?").get(raw.experimentId) as { next: number }).next;
     const decisionId = createHash("sha256")
       .update([raw.experimentId, raw.rawEventId, input.action, input.reasonCode, exactTermsJson].join("\n"))
       .digest("hex");
     this.db.prepare(
       `INSERT OR IGNORE INTO decisions
-       (decision_id, experiment_id, raw_event_id, action, reason_code, exact_terms_json, decided_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       (decision_id, experiment_id, raw_event_id, action, reason_code, exact_terms_json, decided_at, decision_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       decisionId,
       raw.experimentId,
@@ -892,7 +904,8 @@ export class StateStore {
       input.action,
       input.reasonCode,
       exactTermsJson,
-      input.decidedAt ?? Date.now()
+      input.decidedAt ?? Date.now(),
+      decisionOrder
     );
     return this.getDecision(decisionId)!;
   }
@@ -911,7 +924,7 @@ export class StateStore {
 
   listDecisions(): DecisionRow[] {
     const ids = this.db.prepare(
-      "SELECT decision_id AS decisionId FROM decisions ORDER BY decided_at, decision_id"
+      "SELECT decision_id AS decisionId FROM decisions ORDER BY decision_order, decided_at, decision_id"
     ).all() as { decisionId: string }[];
     return ids.map((row) => this.getDecision(row.decisionId)!);
   }
@@ -948,7 +961,12 @@ export class StateStore {
     const archiveCols = this.db.prepare("PRAGMA table_info(experiment_archives)").all() as { name: string }[];
     if (!archiveCols.some((column) => column.name === "archive_path")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN archive_path TEXT");
     if (!archiveCols.some((column) => column.name === "verified_at")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verified_at INTEGER");
-    if (!archiveCols.some((column) => column.name === "verification_status")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'VERIFIED'");
+    if (!archiveCols.some((column) => column.name === "verification_status")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'PENDING_VERIFY'");
+    const decisionCols = this.db.prepare("PRAGMA table_info(decisions)").all() as { name: string }[];
+    if (!decisionCols.some((column) => column.name === "decision_order")) {
+      this.db.exec("ALTER TABLE decisions ADD COLUMN decision_order INTEGER");
+      this.db.exec("UPDATE decisions SET decision_order=rowid WHERE decision_order IS NULL");
+    }
     const observationCols = this.db.prepare("PRAGMA table_info(raw_event_observations)").all() as { name: string }[];
     if (!observationCols.some((column) => column.name === "observation_key")) {
       this.db.exec("ALTER TABLE raw_event_observations ADD COLUMN observation_key TEXT");

@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -95,6 +95,46 @@ describe("experiment evidence archive", () => {
     expect(reopened.getExperiment(experiment.experimentId)).toMatchObject({ sealedAt: null, archiveStatus: "FAILED" });
     expect(() => reopened.recordRawEvent({ sourceId: "after-failure", payload: {}, sourceTimestamp: 2 })).not.toThrow();
     reopened.close();
+  });
+
+  it("fails recoverably when a published artifact is replaced before verification", async () => {
+    const dbPath = join(dir, "replace.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
+    const experiment = store.startOrResumeExperiment({ accountId: "replace", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" }); store.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId,
+      archiveDir: join(dir, "replace-archive"), onPublished: ({ snapshotPath }) => appendFileSync(snapshotPath, "replacement") }))
+      .rejects.toThrow(/verification|checksum/i);
+    const db = new Database(dbPath, { readonly: true });
+    expect(db.prepare("SELECT sealed_at AS sealedAt, archive_status AS status FROM experiments").get())
+      .toMatchObject({ sealedAt: null, status: "FAILED" });
+    expect(db.prepare("SELECT verification_status AS status FROM experiment_archives").get())
+      .toMatchObject({ status: "FAILED" });
+    db.close();
+  });
+
+  it("freezes new observations for an existing raw event while PREPARING", async () => {
+    const dbPath = join(dir, "freeze.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
+    config.app.leaders[0]!.filters = { minPrice: 0.6 };
+    const experiment = store.startOrResumeExperiment({ accountId: "freeze", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "raw", payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "t", price: 0.5, size: 1 }, sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionRawEventIds([raw.rawEventId]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "t", side: "BUY", size: 1, price: 0.5, preview: true });
+    store.audit({ leaderId: "whale", action: "SKIP", tokenId: "t", side: "BUY", size: 1, price: 0.5, reason: "price 0.5 < min 0.6", preview: true });
+    store.setDecisionRawEventIds([]);
+    store.close(); let blocked = false;
+    await archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId, archiveDir: join(dir, "freeze-archive"),
+      onPublished: () => {
+        const concurrent = new Database(dbPath);
+        try {
+          concurrent.prepare(`INSERT INTO raw_event_observations
+            (observation_key, raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
+            VALUES ('late', ?, 'hash', '{}', 2, 2)`).run(raw.rawEventId);
+        } catch (error) { blocked = /immutable|finalizing/i.test(String(error)); }
+        finally { concurrent.close(); }
+      },
+    });
+    expect(blocked).toBe(true);
   });
 
   it("makes sealing append-only and refuses unsafe restore paths", async () => {

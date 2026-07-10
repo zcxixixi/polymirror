@@ -204,7 +204,7 @@ describe("processSettlements", () => {
     expect(store.getCashBalance(500)).toBe(505);
     expect(store.listAuditLog({ action: "REDEEM" }).total).toBe(1);
     expect(store.listRawEvents()).toEqual([
-      expect.objectContaining({ sourceId: "0xredeem:token-a:REDEEM" }),
+      expect.objectContaining({ sourceId: "0xredeem:token-a:REDEEM", payload: expect.objectContaining({ type: "REDEEM", leaderId: "whale" }) }),
     ]);
     expect(store.listDecisions()).toEqual(
       expect.arrayContaining([

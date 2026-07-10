@@ -48,7 +48,7 @@ describe("readPreviewAccountReport", () => {
       gitSha: "git-report",
       imageDigest: "sha256:image-report",
       lockfileHash: "lock-report",
-      schemaVersion: 5,
+      schemaVersion: 6,
       trustClass: "candidate",
     });
   });
