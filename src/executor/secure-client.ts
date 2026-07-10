@@ -240,7 +240,7 @@ export async function ensureTradingReady(wallet: WalletConfig): Promise<void> {
           );
         } else if (/does not match the signer|deterministic wallet/i.test(msg)) {
           logError(
-            "SecureClient wallet classification failed — run: npx tsx scripts/patch-polymarket-client.mts",
+            "SecureClient wallet classification failed — run: node scripts/patch-polymarket-client.mjs",
             { error: msg }
           );
         } else {

@@ -39,7 +39,13 @@ export function aggregateTrades(
 
   for (const item of sorted) {
     const { leaderId, activity } = item;
-    if (!activity.asset || !activity.side) {
+    if (activity.type !== "TRADE" || !activity.asset || !activity.side) {
+      buckets.set(`${leaderId}:${tradeEventKey(activity)}`, {
+        leaderId,
+        activity: { ...activity },
+        sourceCount: 1,
+        sourceTradeKeys: [tradeEventKey(activity)],
+      });
       continue;
     }
 

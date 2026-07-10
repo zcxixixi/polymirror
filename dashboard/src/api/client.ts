@@ -28,6 +28,7 @@ export function accountApi(path: string): string {
     normalized.startsWith("/api/discover") ||
     normalized.startsWith("/api/auth") ||
     normalized === "/api/accounts" ||
+    normalized === "/api/quality" ||
     normalized.startsWith("/api/leaders/validate") ||
     normalized === "/api/config/reload" ||
     normalized === "/api/settings/proxy/test" ||
@@ -93,12 +94,247 @@ export interface AccountSummary {
   } | null;
   todayVolumeUsd: number;
   todayCopyCount: number;
+  todayRealizedPnl?: number;
+  initialCapitalUsd?: number;
+  cashUsd?: number | null;
+  openCostUsd?: number;
+  openPositions?: number;
   pendingOrders: number;
 }
 
 export interface AccountsResponse {
   accounts: AccountSummary[];
   defaultAccountId: string;
+}
+
+export interface CopyQualityIssue {
+  code:
+    | "healthy"
+    | "no_data"
+    | "not_buying"
+    | "not_selling"
+    | "parameter_filtered"
+    | "cash_occupied"
+    | "risk_limited"
+    | "market_unsettled"
+    | "strategy_losing"
+    | "safety_blocker";
+  severity: "ok" | "info" | "warning" | "danger";
+  label: string;
+  detail: string;
+}
+
+export interface CopyQualitySummary {
+  detected: { buy: number; sell: number; redeem: number; totalTrades: number };
+  copied: { buy: number; sell: number; totalTrades: number };
+  deduped?: { buy: number; sell: number; totalTrades: number };
+  effectiveDetected?: { buy: number; sell: number; totalTrades: number };
+  coverage: { buyPct: number; sellPct: number; tradePct: number };
+  effectiveCoverage?: { buyPct: number; sellPct: number; tradePct: number };
+  skips: {
+    parameterFiltered: number;
+    cashBlocked: number;
+    exposureBlocked: number;
+    sellWithoutLocal: number;
+    noLocalRedeem: number;
+    unresolvedRedeem: number;
+    alreadySeen: number;
+  };
+  copyGap?: {
+    buy: {
+      detected: number;
+      deduped: number;
+      effectiveDetected: number;
+      copied: number;
+      skipped: {
+        parameterFiltered: number;
+        cashBlocked: number;
+        exposureBlocked: number;
+        sellWithoutLocal: number;
+        other: number;
+        total: number;
+      };
+      unclassified: number;
+      copyPct: number;
+      explainedPct: number;
+      topUnclassified?: {
+        tokenId: string;
+        detected: number;
+        deduped: number;
+        copied: number;
+        skipped: number;
+        unclassified: number;
+        lastSkipReason: string | null;
+      }[];
+    };
+    sell: {
+      detected: number;
+      deduped: number;
+      effectiveDetected: number;
+      copied: number;
+      skipped: {
+        parameterFiltered: number;
+        cashBlocked: number;
+        exposureBlocked: number;
+        sellWithoutLocal: number;
+        other: number;
+        total: number;
+      };
+      unclassified: number;
+      copyPct: number;
+      explainedPct: number;
+      topUnclassified?: {
+        tokenId: string;
+        detected: number;
+        deduped: number;
+        copied: number;
+        skipped: number;
+        unclassified: number;
+        lastSkipReason: string | null;
+      }[];
+    };
+  };
+  redeem: { count: number; payoutUsd: number; pnlUsd: number };
+  open: { costUsd: number; positions: number; cashUsd: number; exposurePct: number };
+  primaryIssue: CopyQualityIssue;
+  notes: string[];
+  marketPnl: {
+    conditionId: string | null;
+    title: string | null;
+    slug: string | null;
+    redeemCount: number;
+    payoutUsd: number;
+    pnlUsd: number;
+  }[];
+}
+
+export type ProfitDependencyIssue =
+  | "diversified"
+  | "concentrated"
+  | "no_profit"
+  | "insufficient_data";
+
+export interface PerformanceSummary {
+  tradeCount: number;
+  winCount: number;
+  lossCount: number;
+  flatCount: number;
+  totalPnlUsd: number;
+  grossProfitUsd: number;
+  grossLossUsd: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  payoffRatio: number | null;
+  sharpeRatio: number | null;
+  maxDrawdownUsd: number;
+  maxDrawdownPct: number;
+  largestWinUsd: number;
+  largestLossUsd: number;
+  largestWinContributionPct: number;
+  top3WinContributionPct: number;
+  dependencyIssue: ProfitDependencyIssue;
+  equityStabilityPct: number;
+  recent: {
+    sinceMs: number | null;
+    tradeCount: number;
+    pnlUsd: number;
+    winRatePct: number;
+    profitFactor: number | null;
+  };
+}
+
+export type ProfitabilityGateGrade =
+  | "live_candidate"
+  | "candidate"
+  | "watch"
+  | "reject";
+
+export interface ProfitabilityGateAssessment {
+  grade: ProfitabilityGateGrade;
+  passed: boolean;
+  score: number;
+  blockers: string[];
+  warnings: string[];
+  sample: {
+    settledTrades: number;
+    copyTrades: number;
+    recentSettledTrades: number;
+  };
+  metrics: {
+    realizedPnlUsd: number;
+    sharpeRatio: number | null;
+    profitFactor: number | null;
+    winRatePct: number;
+    payoffRatio: number | null;
+    maxDrawdownPct: number;
+    dependencyIssue: ProfitDependencyIssue | string;
+    equityStabilityPct: number;
+    recentPnlUsd: number;
+    recentProfitFactor: number | null;
+  };
+}
+
+export interface QualityAccountReport {
+  accountId: string;
+  label?: string;
+  enabled: boolean;
+  previewMode: boolean;
+  exists: boolean;
+  enabledLeaderCount?: number;
+  copyingActive?: boolean;
+  cashUsd?: number;
+  openCostUsd?: number;
+  openPositions?: number;
+  realizedPnlUsd?: number;
+  copyCount?: number;
+  redeemCount?: number;
+  skipCount?: number;
+  errorCount?: number;
+  cashReplayDeltaUsd?: number;
+  capitalDeltaUsd?: number;
+  pendingOrderCount?: number;
+  liveOrderIntentCount?: number;
+  copyQuality?: CopyQualitySummary;
+  performance?: PerformanceSummary;
+  profitabilityGate?: ProfitabilityGateAssessment;
+  error?: string;
+}
+
+export interface QualityResponse {
+  generatedAt: string;
+  windowMinutes: number;
+  reports: QualityAccountReport[];
+  summary: {
+    totalAccounts: number;
+    enabledAccounts: number;
+    activeCopyAccounts?: number;
+    settleOnlyAccounts?: number;
+    issueCounts: Record<string, number>;
+    gateCounts?: Record<string, number>;
+    copyGap?: {
+      accountsWithUnclassified: number;
+      unclassifiedBuy: number;
+      unclassifiedSell: number;
+      unclassifiedTotal: number;
+    };
+    activeIssueCounts?: Record<string, number>;
+    activeGateCounts?: Record<string, number>;
+    activeCopyGap?: {
+      accountsWithUnclassified: number;
+      unclassifiedBuy: number;
+      unclassifiedSell: number;
+      unclassifiedTotal: number;
+    };
+    freshActiveCopyGap?: {
+      windowMinutes: number;
+      copyGap: {
+        accountsWithUnclassified: number;
+        unclassifiedBuy: number;
+        unclassifiedSell: number;
+        unclassifiedTotal: number;
+      };
+    };
+  };
 }
 
 export interface StatusResponse {

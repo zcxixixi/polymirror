@@ -21,6 +21,7 @@ import {
   type NormalizedConfigDocument,
 } from "../config/write.js";
 import { assertLiveTradingAllowed, assertLiveTradingForAccounts } from "../engine/risk.js";
+import { migrateExistingPreviewToLiveDb } from "../engine/mode-transition.js";
 import { applyProxyFromYaml } from "../util/proxy.js";
 
 export interface AccountApiContext {
@@ -77,6 +78,10 @@ export class AccountManager {
         wallet: def.config.wallet,
         app: { ...def.config.app, leaders: resolvedLeaders },
       };
+
+      if (!config.app.global.previewMode) {
+        migrateExistingPreviewToLiveDb(def.id);
+      }
 
       const store = new StateStore(def.dbPath);
       runtimes.push({
@@ -166,6 +171,9 @@ export class AccountManager {
       let rt = this.runtimes.get(def.id);
       const previewMode = config.app.global.previewMode;
       const dbPath = resolveAccountDbPath(def.id, previewMode);
+      if (!previewMode) {
+        migrateExistingPreviewToLiveDb(def.id);
+      }
 
       if (!rt) {
         rt = {
@@ -223,6 +231,12 @@ export class AccountManager {
   buildAccountsSummary() {
     return this.list().map((rt) => {
       const today = rt.store.getTodayStats();
+      const initialCapitalUsd = rt.config.app.global.risk.startingCapitalUsd;
+      const positionSummary = rt.store.getOpenPositionSummary();
+      const todayRealizedPnl = today?.realizedPnl ?? rt.store.getDailyRealizedPnl();
+      const cashUsd = rt.config.app.global.previewMode
+        ? rt.store.readCashBalance(initialCapitalUsd)
+        : null;
       return {
         id: rt.id,
         label: rt.label,
@@ -237,6 +251,11 @@ export class AccountManager {
         lastPoll: rt.health.lastPollResult,
         todayVolumeUsd: today?.volumeUsd ?? rt.store.getDailyVolumeUsd(),
         todayCopyCount: today?.copyCount ?? 0,
+        todayRealizedPnl,
+        initialCapitalUsd,
+        cashUsd,
+        openCostUsd: positionSummary.openCostUsd,
+        openPositions: positionSummary.openPositions,
         pendingOrders: rt.store.listPendingOrders().length,
       };
     });

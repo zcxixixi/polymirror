@@ -50,14 +50,27 @@ describe("liquidateLeaderPositions", () => {
   });
 
   it("sells preview positions and clears local tracking", async () => {
-    store.applyCopyFill("whale", "token-abc", "BUY", 10, 0.5);
+    store.recordCopySuccess({
+      tradeKey: "seed-buy",
+      leaderId: "whale",
+      tokenId: "token-abc",
+      side: "BUY",
+      filledShares: 10,
+      price: 0.5,
+      filledUsd: 5,
+      auditReason: "seed buy",
+      preview: true,
+      cashInitialUsd: 20,
+    });
 
     const config = previewRuntimeConfig();
+    config.app.global.risk.startingCapitalUsd = 20;
     const result = await liquidateLeaderPositions(config, store, "whale");
 
     expect(result.attempted).toBe(1);
     expect(result.closed).toBe(1);
     expect(store.getPosition("whale", "token-abc")).toBe(0);
+    expect(store.getCashBalance(20)).toBe(20);
 
     const audits = store.listAuditLog({ limit: 10, offset: 0, leaderId: "whale" }).items;
     expect(audits.some((a) => a.action === "COPY" && a.side === "SELL")).toBe(true);

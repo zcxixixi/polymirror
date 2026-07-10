@@ -5,7 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "polymirror": "dist/index.js"
+    "polymirror": "dist/index.js",
+    "polymirror-preview-report": "dist/report-preview-accounts.js",
+    "polymirror-preview-collect": "dist/report-preview-collector.js"
   },
   "scripts": {
     "build": "tsc && npm run build:dashboard",
@@ -16,10 +18,16 @@
     "dev:dashboard": "npm run dev --prefix dashboard",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "postinstall": "tsx scripts/patch-polymarket-client.mts",
+    "postinstall": "node scripts/patch-polymarket-client.mjs",
     "audit": "npm audit --audit-level=critical",
     "docker:build": "docker build -t polymirror:1.0.0 .",
-    "place-order": "tsx scripts/place-order.mts"
+    "place-order": "tsx scripts/place-order.mts",
+    "preview:report": "node dist/report-preview-accounts.js",
+    "preview:db-digest": "node dist/report-preview-db-digest.js",
+    "preview:summary": "node dist/report-preview-summary.js",
+    "preview:prune-audit": "node dist/prune-preview-audit.js",
+    "preview:collect": "node dist/report-preview-collector.js",
+    "live:probe": "node dist/report-live-probe.js"
   },
   "keywords": [
     "polymarket",
@@ -28,12 +36,12 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
     "@ethersproject/wallet": "^5.7.0",
     "@polymarket/client": "^0.1.0-beta.7",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.11.1",
     "dotenv": "^16.4.0",
     "ethers": "^5.8.0",
     "ethers-v5": "npm:ethers@^5.8.0",

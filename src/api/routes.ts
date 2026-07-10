@@ -41,6 +41,7 @@ import { createAccount, updateAccount } from "./accounts.js";
 import { buildAccountPnlSnapshot, parsePnlRange } from "./pnl.js";
 import { cancelPendingOrder } from "./orders.js";
 import { deleteLeader, findLeaderIdForTrader } from "./leaders.js";
+import { readPreviewAccountReport } from "../sim/preview-report.js";
 
 export interface ApiContext {
   manager: AccountManager;
@@ -115,6 +116,10 @@ export async function handleApiRequest(
         defaultAccountId: ctx.manager.defaultAccountId,
       },
     };
+  }
+
+  if (pathname === "/api/quality" && method === "GET") {
+    return handlePreviewQuality(ctx, searchParams);
   }
 
   if (pathname === "/api/accounts" && method === "POST") {
@@ -221,7 +226,8 @@ export async function handleApiRequest(
   }
 
   if (path === "/api/status") {
-    return { status: healthSnapshot.killSwitchActive ? 503 : 200, body: buildStatus(ctx, actx) };
+    const httpOk = !healthSnapshot.killSwitchActive || healthSnapshot.previewMode;
+    return { status: httpOk ? 200 : 503, body: buildStatus(ctx, actx) };
   }
 
   if (path === "/api/leaders") {
@@ -344,6 +350,139 @@ async function handleAccountPnl(
     const msg = e instanceof Error ? e.message : String(e);
     return { status: 200, body: { error: msg } };
   }
+}
+
+function parseBoundedInt(raw: string | null, fallback: number, min: number, max: number): number {
+  const n = raw ? Number.parseInt(raw, 10) : fallback;
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+function handlePreviewQuality(
+  ctx: ApiContext,
+  searchParams: URLSearchParams
+): { status: number; body: unknown } {
+  const freshCopyGapWindowMinutes = 15;
+  const windowMinutes = parseBoundedInt(searchParams.get("windowMinutes"), 60, 1, 24 * 60);
+  const limit = parseBoundedInt(searchParams.get("limit"), 8, 1, 50);
+  const includeDisabled = searchParams.get("includeDisabled") === "1";
+  const allRuntimes = ctx.manager.list();
+  const reportRuntimes = includeDisabled ? allRuntimes : allRuntimes.filter((rt) => rt.enabled);
+  const runtimeCopyState = (rt: (typeof allRuntimes)[number]) => {
+    const enabledLeaderCount = rt.config.app.leaders.filter((leader) => leader.enabled).length;
+    const copyingActive =
+      rt.enabled &&
+      rt.config.app.global.risk.enableCopyTrading &&
+      enabledLeaderCount > 0;
+    return { enabledLeaderCount, copyingActive };
+  };
+  const buildReports = (runtimes: typeof reportRuntimes, recentWindowMinutes: number) =>
+    runtimes.map((rt) => {
+      const copyState = runtimeCopyState(rt);
+      try {
+        return {
+          ...readPreviewAccountReport({
+            accountId: rt.id,
+            dbPath: rt.dbPath,
+            startingCapitalUsd: rt.config.app.global.risk.startingCapitalUsd,
+            recentWindowMs: recentWindowMinutes * 60_000,
+            limit,
+          }),
+          label: rt.label,
+          enabled: rt.enabled,
+          ...copyState,
+          previewMode: rt.config.app.global.previewMode,
+        };
+      } catch (e) {
+        return {
+          accountId: rt.id,
+          dbPath: rt.dbPath,
+          label: rt.label,
+          enabled: rt.enabled,
+          ...copyState,
+          previewMode: rt.config.app.global.previewMode,
+          exists: false,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
+    });
+  const reports = buildReports(reportRuntimes, windowMinutes);
+  const enabledReports = reports.filter((r) => "enabled" in r && r.enabled);
+  const enabledAccountCount = allRuntimes.filter((rt) => rt.enabled).length;
+  const activeCopyAccountCount = allRuntimes.filter(
+    (rt) => runtimeCopyState(rt).copyingActive
+  ).length;
+  const summarizeQualityReports = (qualityReports: typeof enabledReports) => {
+    const issueCounts = new Map<string, number>();
+    const gateCounts = new Map<string, number>();
+    const copyGap = {
+      accountsWithUnclassified: 0,
+      unclassifiedBuy: 0,
+      unclassifiedSell: 0,
+      unclassifiedTotal: 0,
+    };
+    for (const report of qualityReports) {
+      const code =
+        "copyQuality" in report
+          ? report.copyQuality.primaryIssue.code
+          : "safety_blocker";
+      issueCounts.set(code, (issueCounts.get(code) ?? 0) + 1);
+      const gate =
+        "profitabilityGate" in report && report.profitabilityGate
+          ? report.profitabilityGate.grade
+          : "unknown";
+      gateCounts.set(gate, (gateCounts.get(gate) ?? 0) + 1);
+      if ("copyQuality" in report) {
+        const buy = report.copyQuality.copyGap.buy.unclassified;
+        const sell = report.copyQuality.copyGap.sell.unclassified;
+        if (buy + sell > 0) copyGap.accountsWithUnclassified++;
+        copyGap.unclassifiedBuy += buy;
+        copyGap.unclassifiedSell += sell;
+        copyGap.unclassifiedTotal += buy + sell;
+      }
+    }
+    return {
+      issueCounts: Object.fromEntries(issueCounts.entries()),
+      gateCounts: Object.fromEntries(gateCounts.entries()),
+      copyGap,
+    };
+  };
+  const enabledSummary = summarizeQualityReports(enabledReports);
+  const activeSummary = summarizeQualityReports(
+    enabledReports.filter((report) => report.copyingActive)
+  );
+  const freshEnabledReports = buildReports(
+    allRuntimes.filter((rt) => rt.enabled),
+    freshCopyGapWindowMinutes
+  ).filter((report) => "enabled" in report && report.enabled);
+  const freshActiveSummary = summarizeQualityReports(
+    freshEnabledReports.filter((report) => report.copyingActive)
+  );
+
+  return {
+    status: 200,
+    body: {
+      generatedAt: new Date().toISOString(),
+      windowMinutes,
+      includeDisabled,
+      reports,
+      summary: {
+        totalAccounts: allRuntimes.length,
+        enabledAccounts: enabledAccountCount,
+        activeCopyAccounts: activeCopyAccountCount,
+        settleOnlyAccounts: Math.max(0, enabledAccountCount - activeCopyAccountCount),
+        issueCounts: enabledSummary.issueCounts,
+        gateCounts: enabledSummary.gateCounts,
+        copyGap: enabledSummary.copyGap,
+        activeIssueCounts: activeSummary.issueCounts,
+        activeGateCounts: activeSummary.gateCounts,
+        activeCopyGap: activeSummary.copyGap,
+        freshActiveCopyGap: {
+          windowMinutes: freshCopyGapWindowMinutes,
+          copyGap: freshActiveSummary.copyGap,
+        },
+      },
+    },
+  };
 }
 
 async function handleWalletProfile(

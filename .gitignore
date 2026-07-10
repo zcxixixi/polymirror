@@ -59,6 +59,8 @@ pnpm-debug.log*
 .cache/
 .vite/
 .vitest/
+__pycache__/
+*.py[cod]
 coverage/
 *.lcov
 .eslintcache

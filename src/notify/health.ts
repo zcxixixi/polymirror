@@ -27,6 +27,7 @@ export const healthSnapshot: HealthSnapshot = {
 
 export function syncAggregateHealth(
   accounts: {
+    enabled?: boolean;
     health: {
       previewMode: boolean;
       lastPollAt: number | null;
@@ -41,13 +42,15 @@ export function syncAggregateHealth(
 ): void {
   if (accounts.length === 0) return;
 
-  healthSnapshot.previewMode = accounts.every((a) => a.health.previewMode);
-  healthSnapshot.killSwitchActive = accounts.some((a) => a.health.killSwitchActive);
-  healthSnapshot.enabledLeaders = accounts.flatMap((a) => a.health.enabledLeaders);
-  healthSnapshot.pendingOrders = accounts.reduce((s, a) => s + a.health.pendingOrders, 0);
-  healthSnapshot.walletDrifts = accounts.flatMap((a) => a.health.walletDrifts);
+  const enabledAccounts = accounts.filter((a) => a.enabled !== false);
 
-  const withPoll = accounts
+  healthSnapshot.previewMode = enabledAccounts.every((a) => a.health.previewMode);
+  healthSnapshot.killSwitchActive = enabledAccounts.some((a) => a.health.killSwitchActive);
+  healthSnapshot.enabledLeaders = enabledAccounts.flatMap((a) => a.health.enabledLeaders);
+  healthSnapshot.pendingOrders = enabledAccounts.reduce((s, a) => s + a.health.pendingOrders, 0);
+  healthSnapshot.walletDrifts = enabledAccounts.flatMap((a) => a.health.walletDrifts);
+
+  const withPoll = enabledAccounts
     .filter((a) => a.health.lastPollAt)
     .sort((a, b) => (b.health.lastPollAt ?? 0) - (a.health.lastPollAt ?? 0));
   const latest = withPoll[0];
@@ -66,7 +69,5 @@ export function updateHealthAfterPoll(
   healthSnapshot.lastPollAt = Date.now();
   healthSnapshot.lastPollResult = result;
   healthSnapshot.killSwitchActive = killSwitchActive;
-  if (result.errors.length > 0) {
-    healthSnapshot.lastError = result.errors[0] ?? null;
-  }
+  healthSnapshot.lastError = result.errors[0] ?? null;
 }

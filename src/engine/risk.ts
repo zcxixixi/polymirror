@@ -70,6 +70,18 @@ export class RiskGate {
     return { allow: true };
   }
 
+  canSpendPreviewCash(usd: number): RiskCheckResult {
+    if (!this.global.previewMode) return { allow: true };
+    const cash = this.store.getCashBalance(this.global.risk.startingCapitalUsd);
+    if (usd > cash) {
+      return {
+        allow: false,
+        reason: `preview cash $${cash.toFixed(2)} < order $${usd.toFixed(2)}`,
+      };
+    }
+    return { allow: true };
+  }
+
   canAddTokenExposure(
     tokenId: string,
     additionalUsd: number,

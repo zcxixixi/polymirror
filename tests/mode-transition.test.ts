@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { AccountManager } from "../src/accounts/manager.js";
 import { StateStore } from "../src/state/store.js";
 import {
   flushLivePendingBeforePreview,
@@ -65,6 +66,7 @@ function minimalConfig(previewMode: boolean, enableCopy = true): RuntimeConfig {
           networkRetryLimit: 3,
           gtcFillTimeoutMs: 10_000,
           pendingOrderMaxAgeHours: 48,
+          autoRedeemOnChain: true,
         },
         conflict: { mode: "priority_leader", priority: [] },
         notify: {
@@ -163,6 +165,81 @@ describe("flushLivePendingBeforePreview", () => {
 });
 
 describe("migratePreviewToLiveDb", () => {
+  it("migrates existing preview state when live account is loaded directly from config", async () => {
+    const previousCwd = process.cwd();
+    const previousPrivateKey = process.env.POLYMARKET_PRIVATE_KEY;
+    const previousAddress = process.env.POLYMARKET_ADDRESS;
+    const root = mkdtempSync(join(tmpdir(), "pm-live-start-"));
+
+    try {
+      process.chdir(root);
+      process.env.POLYMARKET_PRIVATE_KEY = "0x" + "1".repeat(64);
+      process.env.POLYMARKET_ADDRESS = "0x" + "2".repeat(40);
+      writeFileSync(
+        "config.yaml",
+        [
+          "defaults:",
+          "  global:",
+          "    risk:",
+          "      enable_copy_trading: true",
+          "      daily_loss_cap_pct: 20",
+          "      starting_capital_usd: 200",
+          "      max_daily_volume_usd: 200",
+          "      max_open_markets: 10",
+          "      max_order_usd: 20",
+          "      min_order_usd: 1",
+          "      slippage_tolerance: 0.03",
+          "      max_position_per_token_usd: 0",
+          "      sync_wallet_balance: false",
+          "    execution:",
+          "      order_type: GTC",
+          "      retry_limit: 3",
+          "      network_retry_limit: 3",
+          "      gtc_fill_timeout_ms: 10000",
+          "      pending_order_max_age_hours: 48",
+          "    conflict:",
+          "      mode: priority_leader",
+          "      priority: []",
+          "accounts:",
+          "  - id: liveacct",
+          "    enabled: true",
+          "    global:",
+          "      preview_mode: false",
+          "    leaders: []",
+          "",
+        ].join("\n")
+      );
+
+      const previewStore = new StateStore(resolveAccountDbPath("liveacct", true));
+      previewStore.markSeen("preview-trade-key", "whale");
+      previewStore.applyCopyFill("whale", "preview-token", "BUY", 7, 0.5);
+      previewStore.close();
+
+      const manager = await AccountManager.create("config.yaml");
+      try {
+        const live = manager.require("liveacct");
+        expect(live.dbPath).toBe(resolveAccountDbPath("liveacct", false));
+        expect(live.store.hasSeen("preview-trade-key")).toBe(true);
+        expect(live.store.getPosition("whale", "preview-token")).toBe(7);
+      } finally {
+        manager.closeAll();
+      }
+    } finally {
+      process.chdir(previousCwd);
+      if (previousPrivateKey === undefined) {
+        delete process.env.POLYMARKET_PRIVATE_KEY;
+      } else {
+        process.env.POLYMARKET_PRIVATE_KEY = previousPrivateKey;
+      }
+      if (previousAddress === undefined) {
+        delete process.env.POLYMARKET_ADDRESS;
+      } else {
+        process.env.POLYMARKET_ADDRESS = previousAddress;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("copies preview dedup keys and positions into live db", () => {
     const previewDir = mkdtempSync(join(tmpdir(), "pm-preview-"));
     const previewStore = new StateStore(join(previewDir, "preview.db"));

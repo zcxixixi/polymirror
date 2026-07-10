@@ -67,6 +67,8 @@ export interface ExecutionConfig {
   gtcFillTimeoutMs: number;
   /** Drop pending GTC orders older than this (hours). */
   pendingOrderMaxAgeHours: number;
+  /** Live: submit on-chain redeem before clearing local settled positions. */
+  autoRedeemOnChain: boolean;
 }
 
 export interface ConflictConfig {

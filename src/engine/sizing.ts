@@ -65,7 +65,17 @@ export function calculateOrderSize(
   activity: Activity,
   store?: StateStore
 ): OrderSizeResult {
-  const price = activity.price ?? 0;
+  const rawPrice = activity.price;
+  const price = rawPrice ?? 0;
+  if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+    return {
+      finalUsd: 0,
+      finalShares: 0,
+      reasoning: `invalid price ${rawPrice === undefined ? "undefined" : String(rawPrice)}`,
+      belowMinimum: true,
+    };
+  }
+
   const leaderSize = activity.size ?? 0;
   const leaderNotional = leaderSize * price;
 
@@ -140,8 +150,11 @@ export function calculateOrderSize(
     };
   }
 
-  const shares = price > 0 ? baseUsd / price : leaderSize;
-  const roundedShares = Math.max(0.01, Math.round(shares * 100) / 100);
+  const shares = baseUsd / price;
+  let roundedShares = Math.max(0.01, Math.round(shares * 100) / 100);
+  if (roundedShares * price < minOrder) {
+    roundedShares = Math.max(0.01, Math.ceil((minOrder / price) * 100) / 100);
+  }
 
   return {
     finalUsd: roundedShares * price,

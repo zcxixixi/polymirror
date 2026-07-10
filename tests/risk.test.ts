@@ -33,6 +33,7 @@ const globalBase: GlobalConfig = {
     networkRetryLimit: 3,
     gtcFillTimeoutMs: 10000,
     pendingOrderMaxAgeHours: 48,
+    autoRedeemOnChain: true,
   },
   conflict: { mode: "priority_leader", priority: [] },
   notify: {

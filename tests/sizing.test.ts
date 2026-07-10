@@ -34,6 +34,7 @@ const global: GlobalConfig = {
     networkRetryLimit: 3,
     gtcFillTimeoutMs: 10000,
     pendingOrderMaxAgeHours: 48,
+    autoRedeemOnChain: true,
   },
   conflict: { mode: "priority_leader", priority: [] },
   notify: {
@@ -98,6 +99,52 @@ describe("calculateOrderSize", () => {
       activity({ size: 1, price: 0.1 })
     );
     expect(r.belowMinimum).toBe(true);
+  });
+
+  it("keeps rounded share orders at or above the min order notional", () => {
+    const r = calculateOrderSize(
+      leader({ strategy: { type: "FIXED", copySize: 1 } }),
+      global,
+      activity({ size: 10, price: 0.99 })
+    );
+
+    expect(r.belowMinimum).toBe(false);
+    expect(r.finalUsd).toBeGreaterThanOrEqual(1);
+  });
+
+  it.each([
+    ["FIXED", 1],
+    ["PERCENTAGE", 10],
+    ["ADAPTIVE", 10],
+  ] as const)("rejects invalid prices for %s sizing", (type, copySize) => {
+    for (const price of [0, undefined, -1, 1, 1.5, Number.NaN]) {
+      const r = calculateOrderSize(
+        leader({ strategy: { type, copySize } }),
+        global,
+        activity({ price })
+      );
+
+      expect(r.belowMinimum).toBe(true);
+      expect(r.finalUsd).toBe(0);
+      expect(r.finalShares).toBe(0);
+      expect(r.reasoning).toContain("invalid price");
+    }
+  });
+
+  it.each([
+    ["FIXED", 5],
+    ["PERCENTAGE", 10],
+    ["ADAPTIVE", 10],
+  ] as const)("keeps normal %s sizing behavior", (type, copySize) => {
+    const r = calculateOrderSize(
+      leader({ strategy: { type, copySize } }),
+      global,
+      activity({ size: 100, price: 0.5 })
+    );
+
+    expect(r.belowMinimum).toBe(false);
+    expect(r.finalUsd).toBeGreaterThan(0);
+    expect(r.finalShares).toBeGreaterThan(0);
   });
 });
 

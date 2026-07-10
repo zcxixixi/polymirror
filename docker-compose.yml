@@ -12,6 +12,12 @@ services:
       # RW: account API persists wallet keys to .env
       - ./.env:/app/.env:rw
       - ./data:/app/data
+      - ./reports:/app/reports
     environment:
       - HEALTH_PORT=8080
       - HEALTH_BIND=0.0.0.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

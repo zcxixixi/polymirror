@@ -20,6 +20,8 @@ export interface PlaceOrderResult {
   orderId?: string;
   preview: boolean;
   error?: string;
+  /** Price used for execution/accounting after CLOB tick rounding. */
+  executionPrice?: number;
   filledShares: number;
   filledUsd: number;
   orderStatus?: string;
@@ -90,6 +92,7 @@ export class ClobExecutor {
       return {
         preview: true,
         orderId: `preview-${req.tokenId.slice(0, 8)}-${Date.now()}`,
+        executionPrice: req.price,
         filledShares: req.size,
         filledUsd: notional,
         orderStatus: "PREVIEW",
@@ -133,6 +136,7 @@ export class ClobExecutor {
         if (postError) {
           return {
             preview: false,
+            executionPrice: price,
             error: postError,
             filledShares: 0,
             filledUsd: 0,
@@ -160,6 +164,7 @@ export class ClobExecutor {
               if (recovered?.orderId) return recovered;
               return {
                 preview: false,
+                executionPrice: price,
                 error: "Partial fill without order ID — cannot track remaining GTC",
                 filledShares: shares,
                 filledUsd:
@@ -170,6 +175,7 @@ export class ClobExecutor {
             }
             return {
               preview: false,
+              executionPrice: price,
               filledShares: shares,
               filledUsd:
                 immFill.usd > 0 ? immFill.usd : Math.round(shares * price * 100) / 100,
@@ -206,6 +212,7 @@ export class ClobExecutor {
         return {
           preview: false,
           orderId,
+          executionPrice: price,
           filledShares: fill.shares,
           filledUsd: fill.usd,
           orderStatus: fill.status,
@@ -216,12 +223,24 @@ export class ClobExecutor {
         if (attempt < retries) {
           const recovered = await this.findMatchingOpenOrder(req, price);
           if (recovered) return recovered;
-          await sleep(500 * (attempt + 1));
-          continue;
+          logError("Order submit failed with uncertain outcome", {
+            token: req.tokenId.slice(0, 12),
+            error: msg,
+          });
+          return {
+            preview: false,
+            executionPrice: price,
+            error: "submit failed with uncertain outcome - will not retry",
+            orderStatus: msg,
+            filledShares: 0,
+            filledUsd: 0,
+            pendingRemaining: 0,
+          };
         }
         logError("Order failed", { token: req.tokenId.slice(0, 12), error: msg });
         return {
           preview: false,
+          executionPrice: price,
           error: msg,
           filledShares: 0,
           filledUsd: 0,
@@ -336,6 +355,7 @@ export class ClobExecutor {
         return {
           preview: false,
           orderId,
+          executionPrice: matchPrice,
           filledShares: Math.min(sizeMatched, req.size),
           filledUsd: Math.min(sizeMatched, req.size) * matchPrice,
           orderStatus: `${status} (recovered)`,

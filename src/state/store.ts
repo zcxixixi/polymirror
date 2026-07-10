@@ -1,10 +1,11 @@
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 
 const DEFAULT_DB = "data/polymirror.db";
 
-export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR";
+export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 
 export interface PendingOrderRow {
   orderId: string;
@@ -16,6 +17,20 @@ export interface PendingOrderRow {
   filledShares: number;
   tradeKey: string;
   reasoning: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface LiveOrderIntentRow {
+  intentId: string;
+  leaderId: string;
+  tokenId: string;
+  side: "BUY" | "SELL";
+  price: number;
+  size: number;
+  tradeKeys: string[];
+  reasoning: string;
+  market?: TokenMarketEntry;
   createdAt: number;
   updatedAt: number;
 }
@@ -40,6 +55,63 @@ export interface PositionRow {
   avgEntryPrice: number;
 }
 
+export interface PositionWithMarketRow extends PositionRow {
+  conditionId: string;
+  title: string | null;
+  slug: string | null;
+  outcome: string | null;
+}
+
+export interface OpenConditionRow {
+  leaderId: string;
+  conditionId: string;
+  title: string | null;
+  slug: string | null;
+  positionCount: number;
+  costUsd: number;
+}
+
+export interface TokenMarketEntry {
+  tokenId: string;
+  conditionId: string;
+  title?: string;
+  slug?: string;
+  outcome?: string;
+}
+
+export interface SettleConditionEntry {
+  leaderId: string;
+  conditionId: string;
+  winnerTokenIds: string[];
+  sourceKeys?: string[];
+  cashInitialUsd?: number;
+  title?: string;
+  slug?: string;
+  preview: boolean;
+}
+
+export interface SettleConditionResult {
+  closedPositions: number;
+  payoutUsd: number;
+  costUsd: number;
+  realizedPnl: number;
+}
+
+export interface RecordRedeemSettlementEntry {
+  tradeKey: string;
+  leaderId: string;
+  tokenId: string;
+  payoutUsd: number;
+  preview: boolean;
+  cashInitialUsd?: number;
+  auditReason?: string;
+}
+
+export interface CopyFillResult {
+  appliedShares: number;
+  realizedPnl: number;
+}
+
 export interface DailyStatsRow {
   date: string;
   volumeUsd: number;
@@ -55,6 +127,57 @@ export interface LeaderDailyStatsRow {
 
 function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+function roundUsd(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function roundCashUsd(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function uniqueTradeKeys(keys: string[]): string[] {
+  return [...new Set(keys.map((k) => k.trim()).filter(Boolean))];
+}
+
+function makeLiveOrderIntentId(leaderId: string, tradeKeys: string[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ leaderId, tradeKeys: uniqueTradeKeys(tradeKeys) }))
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function appliedFillUsd(
+  side: "BUY" | "SELL",
+  requestedShares: number,
+  reportedUsd: number,
+  appliedShares: number,
+  price: number
+): number {
+  if (side === "BUY") return reportedUsd;
+  if (appliedShares <= 0) return 0;
+  if (requestedShares > 0 && Number.isFinite(reportedUsd)) {
+    return reportedUsd * (appliedShares / requestedShares);
+  }
+  return appliedShares * price;
+}
+
+function parseMarketJson(value: string | null): TokenMarketEntry | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as Partial<TokenMarketEntry>;
+    if (!parsed.tokenId || !parsed.conditionId) return undefined;
+    return {
+      tokenId: parsed.tokenId,
+      conditionId: parsed.conditionId,
+      title: parsed.title,
+      slug: parsed.slug,
+      outcome: parsed.outcome,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export class StateStore {
@@ -94,6 +217,10 @@ export class StateStore {
         reason TEXT,
         preview INTEGER NOT NULL DEFAULT 1
       );
+      CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_action_reason ON audit_log(action, reason);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_action_id ON audit_log(action, id);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_ts_action ON audit_log(ts, action);
       CREATE TABLE IF NOT EXISTS daily_stats (
         date TEXT PRIMARY KEY,
         volume_usd REAL NOT NULL DEFAULT 0,
@@ -127,6 +254,33 @@ export class StateStore {
         updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_pending_orders_leader ON pending_orders(leader_id);
+      CREATE TABLE IF NOT EXISTS live_order_intents (
+        intent_id TEXT PRIMARY KEY,
+        leader_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL NOT NULL,
+        trade_keys TEXT NOT NULL,
+        reasoning TEXT NOT NULL DEFAULT '',
+        market_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_live_order_intents_created ON live_order_intents(created_at);
+      CREATE TABLE IF NOT EXISTS cash_ledger (
+        scope TEXT PRIMARY KEY,
+        cash_usd REAL NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS token_markets (
+        token_id TEXT PRIMARY KEY,
+        condition_id TEXT NOT NULL,
+        title TEXT,
+        slug TEXT,
+        outcome TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_markets_condition ON token_markets(condition_id);
     `);
     this.migrate();
   }
@@ -218,6 +372,51 @@ export class StateStore {
     return row?.shares ?? 0;
   }
 
+  getCashBalance(initialUsd: number): number {
+    const scope = "preview";
+    const row = this.db
+      .prepare("SELECT cash_usd FROM cash_ledger WHERE scope = ?")
+      .get(scope) as { cash_usd: number } | undefined;
+    if (row) return row.cash_usd;
+
+    const initialCash = roundCashUsd(initialUsd);
+    this.db
+      .prepare("INSERT INTO cash_ledger (scope, cash_usd, updated_at) VALUES (?, ?, ?)")
+      .run(scope, initialCash, Date.now());
+    return initialCash;
+  }
+
+  readCashBalance(initialUsd: number): number {
+    const row = this.db
+      .prepare("SELECT cash_usd FROM cash_ledger WHERE scope = ?")
+      .get("preview") as { cash_usd: number } | undefined;
+    return row?.cash_usd ?? roundCashUsd(initialUsd);
+  }
+
+  getOpenPositionSummary(): { openPositions: number; openCostUsd: number } {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS openPositions,
+                COALESCE(SUM(shares * avg_entry_price), 0) AS openCostUsd
+         FROM positions
+         WHERE shares > 0`
+      )
+      .get() as { openPositions: number; openCostUsd: number };
+    return {
+      openPositions: row.openPositions,
+      openCostUsd: roundUsd(row.openCostUsd),
+    };
+  }
+
+  adjustCash(deltaUsd: number, initialUsd: number): number {
+    const current = this.getCashBalance(initialUsd);
+    const next = roundCashUsd(current + deltaUsd);
+    this.db
+      .prepare("UPDATE cash_ledger SET cash_usd = ?, updated_at = ? WHERE scope = ?")
+      .run(next, Date.now(), "preview");
+    return next;
+  }
+
   /** Cost basis (USD) of a leader's position: shares × average entry price. */
   getPositionCostUsd(leaderId: string, tokenId: string): number {
     const row = this.db
@@ -240,14 +439,14 @@ export class StateStore {
       .run(leaderId, tokenId, next);
   }
 
-  /** Update position after a copy; returns realized PnL on SELL. */
+  /** Update position after a copy; SELL may apply fewer shares than requested. */
   applyCopyFill(
     leaderId: string,
     tokenId: string,
     side: "BUY" | "SELL",
     shares: number,
     price: number
-  ): number {
+  ): CopyFillResult {
     const row = this.db
       .prepare("SELECT shares, avg_entry_price FROM positions WHERE leader_id = ? AND token_id = ?")
       .get(leaderId, tokenId) as { shares: number; avg_entry_price: number } | undefined;
@@ -266,7 +465,7 @@ export class StateStore {
              avg_entry_price = excluded.avg_entry_price`
         )
         .run(leaderId, tokenId, nextShares, nextAvg);
-      return 0;
+      return { appliedShares: shares, realizedPnl: 0 };
     }
 
     const sold = Math.min(current, shares);
@@ -281,7 +480,7 @@ export class StateStore {
       )
       .run(leaderId, tokenId, nextShares, nextShares > 0 ? avg : 0);
     if (pnl !== 0) this.addRealizedPnl(pnl);
-    return pnl;
+    return { appliedShares: sold, realizedPnl: pnl };
   }
 
   countOpenMarkets(): number {
@@ -311,6 +510,211 @@ export class StateStore {
       .prepare("SELECT DISTINCT token_id FROM positions WHERE shares > 0")
       .all() as { token_id: string }[];
     return rows.map((r) => r.token_id);
+  }
+
+  upsertTokenMarket(entry: TokenMarketEntry): void {
+    if (!entry.tokenId || !entry.conditionId) return;
+    this.db
+      .prepare(
+        `INSERT INTO token_markets (token_id, condition_id, title, slug, outcome)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(token_id) DO UPDATE SET
+           condition_id = excluded.condition_id,
+           title = COALESCE(excluded.title, token_markets.title),
+           slug = COALESCE(excluded.slug, token_markets.slug),
+           outcome = COALESCE(excluded.outcome, token_markets.outcome)`
+      )
+      .run(
+        entry.tokenId,
+        entry.conditionId,
+        entry.title ?? null,
+        entry.slug ?? null,
+        entry.outcome ?? null
+      );
+  }
+
+  listPositionsByCondition(leaderId: string, conditionId: string): PositionWithMarketRow[] {
+    return this.db
+      .prepare(
+        `SELECT p.leader_id AS leaderId, p.token_id AS tokenId, p.shares,
+                p.avg_entry_price AS avgEntryPrice, m.condition_id AS conditionId,
+                m.title, m.slug, m.outcome
+         FROM positions p
+         JOIN token_markets m ON m.token_id = p.token_id
+         WHERE p.leader_id = ? AND m.condition_id = ? AND p.shares > 0
+         ORDER BY p.token_id`
+      )
+      .all(leaderId, conditionId) as PositionWithMarketRow[];
+  }
+
+  listOpenConditions(): OpenConditionRow[] {
+    return this.db
+      .prepare(
+        `SELECT p.leader_id AS leaderId, m.condition_id AS conditionId,
+                MAX(m.title) AS title, MAX(m.slug) AS slug,
+                COUNT(*) AS positionCount,
+                COALESCE(SUM(p.shares * p.avg_entry_price), 0) AS costUsd
+         FROM positions p
+         JOIN token_markets m ON m.token_id = p.token_id
+         WHERE p.shares > 0
+         GROUP BY p.leader_id, m.condition_id
+         ORDER BY p.leader_id, m.condition_id`
+      )
+      .all() as OpenConditionRow[];
+  }
+
+  settleCondition(entry: SettleConditionEntry): SettleConditionResult {
+    const winners = new Set(entry.winnerTokenIds);
+    return this.db.transaction(() => {
+      for (const key of [...new Set(entry.sourceKeys ?? [])]) {
+        this.markSeen(key, entry.leaderId);
+      }
+
+      const positions = this.listPositionsByCondition(entry.leaderId, entry.conditionId);
+      const closedPositions = positions.length;
+      const costUsd = roundUsd(
+        positions.reduce((sum, p) => sum + p.shares * p.avgEntryPrice, 0)
+      );
+      const payoutUsd = roundUsd(
+        positions.reduce((sum, p) => sum + (winners.has(p.tokenId) ? p.shares : 0), 0)
+      );
+      const realizedPnl = roundUsd(payoutUsd - costUsd);
+
+      for (const pos of positions) {
+        this.db
+          .prepare(
+            `UPDATE positions
+             SET shares = 0, avg_entry_price = 0
+             WHERE leader_id = ? AND token_id = ?`
+          )
+          .run(entry.leaderId, pos.tokenId);
+      }
+
+      if (realizedPnl !== 0) this.addRealizedPnl(realizedPnl);
+      if (entry.cashInitialUsd !== undefined && payoutUsd !== 0) {
+        this.adjustCash(payoutUsd, entry.cashInitialUsd);
+      }
+
+      if (closedPositions > 0) {
+        this.audit({
+          leaderId: entry.leaderId,
+          action: "REDEEM",
+          tokenId: entry.conditionId,
+          side: "REDEEM",
+          size: payoutUsd,
+          price: closedPositions,
+          reason: `settled ${closedPositions} position(s); pnl $${realizedPnl.toFixed(2)}`,
+          preview: entry.preview,
+        });
+      }
+
+      return { closedPositions, payoutUsd, costUsd, realizedPnl };
+    })();
+  }
+
+  recordRedeemSettlement(entry: RecordRedeemSettlementEntry): boolean {
+    return this.db.transaction(() => {
+      if (this.hasSeen(entry.tradeKey)) return false;
+
+      const row = this.db
+        .prepare(
+          `SELECT shares, avg_entry_price AS avgEntryPrice
+           FROM positions
+           WHERE leader_id = ? AND token_id = ? AND shares > 0`
+        )
+        .get(entry.leaderId, entry.tokenId) as
+        | { shares: number; avgEntryPrice: number }
+        | undefined;
+
+      if (!row || row.shares <= 0) {
+        this.markSeen(entry.tradeKey, entry.leaderId);
+        return false;
+      }
+
+      this.markSeen(entry.tradeKey, entry.leaderId);
+      const payoutUsd = roundUsd(entry.payoutUsd);
+      const costUsd = roundUsd(row.shares * row.avgEntryPrice);
+      const realizedPnl = roundUsd(payoutUsd - costUsd);
+
+      this.db
+        .prepare(
+          `UPDATE positions
+           SET shares = 0, avg_entry_price = 0
+           WHERE leader_id = ? AND token_id = ?`
+        )
+        .run(entry.leaderId, entry.tokenId);
+
+      if (realizedPnl !== 0) this.addRealizedPnl(realizedPnl);
+      if (entry.preview && entry.cashInitialUsd !== undefined && payoutUsd !== 0) {
+        this.adjustCash(payoutUsd, entry.cashInitialUsd);
+      }
+
+      this.audit({
+        leaderId: entry.leaderId,
+        action: "REDEEM",
+        tokenId: entry.tokenId,
+        side: "REDEEM",
+        size: payoutUsd,
+        price: row.shares,
+        reason:
+          entry.auditReason ??
+          `settled ${row.shares} shares; pnl $${realizedPnl.toFixed(2)}`,
+        preview: entry.preview,
+      });
+      return true;
+    })();
+  }
+
+  recordTokenSettlement(
+    tokenId: string,
+    payoutPerShare: number,
+    preview: boolean,
+    cashInitialUsd?: number
+  ): number {
+    return this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT leader_id AS leaderId, shares, avg_entry_price AS avgEntryPrice
+           FROM positions
+           WHERE token_id = ? AND shares > 0
+           ORDER BY leader_id`
+        )
+        .all(tokenId) as { leaderId: string; shares: number; avgEntryPrice: number }[];
+
+      let settled = 0;
+      for (const row of rows) {
+        const payoutUsd = roundUsd(row.shares * payoutPerShare);
+        const costUsd = roundUsd(row.shares * row.avgEntryPrice);
+        const realizedPnl = roundUsd(payoutUsd - costUsd);
+
+        this.db
+          .prepare(
+            `UPDATE positions
+             SET shares = 0, avg_entry_price = 0
+             WHERE leader_id = ? AND token_id = ?`
+          )
+          .run(row.leaderId, tokenId);
+
+        if (realizedPnl !== 0) this.addRealizedPnl(realizedPnl);
+        if (preview && cashInitialUsd !== undefined && payoutUsd !== 0) {
+          this.adjustCash(payoutUsd, cashInitialUsd);
+        }
+
+        this.audit({
+          leaderId: row.leaderId,
+          action: "REDEEM",
+          tokenId,
+          side: "REDEEM",
+          size: payoutUsd,
+          price: row.shares,
+          reason: `token settlement payout ${payoutPerShare}; pnl $${realizedPnl.toFixed(2)}`,
+          preview,
+        });
+        settled++;
+      }
+
+      return settled;
+    })();
   }
 
   upsertPendingOrder(entry: {
@@ -389,6 +793,121 @@ export class StateStore {
     return result.changes;
   }
 
+  recordLiveOrderIntent(entry: {
+    tradeKeys: string[];
+    leaderId: string;
+    tokenId: string;
+    side: "BUY" | "SELL";
+    price: number;
+    orderSize: number;
+    auditReason: string;
+    market?: TokenMarketEntry;
+  }): string {
+    const tradeKeys = uniqueTradeKeys(entry.tradeKeys);
+    if (tradeKeys.length === 0) throw new Error("live order intent requires trade keys");
+    const intentId = makeLiveOrderIntentId(entry.leaderId, tradeKeys);
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO live_order_intents
+         (intent_id, leader_id, token_id, side, price, size, trade_keys, reasoning, market_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(intent_id) DO UPDATE SET
+           token_id = excluded.token_id,
+           side = excluded.side,
+           price = excluded.price,
+           size = excluded.size,
+           trade_keys = excluded.trade_keys,
+           reasoning = excluded.reasoning,
+           market_json = excluded.market_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        intentId,
+        entry.leaderId,
+        entry.tokenId,
+        entry.side,
+        entry.price,
+        entry.orderSize,
+        JSON.stringify(tradeKeys),
+        entry.auditReason,
+        entry.market ? JSON.stringify(entry.market) : null,
+        now,
+        now
+      );
+    return intentId;
+  }
+
+  listLiveOrderIntents(): LiveOrderIntentRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT intent_id AS intentId, leader_id AS leaderId, token_id AS tokenId,
+                side, price, size, trade_keys AS tradeKeys, reasoning, market_json AS marketJson,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM live_order_intents ORDER BY created_at ASC`
+      )
+      .all() as Array<
+      Omit<LiveOrderIntentRow, "tradeKeys" | "market" | "side"> & {
+        side: string;
+        tradeKeys: string;
+        marketJson: string | null;
+      }
+    >;
+    return rows.map((r) => {
+      let tradeKeys: string[] = [];
+      try {
+        const parsed = JSON.parse(r.tradeKeys) as unknown;
+        if (Array.isArray(parsed)) tradeKeys = uniqueTradeKeys(parsed.map(String));
+      } catch {
+        tradeKeys = [];
+      }
+      return {
+        intentId: r.intentId,
+        leaderId: r.leaderId,
+        tokenId: r.tokenId,
+        side: r.side === "SELL" ? "SELL" : "BUY",
+        price: r.price,
+        size: r.size,
+        tradeKeys,
+        reasoning: r.reasoning,
+        market: parseMarketJson(r.marketJson),
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      };
+    });
+  }
+
+  hasLiveOrderIntentForAnyKey(keys: string[]): boolean {
+    const wanted = new Set(uniqueTradeKeys(keys));
+    if (wanted.size === 0) return false;
+    return this.listLiveOrderIntents().some((intent) =>
+      intent.tradeKeys.some((key) => wanted.has(key))
+    );
+  }
+
+  deleteLiveOrderIntent(intentId: string): void {
+    this.db.prepare("DELETE FROM live_order_intents WHERE intent_id = ?").run(intentId);
+  }
+
+  expireLiveOrderIntentAsUncertain(intent: LiveOrderIntentRow, reason: string): void {
+    this.db.transaction(() => {
+      for (const key of intent.tradeKeys) {
+        this.markSeen(key, intent.leaderId);
+      }
+      this.audit({
+        leaderId: intent.leaderId,
+        action: "ERROR",
+        tokenId: intent.tokenId,
+        side: intent.side,
+        size: intent.size,
+        price: intent.price,
+        reason,
+        preview: false,
+      });
+      this.deleteLiveOrderIntent(intent.intentId);
+    })();
+  }
+
   /** Apply a pending-order partial fill atomically (position, volume, audit). */
   recordPendingFill(entry: {
     leaderId: string;
@@ -423,6 +942,8 @@ export class StateStore {
       price: number;
       auditReason: string;
       preview: boolean;
+      cashInitialUsd?: number;
+      market?: TokenMarketEntry;
     };
     remove: boolean;
     skipPendingRowUpdate?: boolean;
@@ -446,17 +967,36 @@ export class StateStore {
 
     this.db.transaction(() => {
       if (fill && fill.delta > 0) {
-        const usd = fill.delta * fill.price;
-        this.applyCopyFill(fill.leaderId, fill.tokenId, fill.side, fill.delta, fill.price);
+        const reportedUsd = fill.delta * fill.price;
+        if (fill.market) this.upsertTokenMarket(fill.market);
+        const applied = this.applyCopyFill(
+          fill.leaderId,
+          fill.tokenId,
+          fill.side,
+          fill.delta,
+          fill.price
+        );
+        const appliedShares =
+          fill.side === "SELL" ? applied.appliedShares : fill.delta;
+        const usd = appliedFillUsd(
+          fill.side,
+          fill.delta,
+          reportedUsd,
+          appliedShares,
+          fill.price
+        );
         if (fill.side === "BUY") this.recordBuy(fill.leaderId, fill.tokenId);
-        this.addDailyVolume(usd);
-        this.addLeaderDailyVolume(fill.leaderId, usd);
+        this.addDailyVolume(fill.side === "BUY" ? usd : 0);
+        if (fill.side === "BUY") this.addLeaderDailyVolume(fill.leaderId, usd);
+        if (fill.preview && fill.cashInitialUsd !== undefined) {
+          this.adjustCash(fill.side === "BUY" ? -usd : usd, fill.cashInitialUsd);
+        }
         this.audit({
           leaderId: fill.leaderId,
           action: "COPY",
           tokenId: fill.tokenId,
           side: fill.side,
-          size: fill.delta,
+          size: appliedShares,
           price: fill.price,
           reason: fill.auditReason,
           preview: fill.preview,
@@ -502,6 +1042,8 @@ export class StateStore {
     filledUsd: number;
     auditReason: string;
     preview: boolean;
+    cashInitialUsd?: number;
+    market?: TokenMarketEntry;
   }): void {
     const {
       tradeKey,
@@ -514,22 +1056,36 @@ export class StateStore {
       filledUsd,
       auditReason,
       preview,
+      cashInitialUsd,
+      market,
     } = entry;
     const keys = tradeKeys ?? (tradeKey ? [tradeKey] : []);
     this.db.transaction(() => {
       for (const key of keys) {
         this.markSeen(key, leaderId);
       }
-      this.applyCopyFill(leaderId, tokenId, side, filledShares, price);
+      if (market) this.upsertTokenMarket(market);
+      const applied = this.applyCopyFill(leaderId, tokenId, side, filledShares, price);
+      const appliedShares = side === "SELL" ? applied.appliedShares : filledShares;
+      const appliedUsd = appliedFillUsd(
+        side,
+        filledShares,
+        filledUsd,
+        appliedShares,
+        price
+      );
       if (side === "BUY") this.recordBuy(leaderId, tokenId);
-      this.addDailyVolume(filledUsd);
-      this.addLeaderDailyVolume(leaderId, filledUsd);
+      this.addDailyVolume(side === "BUY" ? appliedUsd : 0);
+      if (side === "BUY") this.addLeaderDailyVolume(leaderId, appliedUsd);
+      if (preview && cashInitialUsd !== undefined) {
+        this.adjustCash(side === "BUY" ? -appliedUsd : appliedUsd, cashInitialUsd);
+      }
       this.audit({
         leaderId,
         action: "COPY",
         tokenId,
         side,
-        size: filledShares,
+        size: appliedShares,
         price,
         reason: auditReason,
         preview,
@@ -554,6 +1110,8 @@ export class StateStore {
     orderId?: string;
     pendingRemaining: number;
     trackPendingGtc: boolean;
+    market?: TokenMarketEntry;
+    intentId?: string;
   }): void {
     const {
       tradeKeys,
@@ -568,6 +1126,8 @@ export class StateStore {
       orderId,
       pendingRemaining,
       trackPendingGtc,
+      market,
+      intentId,
     } = entry;
     const primaryKey = tradeKeys[0] ?? "";
     const now = Date.now();
@@ -576,6 +1136,7 @@ export class StateStore {
       for (const key of [...new Set(tradeKeys)]) {
         this.markSeen(key, leaderId);
       }
+      if (market) this.upsertTokenMarket(market);
 
       if (
         trackPendingGtc &&
@@ -608,20 +1169,32 @@ export class StateStore {
       }
 
       if (filledShares > 0) {
-        this.applyCopyFill(leaderId, tokenId, side, filledShares, price);
+        const applied = this.applyCopyFill(leaderId, tokenId, side, filledShares, price);
+        const appliedShares = side === "SELL" ? applied.appliedShares : filledShares;
+        const appliedUsd = appliedFillUsd(
+          side,
+          filledShares,
+          filledUsd,
+          appliedShares,
+          price
+        );
         if (side === "BUY") this.recordBuy(leaderId, tokenId);
-        this.addDailyVolume(filledUsd);
-        this.addLeaderDailyVolume(leaderId, filledUsd);
+        this.addDailyVolume(side === "BUY" ? appliedUsd : 0);
+        if (side === "BUY") this.addLeaderDailyVolume(leaderId, appliedUsd);
         this.audit({
           leaderId,
           action: "COPY",
           tokenId,
           side,
-          size: filledShares,
+          size: appliedShares,
           price,
           reason: auditReason,
           preview: false,
         });
+      }
+
+      if (intentId) {
+        this.db.prepare("DELETE FROM live_order_intents WHERE intent_id = ?").run(intentId);
       }
     })();
   }
@@ -631,6 +1204,13 @@ export class StateStore {
     this.db
       .prepare("UPDATE pending_orders SET created_at = ?, updated_at = ? WHERE order_id = ?")
       .run(createdAt, updatedAt ?? createdAt, orderId);
+  }
+
+  /** Set live order intent timestamps (for tests / recovery). */
+  setLiveOrderIntentTimestamps(intentId: string, createdAt: number, updatedAt?: number): void {
+    this.db
+      .prepare("UPDATE live_order_intents SET created_at = ?, updated_at = ? WHERE intent_id = ?")
+      .run(createdAt, updatedAt ?? createdAt, intentId);
   }
 
   audit(entry: {

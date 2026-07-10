@@ -66,6 +66,75 @@ describe("adoptUntrackedOpenOrders", () => {
     expect(rows[0]?.filledShares).toBe(5);
   });
 
+  it("uses live order intents to preserve source trade keys when adopting orphans", async () => {
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-a", "source-b"],
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      price: 0.55,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    mockListOpenOrders.mockResolvedValue([
+      {
+        orderId: "clob-orphan-1",
+        tokenId: "tok-abc",
+        side: "BUY",
+        price: 0.55,
+        size: 20,
+      },
+    ]);
+    mockGetOrderStatus.mockResolvedValue({
+      kind: "ok",
+      status: {
+        sizeMatched: 5,
+        originalSize: 20,
+        status: "LIVE",
+        terminal: false,
+      },
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(1);
+    expect(store.hasSeen("source-a")).toBe(true);
+    expect(store.hasSeen("source-b")).toBe(true);
+    expect(store.listLiveOrderIntents().some((r) => r.intentId === intentId)).toBe(false);
+    const [row] = store.listPendingOrders();
+    expect(row?.leaderId).toBe("whale");
+    expect(row?.tradeKey).toBe("source-a");
+    expect(row?.filledShares).toBe(5);
+    expect(store.getPosition("whale", "tok-abc")).toBe(5);
+  });
+
+  it("expires stale live order intents as uncertain without retrying the source trade", async () => {
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-a", "source-b"],
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      price: 0.55,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, Date.now() - 10 * 60_000);
+    mockListOpenOrders.mockResolvedValue([]);
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(0);
+    expect(warnings.some((w) => w.includes("expired uncertain live order intent"))).toBe(true);
+    expect(store.hasSeen("source-a")).toBe(true);
+    expect(store.hasSeen("source-b")).toBe(true);
+    expect(store.listLiveOrderIntents()).toHaveLength(0);
+    expect(store.countPendingOrders()).toBe(0);
+    const audit = store.listAuditLog({ action: "ERROR" }).items[0];
+    expect(audit?.reason).toContain("uncertain live order intent expired");
+  });
+
   it("skips orders already tracked", async () => {
     store.upsertPendingOrder({
       orderId: "clob-known",

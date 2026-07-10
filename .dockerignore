@@ -1,5 +1,4 @@
 node_modules
-dist
 .git
 .github
 .env
@@ -9,6 +8,7 @@ data
 *.log
 *.md
 !README.md
+!docs/**/*.md
 tests
 vitest.config.ts
 coverage

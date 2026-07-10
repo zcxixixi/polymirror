@@ -78,12 +78,14 @@ export async function liquidateLeaderPositions(
       continue;
     }
 
-    const bookPrice = await fetchBestExecutablePrice(
-      config.wallet.clobUrl,
-      config.wallet.chainId,
-      pos.tokenId,
-      "SELL"
-    );
+    const bookPrice = preview
+      ? null
+      : await fetchBestExecutablePrice(
+          config.wallet.clobUrl,
+          config.wallet.chainId,
+          pos.tokenId,
+          "SELL"
+        );
     const price = bookPrice && bookPrice > 0 ? bookPrice : pos.avgEntryPrice;
     if (price <= 0) {
       skipped++;
@@ -141,6 +143,7 @@ export async function liquidateLeaderPositions(
         filledUsd: orderResult.filledUsd,
         auditReason,
         preview: true,
+        cashInitialUsd: global.risk.startingCapitalUsd,
       });
       closed++;
     } else {

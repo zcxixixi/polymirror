@@ -95,9 +95,10 @@ function serveStatic(pathname: string, res: ServerResponse): boolean {
 }
 
 function handleHealth(res: ServerResponse): void {
-  const ok = !healthSnapshot.killSwitchActive;
-  sendJson(res, ok ? 200 : 503, {
-    status: ok ? "ok" : "degraded",
+  const degraded = healthSnapshot.killSwitchActive;
+  const httpOk = !degraded || healthSnapshot.previewMode;
+  sendJson(res, httpOk ? 200 : 503, {
+    status: degraded ? "degraded" : "ok",
     uptimeSec: Math.floor((Date.now() - healthSnapshot.startedAt) / 1000),
     previewMode: healthSnapshot.previewMode,
     killSwitchActive: healthSnapshot.killSwitchActive,

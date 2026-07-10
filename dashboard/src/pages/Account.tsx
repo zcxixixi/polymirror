@@ -30,6 +30,11 @@ function maskAddr(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+function fmtSignedUsd(n: number) {
+  const sign = n >= 0 ? "" : "-";
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
+}
+
 function EditAccountPanel({
   account,
   onDone,
@@ -282,6 +287,13 @@ function AccountListCard({
           leaders: account.enabledLeaders.length,
         })}
         {!account.enabled && t("account.disabledSuffix")}
+      </div>
+      <div className="account-list-metrics">
+        <span className={(account.todayRealizedPnl ?? 0) >= 0 ? "pnl-pos" : "pnl-neg"}>
+          PnL {fmtSignedUsd(account.todayRealizedPnl ?? 0)}
+        </span>
+        <span className="muted">现金 ${((account.cashUsd ?? 0)).toFixed(2)}</span>
+        <span className="muted">成本 ${((account.openCostUsd ?? 0)).toFixed(2)}</span>
       </div>
       <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
         <button type="button" className="secondary link-sm" onClick={onEdit}>

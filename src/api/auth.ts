@@ -32,6 +32,9 @@ export function assertDashboardAuthForBind(bind?: string): void {
   const resolved = bind ?? resolveApiBind();
   if (isLocalBindAddress(resolved)) return;
 
+  const explicit = (process.env.DASHBOARD_ENABLED ?? "true").toLowerCase();
+  if (explicit === "false") return;
+
   const auth = loadDashboardAuth();
   if (!auth.enabled) {
     throw new Error(

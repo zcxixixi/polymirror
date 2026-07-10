@@ -89,6 +89,8 @@ global:
     gtc_fill_timeout_ms: 10000
     # 超过此时间的 pending GTC 记录会被清理（小时）
     pending_order_max_age_hours: 48
+    # Live：市场结算后先链上赎回，再清本地仓位
+    auto_redeem_on_chain: true
 
   conflict:
     # 多 Leader 同 token 反向时的策略:

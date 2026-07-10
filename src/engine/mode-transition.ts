@@ -1,4 +1,5 @@
 import type { RuntimeConfig } from "../config/types.js";
+import { existsSync } from "node:fs";
 import { StateStore } from "../state/store.js";
 import { RiskGate } from "../engine/risk.js";
 import { processPendingOrders, isPreviewOrderId } from "../engine/pending-orders.js";
@@ -68,6 +69,23 @@ export function migratePreviewToLiveDb(
     return { seenImported, positionsImported, livePath };
   } finally {
     liveStore.close();
+  }
+}
+
+/**
+ * Startup/reload guard for manual config flips: if an account is loaded in Live
+ * mode and has a Preview DB, merge Preview dedup/positions before polling.
+ */
+export function migrateExistingPreviewToLiveDb(accountId: string): PreviewToLiveMigration | null {
+  const previewPath = resolveAccountDbPath(accountId, true);
+  const livePath = resolveAccountDbPath(accountId, false);
+  if (previewPath === livePath || !existsSync(previewPath)) return null;
+
+  const previewStore = new StateStore(previewPath);
+  try {
+    return migratePreviewToLiveDb(accountId, previewStore);
+  } finally {
+    previewStore.close();
   }
 }
 
