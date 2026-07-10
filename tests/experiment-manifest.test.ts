@@ -117,7 +117,7 @@ describe("experiment manifest", () => {
     reopened.close();
   });
 
-  it("does not publish schema v3 when migration finalization fails", () => {
+  it("does not publish schema v7 when migration finalization fails", () => {
     const dir = mkdtempSync(join(tmpdir(), "pm-schema-failure-"));
     dirs.push(dir);
     const path = join(dir, "legacy.db");
@@ -139,6 +139,7 @@ describe("experiment manifest", () => {
     expect(() => new StateStore(path)).toThrow();
     const check = new Database(path, { readonly: true });
     expect((check.prepare("SELECT value FROM schema_metadata WHERE key='schema_version'").get() as { value: string }).value).toBe("2");
+    expect(check.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='decision_observation_links'").get()).toBeUndefined();
     check.close();
   });
 

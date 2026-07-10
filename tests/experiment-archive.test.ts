@@ -122,7 +122,14 @@ describe("experiment evidence archive", () => {
     store.audit({ leaderId: "whale", action: "DETECT", tokenId: "t", side: "BUY", size: 1, price: 0.5, preview: true });
     store.audit({ leaderId: "whale", action: "SKIP", tokenId: "t", side: "BUY", size: 1, price: 0.5, reason: "price 0.5 < min 0.6", preview: true });
     store.setDecisionRawEventIds([]);
-    store.close(); let blocked = false;
+    const second = store.recordRawEvent({ sourceId: "raw-2", payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "t-2", price: 0.5, size: 1,
+      candidate: false, rejectionReasonCode: "poll_rejected_activity" }, sourceTimestamp: 2, observedTimestamp: 2 });
+    store.setDecisionRawEventIds([second.rawEventId]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "t-2", side: "BUY", size: 1, price: 0.5, reason: "raw activity detected", preview: true });
+    store.audit({ leaderId: "whale", action: "SKIP", tokenId: "t-2", side: "BUY", size: 1, price: 0.5,
+      reason: "poll_rejected_activity", reasonCode: "poll_rejected_activity", preview: true });
+    store.setDecisionRawEventIds([]);
+    store.close(); let blocked = false; let linkBlocked = false;
     await archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId, archiveDir: join(dir, "freeze-archive"),
       onPublished: () => {
         const concurrent = new Database(dbPath);
@@ -131,10 +138,26 @@ describe("experiment evidence archive", () => {
             (observation_key, raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
             VALUES ('late', ?, 'hash', '{}', 2, 2)`).run(raw.rawEventId);
         } catch (error) { blocked = /immutable|finalizing/i.test(String(error)); }
+        try {
+          concurrent.prepare(`INSERT INTO decision_observation_links
+            (experiment_id, observation_id, decision_id, link_order, linked_at)
+            SELECT ?, (SELECT MAX(observation_id) FROM raw_event_observations),
+              (SELECT decision_id FROM decisions ORDER BY decision_order LIMIT 1),
+              (SELECT COALESCE(MAX(link_order), 0) + 1 FROM decision_observation_links), 3`).run(experiment.experimentId);
+        } catch (error) { linkBlocked = /immutable|finalizing/i.test(String(error)); }
         finally { concurrent.close(); }
       },
     });
     expect(blocked).toBe(true);
+    expect(linkBlocked).toBe(true);
+    const sealed = new Database(dbPath);
+    expect(() => sealed.prepare(`INSERT INTO decision_observation_links
+      (experiment_id, observation_id, decision_id, link_order, linked_at)
+      SELECT ?, (SELECT MAX(observation_id) FROM raw_event_observations),
+        (SELECT decision_id FROM decisions ORDER BY decision_order LIMIT 1),
+        (SELECT COALESCE(MAX(link_order), 0) + 1 FROM decision_observation_links), 4`).run(experiment.experimentId))
+      .toThrow(/immutable/i);
+    sealed.close();
   });
 
   it("makes sealing append-only and refuses unsafe restore paths", async () => {
@@ -158,9 +181,12 @@ describe("experiment evidence archive", () => {
     store.recordDecision({ rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "policy_skip", exactTerms: {}, decidedAt: 2 });
     store.close();
     const db = new Database(dbPath);
-    db.exec("DROP TRIGGER raw_event_observations_no_delete; DELETE FROM raw_event_observations");
+    db.exec(`DROP TRIGGER decision_observation_links_no_delete;
+      DELETE FROM decision_observation_links;
+      DROP TRIGGER raw_event_observations_no_delete;
+      DELETE FROM raw_event_observations`);
     db.close();
     await expect(archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId, archiveDir: join(dir, "incomplete-archive") }))
-      .rejects.toThrow(/raw observation/i);
+      .rejects.toThrow(/raw observation|observation link/i);
   });
 });

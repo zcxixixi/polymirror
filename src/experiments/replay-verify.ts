@@ -18,7 +18,7 @@ export interface ReplayEvidenceSummary {
   decisionDigest: string; cashUsd: number; positions: ReplayPosition[];
   realizedPnlUsd: number; coverage: ReplayCoverage;
 }
-interface StoredDecision { decisionId: string; rawEventId: string; action: string; reasonCode: string; exactTermsJson: string }
+interface StoredDecision { decisionId: string; rawEventId: string; action: string; reasonCode: string; exactTermsJson: string; observationId: number; linkOrder: number }
 interface RegeneratedDecision { rawEventId: string; action: string; reasonCode: string; exactTermsJson: string }
 interface RawObservationEvidence { payloadHash: string; payloadJson: string; sourceTimestamp: number; observedTimestamp: number; observationId: number }
 interface RawEvidence { rawEventId: string; sourceId: string | null; payloadHash: string; payloadJson: string; observedTimestamp: number; observationCount: number; rawOrder: number; observations: RawObservationEvidence[] }
@@ -138,11 +138,33 @@ function loadEvidence(db: Database.Database, experimentId: string): { raw: RawEv
     ...row,
     observations: observationStmt.all(row.rawEventId) as RawObservationEvidence[],
   }));
-  const decisions = db.prepare(`SELECT decision_id AS decisionId, raw_event_id AS rawEventId, action,
-    reason_code AS reasonCode, exact_terms_json AS exactTermsJson FROM decisions
-    WHERE experiment_id=? ORDER BY decision_order, decided_at, decision_id`).all(experimentId) as StoredDecision[];
+  const canonicalDecisions = db.prepare(`SELECT decision_id AS decisionId, decision_order AS decisionOrder
+    FROM decisions WHERE experiment_id=?`).all(experimentId) as Array<{ decisionId: string; decisionOrder: number }>;
+  const decisions = db.prepare(`SELECT d.decision_id AS decisionId, d.raw_event_id AS rawEventId, d.action,
+    d.reason_code AS reasonCode, d.exact_terms_json AS exactTermsJson,
+    l.observation_id AS observationId, l.link_order AS linkOrder
+    FROM decision_observation_links l JOIN decisions d ON d.decision_id=l.decision_id
+    WHERE l.experiment_id=? ORDER BY l.link_order`).all(experimentId) as StoredDecision[];
+  const firstLinkOrderByDecision = new Map<string, number>();
+  for (const decision of decisions) {
+    const current = firstLinkOrderByDecision.get(decision.decisionId);
+    if (current === undefined || decision.linkOrder < current) firstLinkOrderByDecision.set(decision.decisionId, decision.linkOrder);
+  }
+  const canonicalOrder = [...canonicalDecisions]
+    .sort((a, b) => a.decisionOrder - b.decisionOrder)
+    .map((decision) => decision.decisionId);
+  const firstLinkOrder = [...firstLinkOrderByDecision.entries()]
+    .sort((a, b) => a[1] - b[1])
+    .map(([decisionId]) => decisionId);
+  if (canonicalOrder.length !== firstLinkOrder.length || canonicalOrder.some((decisionId, index) => decisionId !== firstLinkOrder[index])) {
+    throw new Error("Re-execution decision set mismatch: global decision order or observation link differs");
+  }
   const rawIds = new Set(raw.map((row) => row.rawEventId));
   if (decisions.some((row) => !rawIds.has(row.rawEventId))) throw new Error("Replay evidence has decisions without stored raw events");
+  const observationOwner = new Map(raw.flatMap((row) => row.observations.map((observation) => [observation.observationId, row.rawEventId] as const)));
+  if (decisions.some((decision) => observationOwner.get(decision.observationId) !== decision.rawEventId)) {
+    throw new Error("Replay decision observation link does not match its raw event");
+  }
   for (const row of raw) {
     if (sha256Text(row.payloadJson) !== row.payloadHash) throw new Error("Replay raw observation payload checksum mismatch");
     if (decisions.some((d) => d.rawEventId === row.rawEventId) && row.observations.length === 0) throw new Error("Replay evidence has decisions without stored raw observation evidence");
@@ -152,42 +174,24 @@ function loadEvidence(db: Database.Database, experimentId: string): { raw: RawEv
 }
 function sha256Text(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 
-function splitDecisionGroups(decisions: StoredDecision[]): StoredDecision[][] {
-  const groups: StoredDecision[][] = [];
+function tradeDecisionGroups(raw: RawEvidence, decisions: StoredDecision[]): Array<{ activity: Activity & { leaderId?: string; candidate?: boolean; rejectionReasonCode?: string | null }; decisions: StoredDecision[] }> {
+  const observationById = new Map(raw.observations.map((observation) => [observation.observationId, observation]));
+  const groups: Array<{ observationId: number; activity: Activity & { leaderId?: string; candidate?: boolean; rejectionReasonCode?: string | null }; decisions: StoredDecision[] }> = [];
   for (const decision of decisions) {
-    if (decision.action === "DETECT") groups.push([]);
+    const observation = observationById.get(decision.observationId);
+    if (!observation) throw new Error(`Re-execution decision evidence has no matching raw observation: ${raw.rawEventId}`);
     const current = groups.at(-1);
-    if (!current) throw new Error("Re-execution decision set mismatch: terminal decision precedes DETECT");
-    current.push(decision);
+    if (current?.observationId === decision.observationId) {
+      current.decisions.push(decision);
+    } else {
+      groups.push({
+        observationId: decision.observationId,
+        activity: JSON.parse(observation.payloadJson) as Activity & { leaderId?: string; candidate?: boolean; rejectionReasonCode?: string | null },
+        decisions: [decision],
+      });
+    }
   }
   return groups;
-}
-
-function matchesTradeDetection(observation: RawObservationEvidence, detection: StoredDecision): boolean {
-  const payload = JSON.parse(observation.payloadJson) as Activity & { leaderId?: string };
-  if (payload.type !== "TRADE") return false;
-  const terms = JSON.parse(detection.exactTermsJson) as Record<string, unknown>;
-  return terms.leaderId === payload.leaderId
-    && terms.tokenId === payload.asset
-    && terms.side === payload.side
-    && (terms.size === undefined || terms.size === null || terms.size === (payload.size ?? null))
-    && (terms.price === undefined || terms.price === null || terms.price === (payload.price ?? null));
-}
-
-function tradeDecisionGroups(raw: RawEvidence, decisions: StoredDecision[]): Array<{ activity: Activity & { leaderId?: string }; decisions: StoredDecision[] }> {
-  let observationIndex = 0;
-  return splitDecisionGroups(decisions).map((group) => {
-    const detection = group[0]!;
-    while (observationIndex < raw.observations.length && !matchesTradeDetection(raw.observations[observationIndex]!, detection)) {
-      observationIndex++;
-    }
-    const observation = raw.observations[observationIndex++];
-    if (!observation) throw new Error(`Re-execution decision evidence has no matching raw observation: ${raw.rawEventId}`);
-    return {
-      activity: JSON.parse(observation.payloadJson) as Activity & { leaderId?: string },
-      decisions: group,
-    };
-  });
 }
 
 function validateAndApplyTrade(
@@ -347,7 +351,7 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
       start_state_json AS startStateJson, schema_version AS schemaVersion FROM experiments WHERE experiment_id=?`).get(experimentId) as
       { configJson: string; sealedAt: number | null; startStateJson: string; schemaVersion: number } | undefined;
     if (!experiment || experiment.sealedAt === null) throw new Error("Deterministic replay requires sealed experiment evidence");
-    if (experiment.schemaVersion < 6) throw new Error("Legacy experiment lacks trustworthy scoped replay ordering");
+    if (experiment.schemaVersion < 7) throw new Error("Legacy experiment lacks explicit decision observation links");
     const config = JSON.parse(experiment.configJson) as RuntimeConfig;
     const start = JSON.parse(experiment.startStateJson) as ExperimentStateSnapshot;
     const cash = { value: start.cashUsd }; const realized = { value: start.realizedPnlUsd };
@@ -459,7 +463,7 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
       if (!leaderId) throw new Error("Re-execution requires immutable raw leaderId context");
       const leader = config.app.leaders.find((candidate) => candidate.id === leaderId);
       if (!leader) throw new Error(`Re-execution leader is absent from canonical config: ${leaderId}`);
-      if ((payload as Activity & { candidate?: boolean }).candidate === false) {
+      if (payload.type !== "TRADE" && (payload as Activity & { candidate?: boolean }).candidate === false) {
         const rejection = (payload as Activity & { rejectionReasonCode?: string | null }).rejectionReasonCode ?? "poll_rejected_activity";
         if (!decisions.some((decision) => decision.action === "DETECT") ||
           !decisions.some((decision) => decision.action === "SKIP" && decision.reasonCode === rejection)) {
@@ -472,22 +476,65 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
         ])); continue;
       }
       if (payload.type === "TRADE") {
-        if (!payload.asset || !payload.side) {
-          if (!decisions.some((decision) => decision.action === "SKIP" && decision.reasonCode === "unsupported_or_incomplete_activity")) {
-            throw new Error("Re-execution decision digest mismatch: incomplete activity decision differs");
-          }
-          assertOrderedActions(decisions, ["DETECT", "SKIP"], "incomplete trade");
-          regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, [
-            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId, tokenId: payload.asset ?? null, side: payload.side ?? null, size: payload.size ?? null, price: payload.price ?? null, preview: config.app.global.previewMode } },
-            { action: "SKIP", reasonCode: "unsupported_or_incomplete_activity", derivedTerms: { leaderId, tokenId: payload.asset ?? null, side: payload.side ?? null, reason: "unsupported or incomplete activity" } },
-          ])); continue;
-        }
         for (const group of tradeDecisionGroups(raw, decisions)) {
           const groupLeaderId = group.activity.leaderId;
           const groupLeader = groupLeaderId
             ? config.app.leaders.find((candidate) => candidate.id === groupLeaderId)
             : undefined;
           if (!groupLeader) throw new Error(`Re-execution leader is absent from canonical config: ${groupLeaderId ?? "missing"}`);
+          if (group.decisions[0]?.action !== "DETECT") {
+            if (group.decisions.length !== 1 || group.decisions[0]?.action !== "SKIP" || group.decisions[0]?.reasonCode !== "already_seen") {
+              throw new Error("Re-execution decision set mismatch: unanchored terminal decision");
+            }
+            const terms = JSON.parse(group.decisions[0].exactTermsJson) as Record<string, unknown>;
+            if (terms.reason !== "already seen") throw new Error("Re-execution decision digest mismatch: fabricated repeated-observation SKIP");
+            regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, group.decisions, [
+              { action: "SKIP", reasonCode: "already_seen", derivedTerms: {
+                leaderId: groupLeader.id, tokenId: group.activity.asset ?? null, side: group.activity.side ?? null,
+                size: group.activity.size ?? null, price: group.activity.price ?? null,
+                reason: "already seen", preview: config.app.global.previewMode,
+              } },
+            ]));
+            continue;
+          }
+          if (group.activity.candidate === false) {
+            const rejection = group.activity.rejectionReasonCode ?? "poll_rejected_activity";
+            assertOrderedActions(group.decisions, ["DETECT", "SKIP"], "poll rejection");
+            if (group.decisions[1]?.reasonCode !== rejection) {
+              throw new Error("Re-execution decision digest mismatch: poll rejection differs");
+            }
+            regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, group.decisions, [
+              { action: "DETECT", reasonCode: "detected", derivedTerms: {
+                leaderId: groupLeader.id, tokenId: group.activity.asset ?? group.activity.conditionId ?? null,
+                side: group.activity.side ?? group.activity.type, size: group.activity.size ?? null,
+                price: group.activity.price ?? null, reason: "raw activity detected",
+              } },
+              { action: "SKIP", reasonCode: rejection, derivedTerms: {
+                leaderId: groupLeader.id, tokenId: group.activity.asset ?? group.activity.conditionId ?? null,
+                side: group.activity.side ?? group.activity.type, size: group.activity.size ?? null,
+                price: group.activity.price ?? null, reason: rejection,
+              } },
+            ]));
+            continue;
+          }
+          if (!group.activity.asset || !group.activity.side) {
+            assertOrderedActions(group.decisions, ["DETECT", "SKIP"], "incomplete trade");
+            if (group.decisions[1]?.reasonCode !== "unsupported_or_incomplete_activity") {
+              throw new Error("Re-execution decision digest mismatch: incomplete activity decision differs");
+            }
+            regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, group.decisions, [
+              { action: "DETECT", reasonCode: "detected", derivedTerms: {
+                leaderId: groupLeader.id, tokenId: group.activity.asset ?? null, side: group.activity.side ?? null,
+                size: group.activity.size ?? null, price: group.activity.price ?? null, preview: config.app.global.previewMode,
+              } },
+              { action: "SKIP", reasonCode: "unsupported_or_incomplete_activity", derivedTerms: {
+                leaderId: groupLeader.id, tokenId: group.activity.asset ?? null, side: group.activity.side ?? null,
+                size: group.activity.size ?? null, price: group.activity.price ?? null,
+                reason: "unsupported or incomplete activity", preview: config.app.global.previewMode,
+              } },
+            ]));
+            continue;
+          }
           const result = validateAndApplyTrade(config, groupLeader, group.activity, group.decisions, positions, cash, realized);
           detectedBuy += result.detectedBuy; detectedSell += result.detectedSell;
           copiedBuy += result.copiedBuy; copiedSell += result.copiedSell;

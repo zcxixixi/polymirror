@@ -13,6 +13,21 @@ beforeEach(() => { dir = realpathSync(mkdtempSync(join(tmpdir(), "pm-replay-veri
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe("sealed deterministic replay", () => {
+  it("fails closed for a legacy experiment without explicit observation links", async () => {
+    const dbPath = join(dir, "legacy-links.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "legacy-links", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "legacy" });
+    store.close();
+    const db = new Database(dbPath);
+    db.exec("DROP TRIGGER experiments_immutable_core");
+    db.prepare("UPDATE experiments SET schema_version=6 WHERE experiment_id=?").run(exp.experimentId);
+    db.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "legacy-links-archive") })).rejects.toThrow(/legacy|explicit decision observation links/i);
+  });
+
   it("replays the exact production TOKEN_SETTLEMENT payload without leaderId", async () => {
     const dbPath = join(dir, "token-settlement.db"); const store = new StateStore(dbPath);
     const config = previewRuntimeConfig(); config.app.global.risk.startingCapitalUsd = 10;
@@ -164,6 +179,134 @@ describe("sealed deterministic replay", () => {
 
     const archived = await archiveExperimentEvidence({
       dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "changed-observation-archive"),
+    });
+    const result = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
+    expect(result.match, JSON.stringify(result, null, 2)).toBe(true);
+    expect(result.actual.coverage).toEqual({ buyPct: 50, sellPct: 0, totalPct: 50 });
+  });
+
+  it("replays candidate rejection and A-B-A decisions through explicit observation links", async () => {
+    const dbPath = join(dir, "linked-occurrences.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.risk.startingCapitalUsd = 10;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1 };
+    const exp = store.startOrResumeExperiment({
+      accountId: "candidate-linked", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate",
+    }, 100);
+    const acceptedPayload = {
+      leaderId: "whale", type: "TRADE", side: "BUY", asset: "token-a",
+      price: 0.5, size: 10, timestamp: 1, candidate: true, rejectionReasonCode: null,
+    };
+    const accepted = store.recordRawEvent({
+      sourceId: "buy", payload: acceptedPayload, sourceTimestamp: 1, observedTimestamp: 1,
+    });
+    store.setDecisionRawEventIds([accepted.rawEventId]);
+    store.audit({
+      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: true,
+    });
+    store.recordDecision({
+      rawEventId: accepted.rawEventId, action: "COPY", reasonCode: "copy_executed",
+      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", requestedShares: 2,
+        requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0, reason: "Fixed $1.00", preview: true },
+      decidedAt: 2,
+    });
+    store.applyCopyFill("whale", "token-a", "BUY", 2, 0.5);
+    store.adjustCash(-1, 10);
+
+    const rejected = store.recordRawEvent({
+      sourceId: "buy", payload: { ...acceptedPayload, candidate: false, rejectionReasonCode: "stale_activity" },
+      sourceTimestamp: 1, observedTimestamp: 2,
+    });
+    store.setDecisionRawEventIds([rejected.rawEventId]);
+    store.audit({
+      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY", size: 10,
+      price: 0.5, reason: "raw activity detected", preview: true,
+    });
+    store.audit({
+      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY", size: 10,
+      price: 0.5, reason: "stale_activity", reasonCode: "stale_activity", preview: true,
+    });
+
+    store.recordRawEvent({
+      sourceId: "buy", payload: acceptedPayload, sourceTimestamp: 1, observedTimestamp: 3,
+    });
+    store.setDecisionRawEventIds([accepted.rawEventId]);
+    store.audit({
+      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: true,
+    });
+    store.audit({
+      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, reason: "already seen", preview: true,
+    });
+
+    store.recordRawEvent({
+      sourceId: "buy", payload: acceptedPayload, sourceTimestamp: 2, observedTimestamp: 4,
+    });
+    store.setDecisionRawEventIds([accepted.rawEventId]);
+    store.audit({
+      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: true,
+    });
+    store.audit({
+      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, reason: "already seen", preview: true,
+    });
+
+    store.recordRawEvent({
+      sourceId: "buy", payload: { ...acceptedPayload, price: 0.7, candidate: false, rejectionReasonCode: "price_filter" },
+      sourceTimestamp: 3, observedTimestamp: 5,
+    });
+    store.setDecisionRawEventIds([accepted.rawEventId]);
+    store.audit({
+      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.7, reason: "raw activity detected", preview: true,
+    });
+    store.audit({
+      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.7, reason: "price_filter", reasonCode: "price_filter", preview: true,
+    });
+
+    store.recordRawEvent({
+      sourceId: "buy", payload: { ...acceptedPayload, price: 0.7, candidate: false, rejectionReasonCode: "price_filter" },
+      sourceTimestamp: 3, observedTimestamp: 6,
+    });
+    store.setDecisionRawEventIds([accepted.rawEventId]);
+    store.audit({
+      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.7, reason: "raw activity detected", preview: true,
+    });
+    store.audit({
+      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.7, reason: "price_filter", reasonCode: "price_filter", preview: true,
+    });
+    store.setDecisionRawEventIds([]);
+    store.close();
+
+    const db = new Database(dbPath, { readonly: true });
+    const links = db.prepare(`SELECT l.observation_id AS observationId, d.action, d.reason_code AS reasonCode
+      FROM decision_observation_links l JOIN decisions d ON d.decision_id=l.decision_id
+      ORDER BY l.link_order`).all() as Array<{ observationId: number; action: string; reasonCode: string }>;
+    const observationCount = (db.prepare("SELECT COUNT(*) AS count FROM raw_event_observations").get() as { count: number }).count;
+    db.close();
+    expect(observationCount).toBe(4);
+    expect(links.map((link) => [link.observationId, link.action, link.reasonCode])).toEqual([
+      [1, "DETECT", "detected"],
+      [1, "COPY", "copy_executed"],
+      [2, "DETECT", "detected"],
+      [2, "SKIP", "stale_activity"],
+      [1, "SKIP", "already_seen"],
+      [3, "DETECT", "detected"],
+      [3, "SKIP", "already_seen"],
+      [4, "DETECT", "detected"],
+      [4, "SKIP", "price_filter"],
+    ]);
+
+    const archived = await archiveExperimentEvidence({
+      dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "linked-occurrences-archive"),
     });
     const result = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
     expect(result.match, JSON.stringify(result, null, 2)).toBe(true);

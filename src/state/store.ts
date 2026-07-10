@@ -23,9 +23,10 @@ import {
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 6;
+export const STATE_SCHEMA_VERSION = 7;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
+interface DecisionObservationRef { rawEventId: string; observationId: number }
 
 export interface PendingOrderRow {
   orderId: string;
@@ -328,6 +329,8 @@ function copyPriceModeCompatibility(
 export class StateStore {
   private db: Database.Database;
   private decisionRawEventIds: string[] = [];
+  private latestObservationIdByRawEventId = new Map<string, number>();
+  private decisionObservationIdByRawEventId = new Map<string, number>();
 
   constructor(path = DEFAULT_DB) {
     const dir = dirname(path);
@@ -409,7 +412,8 @@ export class StateStore {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         reconciliation_only INTEGER NOT NULL DEFAULT 0,
-        reconciliation_started_at INTEGER
+        reconciliation_started_at INTEGER,
+        observation_refs_json TEXT NOT NULL DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS idx_pending_orders_leader ON pending_orders(leader_id);
       CREATE TABLE IF NOT EXISTS live_order_intents (
@@ -428,7 +432,8 @@ export class StateStore {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         reconciliation_only INTEGER NOT NULL DEFAULT 0,
-        reconciliation_until INTEGER NOT NULL
+        reconciliation_until INTEGER NOT NULL,
+        observation_refs_json TEXT NOT NULL DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS idx_live_order_intents_created ON live_order_intents(created_at);
       CREATE TABLE IF NOT EXISTS cash_ledger (
@@ -639,6 +644,18 @@ export class StateStore {
           ON experiments(account_id) WHERE state = 'ACTIVE' AND ended_at IS NULL;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_event_observations_identity
           ON raw_event_observations(observation_key) WHERE observation_key IS NOT NULL;
+        DROP TRIGGER IF EXISTS decision_observation_links_no_update;
+        CREATE TRIGGER decision_observation_links_no_update BEFORE UPDATE ON decision_observation_links
+        BEGIN SELECT RAISE(ABORT, 'decision observation links are immutable'); END;
+        DROP TRIGGER IF EXISTS decision_observation_links_no_delete;
+        CREATE TRIGGER decision_observation_links_no_delete BEFORE DELETE ON decision_observation_links
+        BEGIN SELECT RAISE(ABORT, 'decision observation links are append-only'); END;
+        DROP TRIGGER IF EXISTS decision_observation_links_sealed_no_insert;
+        CREATE TRIGGER decision_observation_links_sealed_no_insert BEFORE INSERT ON decision_observation_links
+        WHEN (SELECT e.sealed_at IS NOT NULL OR e.archive_status='PREPARING'
+          FROM raw_event_observations o JOIN raw_events r ON r.raw_event_id=o.raw_event_id
+          JOIN experiments e ON e.experiment_id=r.experiment_id WHERE o.observation_id=NEW.observation_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
       `);
       this.db.prepare(
         `INSERT INTO schema_metadata (key, value) VALUES ('schema_version', ?)
@@ -849,6 +866,13 @@ export class StateStore {
       payloadHash,
       input.sourceTimestamp
     );
+    const observation = this.db.prepare(
+      `SELECT observation_id AS observationId FROM raw_event_observations
+       WHERE raw_event_id = ? AND payload_hash = ? AND source_timestamp = ?
+       ORDER BY observation_id LIMIT 1`
+    ).get(row.rawEventId, payloadHash, input.sourceTimestamp) as { observationId: number } | undefined;
+    if (!observation) throw new Error(`Raw observation persistence failed: ${row.rawEventId}`);
+    this.latestObservationIdByRawEventId.set(row.rawEventId, observation.observationId);
     return this.getRawEvent(row.rawEventId)!;
     })();
   }
@@ -895,26 +919,43 @@ export class StateStore {
   }): DecisionRow {
     const raw = this.getRawEvent(input.rawEventId);
     if (!raw) throw new Error(`Raw event not found: ${input.rawEventId}`);
-    const exactTermsJson = normalizedPayloadJson(input.exactTerms);
-    const decisionOrder = (this.db.prepare("SELECT COALESCE(MAX(decision_order), 0) + 1 AS next FROM decisions WHERE experiment_id=?").get(raw.experimentId) as { next: number }).next;
-    const decisionId = createHash("sha256")
-      .update([raw.experimentId, raw.rawEventId, input.action, input.reasonCode, exactTermsJson].join("\n"))
-      .digest("hex");
-    this.db.prepare(
-      `INSERT OR IGNORE INTO decisions
-       (decision_id, experiment_id, raw_event_id, action, reason_code, exact_terms_json, decided_at, decision_order)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      decisionId,
-      raw.experimentId,
-      raw.rawEventId,
-      input.action,
-      input.reasonCode,
-      exactTermsJson,
-      input.decidedAt ?? Date.now(),
-      decisionOrder
-    );
-    return this.getDecision(decisionId)!;
+    const observationId = this.decisionObservationIdByRawEventId.get(raw.rawEventId)
+      ?? this.latestObservationIdByRawEventId.get(raw.rawEventId)
+      ?? (this.db.prepare(
+        "SELECT observation_id AS observationId FROM raw_event_observations WHERE raw_event_id = ? ORDER BY observation_id DESC LIMIT 1"
+      ).get(raw.rawEventId) as { observationId: number } | undefined)?.observationId;
+    if (observationId === undefined) throw new Error(`Cannot record decision without raw observation context: ${raw.rawEventId}`);
+    return this.db.transaction(() => {
+      const exactTermsJson = normalizedPayloadJson(input.exactTerms);
+      const decidedAt = input.decidedAt ?? Date.now();
+      const decisionOrder = (this.db.prepare("SELECT COALESCE(MAX(decision_order), 0) + 1 AS next FROM decisions WHERE experiment_id=?").get(raw.experimentId) as { next: number }).next;
+      const decisionId = createHash("sha256")
+        .update([raw.experimentId, raw.rawEventId, input.action, input.reasonCode, exactTermsJson].join("\n"))
+        .digest("hex");
+      this.db.prepare(
+        `INSERT OR IGNORE INTO decisions
+         (decision_id, experiment_id, raw_event_id, action, reason_code, exact_terms_json, decided_at, decision_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        decisionId,
+        raw.experimentId,
+        raw.rawEventId,
+        input.action,
+        input.reasonCode,
+        exactTermsJson,
+        decidedAt,
+        decisionOrder
+      );
+      const linkOrder = (this.db.prepare(
+        "SELECT COALESCE(MAX(link_order), 0) + 1 AS next FROM decision_observation_links WHERE experiment_id=?"
+      ).get(raw.experimentId) as { next: number }).next;
+      this.db.prepare(
+        `INSERT OR IGNORE INTO decision_observation_links
+         (experiment_id, observation_id, decision_id, link_order, linked_at)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(raw.experimentId, observationId, decisionId, linkOrder, decidedAt);
+      return this.getDecision(decisionId)!;
+    })();
   }
 
   private getDecision(decisionId: string): DecisionRow | undefined {
@@ -938,6 +979,56 @@ export class StateStore {
 
   setDecisionRawEventIds(rawEventIds: string[]): void {
     this.decisionRawEventIds = [...new Set(rawEventIds)];
+    this.decisionObservationIdByRawEventId = new Map();
+    this.decisionObservationIdByRawEventId = new Map(
+      this.observationRefsForRawEventIds(this.decisionRawEventIds)
+        .map((ref) => [ref.rawEventId, ref.observationId])
+    );
+  }
+
+  private observationRefsForRawEventIds(rawEventIds: string[]): DecisionObservationRef[] {
+    const latest = this.db.prepare(
+      "SELECT observation_id AS observationId FROM raw_event_observations WHERE raw_event_id=? ORDER BY observation_id DESC LIMIT 1"
+    );
+    return [...new Set(rawEventIds)].flatMap((rawEventId) => {
+      const observationId = this.decisionObservationIdByRawEventId.get(rawEventId)
+        ?? this.latestObservationIdByRawEventId.get(rawEventId)
+        ?? (latest.get(rawEventId) as { observationId: number } | undefined)?.observationId;
+      return observationId === undefined ? [] : [{ rawEventId, observationId }];
+    });
+  }
+
+  private observationRefsForSourceKeys(sourceKeys: string[]): DecisionObservationRef[] {
+    return this.observationRefsForRawEventIds(this.rawEventIdsForSourceKeys(sourceKeys));
+  }
+
+  private parseObservationRefs(value: string | null | undefined): DecisionObservationRef[] {
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.flatMap((ref) => {
+        const row = ref as Partial<DecisionObservationRef>;
+        return typeof row.rawEventId === "string" && Number.isInteger(row.observationId) && row.observationId! > 0
+          ? [{ rawEventId: row.rawEventId, observationId: row.observationId! }]
+          : [];
+      });
+    } catch { return []; }
+  }
+
+  private setDecisionObservationRefs(refs: DecisionObservationRef[]): void {
+    const owner = this.db.prepare(
+      "SELECT 1 FROM raw_event_observations WHERE observation_id=? AND raw_event_id=?"
+    );
+    const rawIds = new Set<string>();
+    for (const ref of refs) {
+      if (rawIds.has(ref.rawEventId) || !owner.get(ref.observationId, ref.rawEventId)) {
+        throw new Error("Invalid persisted decision observation context");
+      }
+      rawIds.add(ref.rawEventId);
+    }
+    this.decisionRawEventIds = [...new Set(refs.map((ref) => ref.rawEventId))];
+    this.decisionObservationIdByRawEventId = new Map(refs.map((ref) => [ref.rawEventId, ref.observationId]));
   }
 
   private rawEventIdsForSourceKeys(sourceKeys: string[]): string[] {
@@ -952,6 +1043,25 @@ export class StateStore {
   }
 
   private migrate(): void {
+    const storedSchemaVersion = Number((this.db.prepare(
+      "SELECT value FROM schema_metadata WHERE key='schema_version'"
+    ).get() as { value: string } | undefined)?.value ?? 0);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS decision_observation_links (
+        link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        observation_id INTEGER NOT NULL REFERENCES raw_event_observations(observation_id),
+        decision_id TEXT NOT NULL REFERENCES decisions(decision_id),
+        link_order INTEGER NOT NULL,
+        linked_at INTEGER NOT NULL,
+        UNIQUE(observation_id, decision_id),
+        UNIQUE(experiment_id, link_order)
+      );
+      CREATE INDEX IF NOT EXISTS idx_decision_observation_links_observation
+        ON decision_observation_links(observation_id, link_order);
+      CREATE INDEX IF NOT EXISTS idx_decision_observation_links_decision
+        ON decision_observation_links(decision_id);
+    `);
     const experimentCols = this.db.prepare("PRAGMA table_info(experiments)").all() as { name: string }[];
     if (!experimentCols.some((column) => column.name === "state")) {
       this.db.exec("ALTER TABLE experiments ADD COLUMN state TEXT NOT NULL DEFAULT 'ACTIVE'");
@@ -977,6 +1087,21 @@ export class StateStore {
     const observationCols = this.db.prepare("PRAGMA table_info(raw_event_observations)").all() as { name: string }[];
     if (!observationCols.some((column) => column.name === "observation_key")) {
       this.db.exec("ALTER TABLE raw_event_observations ADD COLUMN observation_key TEXT");
+    }
+    if (!Number.isFinite(storedSchemaVersion) || storedSchemaVersion < 7) {
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS raw_event_observations_no_delete;
+        DELETE FROM raw_event_observations
+        WHERE EXISTS (
+          SELECT 1 FROM raw_event_observations AS earlier
+          WHERE earlier.raw_event_id = raw_event_observations.raw_event_id
+            AND earlier.payload_hash = raw_event_observations.payload_hash
+            AND earlier.source_timestamp = raw_event_observations.source_timestamp
+            AND earlier.observation_id < raw_event_observations.observation_id
+        );
+        CREATE TRIGGER raw_event_observations_no_delete BEFORE DELETE ON raw_event_observations
+        BEGIN SELECT RAISE(ABORT, 'raw observations are append-only'); END;
+      `);
     }
     const cols = this.db.prepare("PRAGMA table_info(positions)").all() as { name: string }[];
     if (!cols.some((c) => c.name === "avg_entry_price")) {
@@ -1020,6 +1145,9 @@ export class StateStore {
          WHERE reconciliation_until = 0`
       );
     }
+    if (!intentCols.some((c) => c.name === "observation_refs_json")) {
+      this.db.exec("ALTER TABLE live_order_intents ADD COLUMN observation_refs_json TEXT NOT NULL DEFAULT '[]'");
+    }
     const pendingCols = this.db.prepare("PRAGMA table_info(pending_orders)").all() as { name: string }[];
     if (!pendingCols.some((c) => c.name === "filled_usd")) {
       this.db.exec("ALTER TABLE pending_orders ADD COLUMN filled_usd REAL NOT NULL DEFAULT 0");
@@ -1042,6 +1170,9 @@ export class StateStore {
     }
     if (!pendingCols.some((c) => c.name === "reconciliation_started_at")) {
       this.db.exec("ALTER TABLE pending_orders ADD COLUMN reconciliation_started_at INTEGER");
+    }
+    if (!pendingCols.some((c) => c.name === "observation_refs_json")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN observation_refs_json TEXT NOT NULL DEFAULT '[]'");
     }
     this.db.exec(
       `UPDATE pending_orders
@@ -1697,13 +1828,14 @@ export class StateStore {
     if (tradeKeys.length === 0) throw new Error("live order intent requires trade keys");
     const intentId = makeLiveOrderIntentId(entry.leaderId, tradeKeys);
     const now = Date.now();
+    const observationRefsJson = JSON.stringify(this.observationRefsForRawEventIds(this.decisionRawEventIds));
     this.db
       .prepare(
         `INSERT INTO live_order_intents
          (intent_id, leader_id, token_id, side, price, leader_price, executable_price,
           slippage_pct, size, trade_keys, reasoning, market_json, created_at, updated_at,
-          reconciliation_until)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reconciliation_until, observation_refs_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(intent_id) DO UPDATE SET
            token_id = excluded.token_id,
            side = excluded.side,
@@ -1715,6 +1847,7 @@ export class StateStore {
            trade_keys = excluded.trade_keys,
            reasoning = excluded.reasoning,
            market_json = excluded.market_json,
+           observation_refs_json = excluded.observation_refs_json,
            reconciliation_until = excluded.reconciliation_until,
            updated_at = excluded.updated_at`
       )
@@ -1733,7 +1866,8 @@ export class StateStore {
         entry.market ? JSON.stringify(entry.market) : null,
         now,
         now,
-        now + FILL_RECONCILIATION_WINDOW_MS
+        now + FILL_RECONCILIATION_WINDOW_MS,
+        observationRefsJson
       );
     return intentId;
   }
@@ -1900,10 +2034,12 @@ export class StateStore {
     } = entry;
 
     const previousDecisionRawEventIds = this.decisionRawEventIds;
+    const previousDecisionObservationIds = new Map(this.decisionObservationIdByRawEventId);
     const pendingLineage = orderId
       ? this.db.prepare(
-          `SELECT trade_key AS tradeKey, price, size, leader_price AS leaderPrice,
-                  executable_price AS executablePrice, slippage_pct AS slippagePct
+        `SELECT trade_key AS tradeKey, price, size, leader_price AS leaderPrice,
+                  executable_price AS executablePrice, slippage_pct AS slippagePct,
+                  observation_refs_json AS observationRefsJson
            FROM pending_orders WHERE order_id = ?`
         ).get(orderId) as {
           tradeKey: string;
@@ -1912,11 +2048,15 @@ export class StateStore {
           leaderPrice: number | null;
           executablePrice: number | null;
           slippagePct: number | null;
+          observationRefsJson: string;
         } | undefined
       : undefined;
     if (this.decisionRawEventIds.length === 0 && orderId) {
       if (pendingLineage) {
-        this.decisionRawEventIds = this.rawEventIdsForSourceKeys([pendingLineage.tradeKey]);
+        const refs = this.parseObservationRefs(pendingLineage.observationRefsJson);
+        this.setDecisionObservationRefs(refs.length > 0
+          ? refs
+          : this.observationRefsForSourceKeys([pendingLineage.tradeKey]));
       }
     }
     const apply = this.db.transaction(() => {
@@ -2033,6 +2173,7 @@ export class StateStore {
       apply();
     } finally {
       this.decisionRawEventIds = previousDecisionRawEventIds;
+      this.decisionObservationIdByRawEventId = previousDecisionObservationIds;
     }
   }
 
@@ -2077,8 +2218,9 @@ export class StateStore {
     } = entry;
     const keys = tradeKeys ?? (tradeKey ? [tradeKey] : []);
     const previousDecisionRawEventIds = this.decisionRawEventIds;
+    const previousDecisionObservationIds = new Map(this.decisionObservationIdByRawEventId);
     if (this.decisionRawEventIds.length === 0) {
-      this.decisionRawEventIds = this.rawEventIdsForSourceKeys(keys);
+      this.setDecisionObservationRefs(this.observationRefsForSourceKeys(keys));
     }
     const apply = this.db.transaction(() => {
       for (const key of keys) {
@@ -2131,6 +2273,7 @@ export class StateStore {
       apply();
     } finally {
       this.decisionRawEventIds = previousDecisionRawEventIds;
+      this.decisionObservationIdByRawEventId = previousDecisionObservationIds;
     }
   }
 
@@ -2182,8 +2325,19 @@ export class StateStore {
     } = entry;
     const primaryKey = tradeKeys[0] ?? "";
     const now = Date.now();
+    const previousDecisionRawEventIds = this.decisionRawEventIds;
+    const previousDecisionObservationIds = new Map(this.decisionObservationIdByRawEventId);
+    if (this.decisionRawEventIds.length === 0) {
+      const persisted = intentId
+        ? this.db.prepare("SELECT observation_refs_json AS refs FROM live_order_intents WHERE intent_id=?")
+            .get(intentId) as { refs: string } | undefined
+        : undefined;
+      const refs = this.parseObservationRefs(persisted?.refs);
+      this.setDecisionObservationRefs(refs.length > 0 ? refs : this.observationRefsForSourceKeys(tradeKeys));
+    }
+    const observationRefsJson = JSON.stringify(this.observationRefsForRawEventIds(this.decisionRawEventIds));
 
-    this.db.transaction(() => {
+    const apply = this.db.transaction(() => {
       for (const key of [...new Set(tradeKeys)]) {
         this.markSeen(key, leaderId);
       }
@@ -2199,8 +2353,9 @@ export class StateStore {
           .prepare(
             `INSERT INTO pending_orders
              (order_id, leader_id, token_id, side, price, size, filled_shares, filled_usd, fee_usd,
-              leader_price, executable_price, slippage_pct, trade_key, reasoning, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              leader_price, executable_price, slippage_pct, trade_key, reasoning, created_at, updated_at,
+              observation_refs_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(order_id) DO UPDATE SET
                filled_shares = excluded.filled_shares,
                filled_usd = excluded.filled_usd,
@@ -2208,6 +2363,7 @@ export class StateStore {
                leader_price = excluded.leader_price,
                executable_price = excluded.executable_price,
                slippage_pct = excluded.slippage_pct,
+               observation_refs_json = excluded.observation_refs_json,
                updated_at = excluded.updated_at`
           )
           .run(
@@ -2226,7 +2382,8 @@ export class StateStore {
             primaryKey,
             auditReason,
             now,
-            now
+            now,
+            observationRefsJson
           );
       }
 
@@ -2275,7 +2432,13 @@ export class StateStore {
       if (intentId) {
         this.db.prepare("DELETE FROM live_order_intents WHERE intent_id = ?").run(intentId);
       }
-    })();
+    });
+    try {
+      apply();
+    } finally {
+      this.decisionRawEventIds = previousDecisionRawEventIds;
+      this.decisionObservationIdByRawEventId = previousDecisionObservationIds;
+    }
   }
 
   /** Set pending order timestamps (for tests / recovery). */

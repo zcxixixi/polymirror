@@ -117,6 +117,47 @@ describe("raw event lineage", () => {
     ]);
   });
 
+  it("migrates legacy four-field observation rows by logical value and keeps the first timestamp", () => {
+    const raw = store.recordRawEvent({
+      sourceId: "tx-legacy-duplicates:token:BUY",
+      payload: { type: "TRADE", price: 0.5 },
+      sourceTimestamp: 123,
+      observedTimestamp: 1000,
+    });
+    store.close();
+    const dbPath = join(dir, "preview.db");
+    const db = new Database(dbPath);
+    const firstLegacyKey = createHash("sha256")
+      .update([raw.rawEventId, raw.payloadHash, raw.sourceTimestamp, 1000].join("\n"))
+      .digest("hex");
+    const secondLegacyKey = createHash("sha256")
+      .update([raw.rawEventId, raw.payloadHash, raw.sourceTimestamp, 2000].join("\n"))
+      .digest("hex");
+    db.exec(`
+      DROP TRIGGER raw_event_observations_no_update;
+      UPDATE raw_event_observations SET observation_key='${firstLegacyKey}';
+      INSERT INTO raw_event_observations
+        (observation_key, raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
+      SELECT '${secondLegacyKey}', raw_event_id, payload_hash, normalized_payload_json, source_timestamp, 2000
+      FROM raw_event_observations WHERE observation_id=(SELECT MIN(observation_id) FROM raw_event_observations);
+      DROP TRIGGER decision_observation_links_no_update;
+      DROP TRIGGER decision_observation_links_no_delete;
+      DROP TRIGGER decision_observation_links_sealed_no_insert;
+      DROP TABLE decision_observation_links;
+      UPDATE schema_metadata SET value='6' WHERE key='schema_version';
+    `);
+    db.close();
+
+    store = new StateStore(dbPath);
+    expect(store.listRawEventObservations(raw.rawEventId)).toEqual([
+      expect.objectContaining({
+        observationKey: firstLegacyKey,
+        sourceTimestamp: 123,
+        observedTimestamp: 1000,
+      }),
+    ]);
+  });
+
   it("deduplicates source IDs without overwriting source or first-observed timestamps", () => {
     const payload = { type: "TRADE", price: 0.5, nested: { b: 2, a: 1 } };
     const first = store.recordRawEvent({
@@ -255,6 +296,66 @@ describe("raw event lineage", () => {
         }),
       }),
     ]);
+  });
+
+  it("links a delayed pending fill to the accepted observation after restart and a payload change", () => {
+    const dbPath = join(dir, "preview.db");
+    const raw = store.recordRawEvent({
+      sourceId: "tx-pending-versioned:token:BUY",
+      payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "token", price: 0.5, candidate: true },
+      sourceTimestamp: 400,
+      observedTimestamp: 1000,
+    });
+    store.setDecisionRawEventIds([raw.rawEventId]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token", side: "BUY", price: 0.5, preview: false });
+    store.recordLiveOrderAccepted({
+      tradeKeys: ["tx-pending-versioned:token:BUY"],
+      leaderId: "whale",
+      tokenId: "token",
+      side: "BUY",
+      price: 0.5,
+      orderSize: 2,
+      filledShares: 0,
+      filledUsd: 0,
+      auditReason: "fixed order",
+      orderId: "order-versioned",
+      pendingRemaining: 2,
+      trackPendingGtc: true,
+    });
+    store.setDecisionRawEventIds([]);
+    store.close();
+
+    store = new StateStore(dbPath);
+    const changed = store.recordRawEvent({
+      sourceId: "tx-pending-versioned:token:BUY",
+      payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "token", price: 0.7, candidate: false },
+      sourceTimestamp: 401,
+      observedTimestamp: 2000,
+    });
+    store.setDecisionRawEventIds([changed.rawEventId]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token", side: "BUY", price: 0.7, preview: false });
+    store.audit({ leaderId: "whale", action: "SKIP", tokenId: "token", side: "BUY", price: 0.7,
+      reason: "price_filter", reasonCode: "price_filter", preview: false });
+    store.setDecisionRawEventIds([]);
+    store.commitPendingOrderProgress({
+      orderId: "order-versioned",
+      matchedFilledShares: 2,
+      matchedFilledUsd: 1,
+      fill: {
+        leaderId: "whale", tokenId: "token", side: "BUY", delta: 2, price: 0.5,
+        auditReason: "fixed order", preview: false,
+      },
+      remove: true,
+    });
+
+    const db = new Database(dbPath, { readonly: true });
+    const copyLink = db.prepare(`SELECT l.observation_id AS observationId
+      FROM decision_observation_links l JOIN decisions d ON d.decision_id=l.decision_id
+      WHERE d.action='COPY' ORDER BY l.link_order DESC LIMIT 1`).get() as { observationId: number };
+    const firstObservation = db.prepare("SELECT MIN(observation_id) AS observationId FROM raw_event_observations")
+      .get() as { observationId: number };
+    db.close();
+    expect(copyLink.observationId).toBe(firstObservation.observationId);
   });
 
   it("links a recovered copy success by persisted trade key", () => {
