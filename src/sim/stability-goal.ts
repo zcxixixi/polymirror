@@ -39,6 +39,10 @@ export interface StabilityGoalAssessment {
   thresholds: StabilityGoalThresholds;
 }
 
+export interface StabilityGoalEvidence {
+  recentErrorCount?: number;
+}
+
 const DEFAULT_THRESHOLDS: StabilityGoalThresholds = {
   minObservationDays: 14,
   minRedeemCount: 100,
@@ -80,7 +84,8 @@ function profitFactorPass(
 
 export function assessStabilityGoal(
   report: PreviewAccountReport,
-  thresholds: Partial<StabilityGoalThresholds> = {}
+  thresholds: Partial<StabilityGoalThresholds> = {},
+  evidence: StabilityGoalEvidence = {}
 ): StabilityGoalAssessment {
   const t = { ...DEFAULT_THRESHOLDS, ...thresholds };
   const goal = report.goalMetrics;
@@ -96,7 +101,8 @@ export function assessStabilityGoal(
     };
   }
 
-  const recentErrorCount = report.recentWindow?.errorCount ?? report.errorCount;
+  const recentErrorCount =
+    evidence.recentErrorCount ?? report.recentWindow?.errorCount ?? report.errorCount;
   const unclassifiedCopyGap =
     report.copyQuality.copyGap.buy.unclassified +
     report.copyQuality.copyGap.sell.unclassified;

@@ -16,6 +16,7 @@ import {
 } from "./stability-goal.js";
 
 const STABILITY_GOAL_COPY_PATH_WINDOW_MS = 14 * 24 * 60 * 60_000;
+const STABILITY_GOAL_ERROR_WINDOW_MS = 6 * 60 * 60_000;
 
 export interface PreviewSkipReason {
   reason: string;
@@ -422,6 +423,18 @@ function summarizeRecentWindow(
       isSuspiciousRedeemSkip
     ),
   };
+}
+
+function countErrorsSince(db: Database.Database, sinceMs: number): number {
+  return (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM audit_log
+         WHERE action = 'ERROR' AND ts >= ?`
+      )
+      .get(sinceMs) as { count: number }
+  ).count;
 }
 
 function parseAuditPnl(reason: string | null): number {
@@ -975,6 +988,9 @@ export function readPreviewAccountReport(
       ...copyQualityContext,
       sinceMs: nowMs - STABILITY_GOAL_COPY_PATH_WINDOW_MS,
     });
+    const stabilityErrorCount = hasAuditLog
+      ? countErrorsSince(db, nowMs - STABILITY_GOAL_ERROR_WINDOW_MS)
+      : 0;
     const performance = readPreviewPerformance(
       db,
       hasAuditLog,
@@ -1050,7 +1066,7 @@ export function readPreviewAccountReport(
           ...stabilityCopyQuality,
           primaryIssue: copyQuality.primaryIssue,
         },
-      }),
+      }, {}, { recentErrorCount: stabilityErrorCount }),
     };
   } finally {
     db.close();

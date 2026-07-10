@@ -117,6 +117,41 @@ describe("readPreviewAccountReport", () => {
     expect(report.stabilityGoal?.failedChecks).toContain("copy_path");
   });
 
+  it("keeps the stability error gate on a fixed six-hour window", () => {
+    const nowMs = Date.now() + 1_000;
+    store.audit({
+      leaderId: "leader-a",
+      action: "ERROR",
+      tokenId: "fixed-error-window",
+      side: "REDEEM",
+      reason: "temporary upstream timeout",
+      preview: true,
+    });
+
+    const db = new Database(dbPath);
+    try {
+      db.prepare("UPDATE audit_log SET ts = ? WHERE token_id = ?").run(
+        nowMs - 2 * 60 * 60_000,
+        "fixed-error-window"
+      );
+    } finally {
+      db.close();
+    }
+
+    const report = readPreviewAccountReport({
+      accountId: "fixed-error-window",
+      dbPath,
+      startingCapitalUsd: 200,
+      recentWindowMs: 60 * 60_000,
+      nowMs,
+    });
+
+    expect(report.recentWindow?.errorCount).toBe(0);
+    expect(report.stabilityGoal?.checks).toContainEqual(
+      expect.objectContaining({ key: "errors", actual: 1, passed: false })
+    );
+  });
+
   it("summarizes cash, open positions, realized pnl, errors, and skip reasons", () => {
     store.recordCopySuccess({
       tradeKey: "buy-a",
