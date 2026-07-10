@@ -214,4 +214,20 @@ describe("sealed deterministic replay", () => {
     await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
       archiveDir: join(dir, "rejected-extra-archive") })).rejects.toThrow(/poll rejection|decision set mismatch/i);
   });
+
+  it("rejects a fabricated AUTO_SETTLEMENT skip reason", async () => {
+    const dbPath = join(dir, "auto-skip.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "auto-skip", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "auto-settle-observation:whale:condition",
+      payload: { type: "AUTO_SETTLEMENT", leaderId: "whale", conditionId: "condition", slug: "market",
+        resolution: null, resolutionError: "network" }, sourceTimestamp: 1, observedTimestamp: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected",
+      exactTerms: { leaderId: "whale", tokenId: "condition", side: "REDEEM", reason: "auto settlement detected" }, decidedAt: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "market_unresolved",
+      exactTerms: { leaderId: "whale", tokenId: "condition", side: "REDEEM", reason: "settlement evidence unavailable" }, decidedAt: 2 });
+    store.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "auto-skip-archive") })).rejects.toThrow(/decision mismatch|settlement/i);
+  });
 });

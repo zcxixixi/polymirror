@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../src/state/store.js";
 import { LeaderRegistry } from "../src/leaders/registry.js";
 import type { GlobalConfig, LeaderConfig, WalletConfig } from "../src/config/types.js";
+import Database from "better-sqlite3";
+import { archiveExperimentEvidence } from "../src/experiments/archive.js";
+import { verifyExperimentReplay } from "../src/experiments/replay-verify.js";
 
 const leader: LeaderConfig = {
   id: "whale",
@@ -66,7 +69,7 @@ let dir: string;
 let store: StateStore;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "pm-settlement-"));
+  dir = realpathSync(mkdtempSync(join(tmpdir(), "pm-settlement-")));
   store = new StateStore(join(dir, "test.db"));
   vi.resetModules();
 });
@@ -166,6 +169,39 @@ describe("processSettlements", () => {
     expect(store.listDecisions()).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "SKIP", reasonCode: "untracked_token" }),
     ]));
+  });
+
+  it("replays production two-token condition ordering and rejects order, cardinality, and identity tampering", async () => {
+    seedPosition("token-a"); seedPosition("token-b"); startExperiment(false);
+    vi.doMock("../src/monitor/data-api.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/monitor/data-api.js")>()), getActivity: vi.fn(async () => []),
+    }));
+    vi.doMock("../src/executor/redeem.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/executor/redeem.js")>()),
+      listRedeemablePositions: vi.fn(async () => [
+        { conditionId: "0xcondition", tokenId: "token-a", size: 10, payoutPerShare: 1 },
+        { conditionId: "0xcondition", tokenId: "token-b", size: 10, payoutPerShare: 0 },
+      ]),
+      redeemConditionOnChain: vi.fn(async () => ({ ok: true })),
+    }));
+    const { processSettlements, resetSettlementCache } = await import("../src/engine/settlement.js");
+    resetSettlementCache();
+    await processSettlements(new LeaderRegistry([leader]), { ...globalBase, previewMode: false }, store, false, { wallet });
+    expect(store.listDecisions().map((decision) => decision.action)).toEqual(["DETECT", "DETECT", "REDEEM", "REDEEM", "REDEEM", "REDEEM"]);
+    const experimentId = store.getActiveExperiment()!.experimentId; const source = join(dir, "test.db");
+    store.close();
+    const variants = ["swap", "extra", "identity"].map((name) => join(dir, `${name}.db`));
+    variants.forEach((path) => copyFileSync(source, path));
+    store = new StateStore(source);
+    const archived = await archiveExperimentEvidence({ dbPath: source, experimentId, archiveDir: join(dir, "two-token-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: source });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
+    const swap = new Database(variants[0]!); swap.exec("DROP TRIGGER decisions_no_update; UPDATE decisions SET decision_order=CASE decision_order WHEN 1 THEN 2 WHEN 2 THEN 1 ELSE decision_order END"); swap.close();
+    const extra = new Database(variants[1]!); extra.exec(`INSERT INTO decisions (decision_id, experiment_id, raw_event_id, action, reason_code, exact_terms_json, decided_at, decision_order)
+      SELECT 'extra', experiment_id, raw_event_id, 'REDEEM', reason_code, exact_terms_json, decided_at+1, 999 FROM decisions WHERE action='REDEEM' LIMIT 1`); extra.close();
+    const identity = new Database(variants[2]!); identity.exec("DROP TRIGGER decisions_no_update; UPDATE decisions SET exact_terms_json=replace(exact_terms_json, '\"token-a\"', '\"fabricated-token\"') WHERE action='REDEEM'"); identity.close();
+    for (const [index, path] of variants.entries()) await expect(archiveExperimentEvidence({ dbPath: path, experimentId,
+      archiveDir: join(dir, `tampered-${index}`) })).rejects.toThrow(/decision|order|identity|settlement/i);
   });
 
   it("settles a preview leader REDEEM into local cash and REDEEM audit", async () => {
