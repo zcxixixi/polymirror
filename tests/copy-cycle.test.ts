@@ -169,6 +169,7 @@ describe("runCopyCycle", () => {
     ]);
     config.app.global.copyPriceMode = "executable_guarded";
     config.app.global.risk.slippageTolerance = 0.02;
+    store.ensureCopyPriceMode("executable_guarded");
     store.applyCopyFill("whale", activity.asset!, "BUY", 2, 0.5);
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
@@ -270,6 +271,7 @@ describe("runCopyCycle", () => {
     ]);
     config.app.global.copyPriceMode = "executable_guarded";
     config.app.global.risk.slippageTolerance = 0.02;
+    store.ensureCopyPriceMode("executable_guarded");
     store.applyCopyFill("whale", activity.asset!, "BUY", 10, 0.5);
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
