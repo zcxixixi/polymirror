@@ -42,6 +42,7 @@ export function decisionConfigProjection(config: RuntimeConfig): unknown {
         previewMode: global.previewMode,
         copyPriceMode: global.copyPriceMode,
         copyTradesOnly: global.copyTradesOnly,
+        activityLimit: global.activityLimit,
         maxTradeAgeHours: global.maxTradeAgeHours,
         buyDedupWindowMs: global.buyDedupWindowMs,
         tradeAggregationWindowMs: global.tradeAggregationWindowMs,

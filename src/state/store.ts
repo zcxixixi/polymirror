@@ -530,18 +530,35 @@ export class StateStore {
       CREATE TRIGGER IF NOT EXISTS decisions_no_delete
         BEFORE DELETE ON decisions BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;
     `);
-    this.db.prepare(
-      `INSERT INTO schema_metadata (key, value) VALUES ('schema_version', ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-    ).run(String(STATE_SCHEMA_VERSION));
-    this.migrate();
-    this.db.exec(`
-      DROP INDEX IF EXISTS idx_experiments_active_account;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
-        ON experiments(account_id) WHERE state = 'ACTIVE' AND ended_at IS NULL;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_event_observations_identity
-        ON raw_event_observations(observation_key) WHERE observation_key IS NOT NULL;
-    `);
+    this.db.transaction(() => {
+      this.migrate();
+      this.db.exec(`
+        DROP INDEX IF EXISTS idx_experiments_active_account;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
+          ON experiments(account_id) WHERE state = 'ACTIVE' AND ended_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_event_observations_identity
+          ON raw_event_observations(observation_key) WHERE observation_key IS NOT NULL;
+      `);
+      this.db.prepare(
+        `INSERT INTO schema_metadata (key, value) VALUES ('schema_version', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+      ).run(String(STATE_SCHEMA_VERSION));
+    })();
+    this.reconcileOrphanPreparedExperiments();
+  }
+
+  private reconcileOrphanPreparedExperiments(now = Date.now()): void {
+    const rows = this.db.prepare(
+      "SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId FROM experiments WHERE state = 'PREPARED'"
+    ).all() as { experimentId: string; previousExperimentId: string | null }[];
+    for (const row of rows) {
+      if (row.previousExperimentId) {
+        this.abortPreparedExperiments([row.experimentId], now);
+      } else {
+        this.db.prepare("UPDATE experiments SET state = 'ABORTED', ended_at = ? WHERE experiment_id = ? AND state = 'PREPARED'")
+          .run(now, row.experimentId);
+      }
+    }
   }
 
   startOrResumeExperiment(input: ExperimentManifestInput, now = Date.now()): ExperimentManifestRow {

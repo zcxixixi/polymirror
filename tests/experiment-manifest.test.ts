@@ -6,6 +6,7 @@ import { canonicalRedactedConfig, configSha256 } from "../src/experiments/manife
 import { provenanceTrustClass, readRuntimeProvenance } from "../src/experiments/provenance.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import Database from "better-sqlite3";
 import { StateStore } from "../src/state/store.js";
 import { previewRuntimeConfig } from "./helpers/fixtures.js";
 
@@ -72,6 +73,55 @@ describe("experiment manifest", () => {
     const decision = structuredClone(base);
     decision.app.global.execution.orderType = "FOK";
     expect(configSha256(decision)).not.toBe(configSha256(base));
+    const limited = structuredClone(base);
+    limited.app.global.activityLimit += 1;
+    expect(configSha256(limited)).not.toBe(configSha256(base));
+  });
+
+  it("aborts an orphan prepared transition on reopen without replacing active", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-experiment-reopen-"));
+    dirs.push(dir);
+    const path = join(dir, "preview.db");
+    const store = new StateStore(path);
+    const config = previewRuntimeConfig();
+    const input = { accountId: "reopen", candidateAddresses: [], config, gitSha: "git-a", imageDigest: "image-a", lockfileHash: "a".repeat(64), trustClass: "verified" as const };
+    const active = store.startOrResumeExperiment(input, 1000);
+    const changed = structuredClone(config);
+    changed.app.global.risk.maxOrderUsd += 1;
+    store.beginExperimentBatch();
+    store.startOrResumeExperiment({ ...input, config: changed }, 2000);
+    store.commitExperimentBatch();
+    store.close();
+
+    const reopened = new StateStore(path);
+    expect(reopened.getActiveExperiment("reopen")?.experimentId).toBe(active.experimentId);
+    expect(reopened.listExperiments().some((row) => row.state === "ABORTED")).toBe(true);
+    reopened.close();
+  });
+
+  it("does not publish schema v3 when migration finalization fails", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-schema-failure-"));
+    dirs.push(dir);
+    const path = join(dir, "legacy.db");
+    const db = new Database(path);
+    db.exec(`
+      CREATE TABLE schema_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO schema_metadata VALUES ('schema_version', '2');
+      CREATE TABLE experiments (
+        experiment_id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+        candidate_addresses_json TEXT NOT NULL, canonical_config_json TEXT NOT NULL,
+        config_hash TEXT NOT NULL, git_sha TEXT NOT NULL, image_digest TEXT NOT NULL,
+        lockfile_hash TEXT NOT NULL, schema_version INTEGER NOT NULL,
+        started_at INTEGER NOT NULL, ended_at INTEGER, sealed_at INTEGER, trust_class TEXT NOT NULL
+      );
+      INSERT INTO experiments VALUES ('a','dup','[]','{}','h','g','i','l',2,1,NULL,NULL,'legacy');
+      INSERT INTO experiments VALUES ('b','dup','[]','{}','h','g','i','l',2,2,NULL,NULL,'legacy');
+    `);
+    db.close();
+    expect(() => new StateStore(path)).toThrow();
+    const check = new Database(path, { readonly: true });
+    expect((check.prepare("SELECT value FROM schema_metadata WHERE key='schema_version'").get() as { value: string }).value).toBe("2");
+    check.close();
   });
 
   it("redacts unknown credential-like keys fail closed without hiding ordinary fields", () => {
