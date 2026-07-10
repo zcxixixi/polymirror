@@ -828,7 +828,7 @@ export class StateStore {
           .get(experiment.experimentId, payloadHash) as { rawEventId: string };
     const observedTimestamp = input.observedTimestamp ?? Date.now();
     const observationKey = createHash("sha256")
-      .update([row.rawEventId, payloadHash, input.sourceTimestamp, observedTimestamp].join("\n"))
+      .update([row.rawEventId, payloadHash, input.sourceTimestamp].join("\n"))
       .digest("hex");
     this.db.prepare(
       `INSERT OR IGNORE INTO raw_event_observations

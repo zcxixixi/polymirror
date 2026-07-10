@@ -29,6 +29,57 @@ afterEach(() => {
 });
 
 describe("raw event lineage", () => {
+  it("deduplicates repeated logical observations while retaining changed evidence", () => {
+    const first = store.recordRawEvent({
+      sourceId: "tx-logical:token:BUY",
+      payload: { type: "TRADE", price: 0.5, nested: { b: 2, a: 1 } },
+      sourceTimestamp: 123,
+      observedTimestamp: 1000,
+    });
+    store.recordRawEvent({
+      sourceId: "tx-logical:token:BUY",
+      payload: { nested: { a: 1, b: 2 }, price: 0.5, type: "TRADE" },
+      sourceTimestamp: 123,
+      observedTimestamp: 2000,
+    });
+    store.recordRawEvent({
+      sourceId: "tx-logical:token:BUY",
+      payload: { type: "TRADE", price: 0.7, nested: { b: 2, a: 1 } },
+      sourceTimestamp: 123,
+      observedTimestamp: 3000,
+    });
+    store.recordRawEvent({
+      sourceId: "tx-logical:token:BUY",
+      payload: { type: "TRADE", price: 0.5, nested: { b: 2, a: 1 } },
+      sourceTimestamp: 124,
+      observedTimestamp: 4000,
+    });
+
+    expect(store.listRawEvents()).toEqual([
+      expect.objectContaining({
+        rawEventId: first.rawEventId,
+        observedTimestamp: 1000,
+      }),
+    ]);
+    expect(store.listRawEventObservations(first.rawEventId)).toEqual([
+      expect.objectContaining({
+        payload: { type: "TRADE", price: 0.5, nested: { b: 2, a: 1 } },
+        sourceTimestamp: 123,
+        observedTimestamp: 1000,
+      }),
+      expect.objectContaining({
+        payload: { type: "TRADE", price: 0.7, nested: { b: 2, a: 1 } },
+        sourceTimestamp: 123,
+        observedTimestamp: 3000,
+      }),
+      expect.objectContaining({
+        payload: { type: "TRADE", price: 0.5, nested: { b: 2, a: 1 } },
+        sourceTimestamp: 124,
+        observedTimestamp: 4000,
+      }),
+    ]);
+  });
+
   it("deduplicates source IDs without overwriting source or first-observed timestamps", () => {
     const payload = { type: "TRADE", price: 0.5, nested: { b: 2, a: 1 } };
     const first = store.recordRawEvent({

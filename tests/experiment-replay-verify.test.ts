@@ -68,6 +68,54 @@ describe("sealed deterministic replay", () => {
     expect(result.actual.decisionDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("replays an already-seen decision after an identical observation is deduplicated", async () => {
+    const dbPath = join(dir, "deduplicated-observation.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.risk.startingCapitalUsd = 10;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1 };
+    const exp = store.startOrResumeExperiment({
+      accountId: "candidate-deduplicated", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate",
+    }, 100);
+    const payload = {
+      leaderId: "whale", type: "TRADE", side: "BUY", asset: "token-a",
+      price: 0.5, size: 10, timestamp: 1,
+    };
+    const raw = store.recordRawEvent({
+      sourceId: "buy", payload, sourceTimestamp: 1, observedTimestamp: 1,
+    });
+    store.recordRawEvent({
+      sourceId: "buy", payload, sourceTimestamp: 1, observedTimestamp: 2,
+    });
+    expect(store.listRawEventObservations(raw.rawEventId)).toHaveLength(1);
+    store.recordDecision({
+      rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected",
+      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", size: 10, price: 0.5, preview: true },
+      decidedAt: 1,
+    });
+    store.recordDecision({
+      rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
+      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", requestedShares: 2,
+        requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0, reason: "Fixed $1.00", preview: true },
+      decidedAt: 2,
+    });
+    store.applyCopyFill("whale", "token-a", "BUY", 2, 0.5);
+    store.adjustCash(-1, 10);
+    store.recordDecision({
+      rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "already_seen",
+      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", reason: "already seen", preview: true },
+      decidedAt: 3,
+    });
+    store.close();
+
+    const archived = await archiveExperimentEvidence({
+      dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "deduplicated-observation-archive"),
+    });
+    const result = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
+    expect(result.match, JSON.stringify(result, null, 2)).toBe(true);
+  });
+
   it("detects when stored outcomes diverge from the decision evidence", async () => {
     const dbPath = join(dir, "diverged.db");
     const store = new StateStore(dbPath);

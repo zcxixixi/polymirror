@@ -147,7 +147,7 @@ function sha256Text(value: string): string { return createHash("sha256").update(
 
 function validateAndApplyTrade(
   config: RuntimeConfig, leader: LeaderConfig, activity: Activity, decisions: StoredDecision[],
-  positions: Map<string, ReplayPosition>, cashRef: { value: number }, realizedRef: { value: number }, observationCount: number
+  positions: Map<string, ReplayPosition>, cashRef: { value: number }, realizedRef: { value: number }
 ): { detectedBuy: number; detectedSell: number; copiedBuy: number; copiedSell: number; specs: ExpectedSpec[] } {
   const side = activity.side;
   if (!activity.asset || !side || (side !== "BUY" && side !== "SELL")) throw new Error("Re-execution requires complete TRADE asset and side evidence");
@@ -196,7 +196,7 @@ function validateAndApplyTrade(
         { action: "SKIP", reasonCode: replaySkipReasonCode(reason), derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, reason, preview: config.app.global.previewMode } },
       ] };
   }
-  const trailingDuplicateSkip = observationCount > 1 && decisions.length === 3 && decisions[2]?.action === "SKIP" && decisions[2]?.reasonCode === "already_seen";
+  const trailingDuplicateSkip = decisions.length === 3 && decisions[2]?.action === "SKIP" && decisions[2]?.reasonCode === "already_seen";
   assertOrderedActions(decisions, trailingDuplicateSkip ? ["DETECT", action, "SKIP"] : ["DETECT", action], "executed trade");
   if (copied.reasonCode !== (side === "BUY" ? "copy_executed" : "sell_executed")) {
     throw new Error("Re-execution decision digest mismatch: execution reason code differs");
@@ -435,7 +435,7 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
             { action: "SKIP", reasonCode: "unsupported_or_incomplete_activity", derivedTerms: { leaderId, tokenId: payload.asset ?? null, side: payload.side ?? null, reason: "unsupported or incomplete activity" } },
           ])); continue;
         }
-        const result = validateAndApplyTrade(config, leader, payload, decisions, positions, cash, realized, raw.observationCount);
+        const result = validateAndApplyTrade(config, leader, payload, decisions, positions, cash, realized);
         detectedBuy += result.detectedBuy; detectedSell += result.detectedSell;
         copiedBuy += result.copiedBuy; copiedSell += result.copiedSell;
         regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, result.specs));
