@@ -582,6 +582,7 @@ export async function runCopyCycle(
         side: activity.side,
         leaderPrice,
         targetUsd: sizing.finalUsd,
+        targetShares: sizing.finalShares,
         minOrderUsd: config.app.global.risk.minOrderUsd,
         absoluteTolerance: config.app.global.risk.slippageTolerance,
         tickSize: snapshot?.tickSize,
@@ -611,6 +612,7 @@ export async function runCopyCycle(
         leaderPrice,
         executablePrice: observedExecutablePrice,
         targetUsd: sizing.finalUsd,
+        targetShares: sizing.finalShares,
         minOrderUsd: config.app.global.risk.minOrderUsd,
         absoluteTolerance: config.app.global.risk.slippageTolerance,
         tickSize: snapshot?.tickSize,
@@ -968,6 +970,17 @@ export async function runCopyCycle(
     }
 
     const executionPrice = orderResult.executionPrice ?? orderPrice;
+    const filledExecutionAudit = guardedExecution && executionAudit && orderResult.filledShares > 0
+      ? {
+          ...executionAudit,
+          executablePrice: executionPrice,
+          slippagePct: calculateCopySlippageLossPct(
+            activity.side,
+            leaderPrice,
+            executionPrice
+          ),
+        }
+      : executionAudit;
 
     if (preview) {
       if (orderResult.filledShares <= 0) {
@@ -994,8 +1007,8 @@ export async function runCopyCycle(
         filledShares: orderResult.filledShares,
         price: executionPrice,
         leaderPrice,
-        executablePrice: observedExecutablePrice,
-        slippagePct: observedSlippagePct,
+        executablePrice: filledExecutionAudit?.executablePrice ?? observedExecutablePrice,
+        slippagePct: filledExecutionAudit?.slippagePct ?? observedSlippagePct,
         filledUsd: orderResult.filledUsd,
         auditReason: sizing.reasoning,
         preview: true,
@@ -1034,9 +1047,9 @@ export async function runCopyCycle(
         tokenId: activity.asset,
         side: activity.side,
         price: executionPrice,
-        leaderPrice: executionAudit?.leaderPrice,
-        executablePrice: executionAudit?.executablePrice,
-        slippagePct: executionAudit?.slippagePct,
+        leaderPrice: filledExecutionAudit?.leaderPrice,
+        executablePrice: filledExecutionAudit?.executablePrice,
+        slippagePct: filledExecutionAudit?.slippagePct,
         orderSize: orderShares,
         filledShares: orderResult.filledShares,
         filledUsd: orderResult.filledUsd,

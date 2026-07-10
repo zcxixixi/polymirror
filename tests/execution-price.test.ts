@@ -27,6 +27,26 @@ describe("prepareExecutableGuardedOrder", () => {
     expect(result.orderUsd).toBeCloseTo(1.0036, 4);
   });
 
+  it("preserves SELL target shares instead of resizing at the guarded limit", () => {
+    const result = prepareExecutableGuardedOrder({
+      side: "SELL",
+      leaderPrice: 0.5,
+      executablePrice: 0.49,
+      targetUsd: 1,
+      targetShares: 2,
+      minOrderUsd: 1,
+      absoluteTolerance: 0.02,
+      tickSize: 0.01,
+    });
+
+    expect(result).toMatchObject({
+      allow: true,
+      orderPrice: 0.48,
+      orderShares: 2,
+      orderUsd: 0.96,
+    });
+  });
+
   it("allows favorable movement and rejects only adverse movement beyond tolerance", () => {
     expect(
       prepareExecutableGuardedOrder({
@@ -58,6 +78,7 @@ describe("prepareExecutableGuardedOrder", () => {
         leaderPrice: 0.5,
         executablePrice: null,
         targetUsd: 1,
+        targetShares: 2,
         minOrderUsd: 1,
         absoluteTolerance: 0.02,
       })
@@ -71,6 +92,7 @@ describe("prepareExecutableGuardedOrder", () => {
         leaderPrice: 0.5,
         executablePrice: 1.1,
         targetUsd: 1,
+        targetShares: 2,
         minOrderUsd: 1,
         absoluteTolerance: 0.02,
       })
@@ -93,11 +115,12 @@ describe("prepareExecutableGuardedOrder", () => {
         side: "SELL",
         leaderPrice: 0.5,
         targetUsd: 1,
+        targetShares: 2,
         minOrderUsd: 1,
         absoluteTolerance: 0.025,
         tickSize: 0.01,
       })
-    ).toMatchObject({ allow: true, orderPrice: 0.48, orderShares: 2.09 });
+    ).toMatchObject({ allow: true, orderPrice: 0.48, orderShares: 2 });
   });
 });
 

@@ -25,6 +25,9 @@ const mockGetOrderStatus = vi.fn();
 const mockCancelOrder = vi.fn();
 const mockListOpenOrders = vi.fn(async () => []);
 const mockPlaceLimitOrder = vi.fn();
+const { mockFetchExecutableOrderBookSnapshot } = vi.hoisted(() => ({
+  mockFetchExecutableOrderBookSnapshot: vi.fn(async () => null),
+}));
 
 vi.mock("../src/executor/clob.js", () => ({
   ClobExecutor: class {
@@ -37,9 +40,14 @@ vi.mock("../src/executor/clob.js", () => ({
   isDefiniteOrderRejection: () => false,
 }));
 
-vi.mock("../src/executor/orderbook.js", () => ({
-  fetchBestExecutablePrice: vi.fn(async () => 0.5),
-}));
+vi.mock("../src/executor/orderbook.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/executor/orderbook.js")>();
+  return {
+    ...actual,
+    fetchBestExecutablePrice: vi.fn(async () => 0.5),
+    fetchExecutableOrderBookSnapshot: mockFetchExecutableOrderBookSnapshot,
+  };
+});
 
 vi.mock("../src/executor/geoblock.js", () => ({
   getCachedGeoblockStatus: vi.fn(async () => null),
@@ -134,9 +142,11 @@ beforeEach(() => {
   mockCancelOrder.mockReset();
   mockListOpenOrders.mockReset();
   mockPlaceLimitOrder.mockReset();
+  mockFetchExecutableOrderBookSnapshot.mockReset();
   mockPollLeaders.mockReset();
   mockListOpenOrders.mockResolvedValue([]);
   mockCancelOrder.mockResolvedValue({ ok: true });
+  mockFetchExecutableOrderBookSnapshot.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -238,7 +248,7 @@ describe("runCopyCycle pending reconciliation", () => {
     ).toBe(true);
   });
 
-  it("records live fills with the executor execution price instead of the leader quote", async () => {
+  it("records guarded live COPY audit from the actual fill price", async () => {
     const activity = testActivity({
       transactionHash: "0xexecutionprice",
       asset: "tok-execution-price",
@@ -249,21 +259,33 @@ describe("runCopyCycle pending reconciliation", () => {
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
     ]);
+    mockFetchExecutableOrderBookSnapshot.mockResolvedValue({
+      levels: [{ price: "0.50", size: "100" }],
+      tickSize: 0.01,
+      minOrderShares: 1,
+    });
     mockPlaceLimitOrder.mockResolvedValue({
       preview: false,
       orderId: "ord-execution-price",
       filledShares: 2,
-      filledUsd: 1.02,
-      executionPrice: 0.51,
+      filledUsd: 1.04,
+      executionPrice: 0.52,
       orderStatus: "matched",
       pendingRemaining: 0,
     });
 
-    const result = await runCopyCycle(liveConfig(true), store);
+    const config = liveConfig(true);
+    config.app.global.copyPriceMode = "executable_guarded";
+    const result = await runCopyCycle(config, store);
 
     expect(result.copied).toBe(1);
-    expect(store.getPositionCostUsd("whale", activity.asset!)).toBeCloseTo(1.02);
+    expect(store.getPositionCostUsd("whale", activity.asset!)).toBeCloseTo(1.04);
     const [copy] = store.listAuditLog({ action: "COPY" }).items;
-    expect(copy?.price).toBe(0.51);
+    expect(copy).toMatchObject({
+      price: 0.52,
+      leaderPrice: 0.5,
+      executablePrice: 0.52,
+      slippagePct: 4,
+    });
   });
 });

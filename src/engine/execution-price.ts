@@ -6,6 +6,7 @@ export interface ExecutableGuardedOrderInput {
   leaderPrice: number;
   executablePrice: number | null;
   targetUsd: number;
+  targetShares?: number;
   minOrderUsd: number;
   absoluteTolerance: number;
   tickSize?: number;
@@ -80,7 +81,15 @@ function guardedLimitPrice(
 export function prepareGuardedOrderTerms(
   input: GuardedOrderTermsInput
 ): GuardedOrderTerms {
-  const { side, leaderPrice, targetUsd, minOrderUsd, absoluteTolerance, tickSize } = input;
+  const {
+    side,
+    leaderPrice,
+    targetUsd,
+    targetShares,
+    minOrderUsd,
+    absoluteTolerance,
+    tickSize,
+  } = input;
   if (!Number.isFinite(leaderPrice) || leaderPrice <= 0 || leaderPrice >= 1) {
     return refusedTerms("invalid leader price");
   }
@@ -89,9 +98,17 @@ export function prepareGuardedOrderTerms(
   }
 
   const orderPrice = guardedLimitPrice(side, leaderPrice, absoluteTolerance, tickSize);
-  let orderShares = Math.max(0.01, Math.round((targetUsd / orderPrice) * 100) / 100);
-  if (orderShares * orderPrice < minOrderUsd) {
-    orderShares = Math.max(0.01, Math.ceil((minOrderUsd / orderPrice) * 100) / 100);
+  let orderShares: number;
+  if (side === "SELL") {
+    if (targetShares === undefined || !Number.isFinite(targetShares) || targetShares <= 0) {
+      return refusedTerms("invalid SELL target shares");
+    }
+    orderShares = Math.max(0.01, Math.round(targetShares * 100) / 100);
+  } else {
+    orderShares = Math.max(0.01, Math.round((targetUsd / orderPrice) * 100) / 100);
+    if (orderShares * orderPrice < minOrderUsd) {
+      orderShares = Math.max(0.01, Math.ceil((minOrderUsd / orderPrice) * 100) / 100);
+    }
   }
   const orderUsd = round4(orderShares * orderPrice);
 
@@ -111,6 +128,7 @@ export function prepareExecutableGuardedOrder(
     leaderPrice,
     executablePrice,
     targetUsd,
+    targetShares,
     minOrderUsd,
     absoluteTolerance,
     tickSize,
@@ -119,6 +137,7 @@ export function prepareExecutableGuardedOrder(
     side,
     leaderPrice,
     targetUsd,
+    targetShares,
     minOrderUsd,
     absoluteTolerance,
     tickSize,

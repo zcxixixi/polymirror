@@ -153,8 +153,8 @@ describe("runCopyCycle", () => {
     expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
       price: 0.52,
       leaderPrice: 0.5,
-      executablePrice: 0.51,
-      slippagePct: 2,
+      executablePrice: 0.52,
+      slippagePct: 4,
     });
     expect(store.getCashBalance(config.app.global.risk.startingCapitalUsd)).toBeCloseTo(
       config.app.global.risk.startingCapitalUsd - 1.0036,
@@ -162,14 +162,14 @@ describe("runCopyCycle", () => {
     );
   });
 
-  it("fills executable_guarded SELL from the current bid at the conservative limit", async () => {
+  it("sells the sizing result's exact shares in executable_guarded mode", async () => {
     const activity = testActivity({ side: "SELL", price: 0.5 });
     const config = previewRuntimeConfig([
       testLeader({ strategy: { type: "FIXED", copySize: 1 } }),
     ]);
     config.app.global.copyPriceMode = "executable_guarded";
     config.app.global.risk.slippageTolerance = 0.02;
-    store.applyCopyFill("whale", activity.asset!, "BUY", 3, 0.5);
+    store.applyCopyFill("whale", activity.asset!, "BUY", 2, 0.5);
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
     ]);
@@ -188,17 +188,17 @@ describe("runCopyCycle", () => {
       activity.asset,
       "SELL"
     );
-    expect(store.getPosition("whale", activity.asset!)).toBeCloseTo(0.91, 8);
+    expect(store.getPosition("whale", activity.asset!)).toBe(0);
     expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
       side: "SELL",
-      size: 2.09,
+      size: 2,
       price: 0.48,
       leaderPrice: 0.5,
-      executablePrice: 0.49,
-      slippagePct: 2,
+      executablePrice: 0.48,
+      slippagePct: 4,
     });
     expect(store.getCashBalance(config.app.global.risk.startingCapitalUsd)).toBeCloseTo(
-      config.app.global.risk.startingCapitalUsd + 1.0032,
+      config.app.global.risk.startingCapitalUsd + 0.96,
       4
     );
   });
