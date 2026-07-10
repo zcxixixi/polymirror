@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import { StateStore } from "../src/state/store.js";
 import { previewRuntimeConfig } from "./helpers/fixtures.js";
 
@@ -76,6 +78,41 @@ describe("raw event lineage", () => {
         payload: { type: "TRADE", price: 0.5, nested: { b: 2, a: 1 } },
         sourceTimestamp: 124,
         observedTimestamp: 4000,
+      }),
+    ]);
+  });
+
+  it("deduplicates against a legacy observation key without rewriting its first timestamp", () => {
+    const raw = store.recordRawEvent({
+      sourceId: "tx-legacy:token:BUY",
+      payload: { type: "TRADE", price: 0.5 },
+      sourceTimestamp: 123,
+      observedTimestamp: 1000,
+    });
+    store.close();
+    const dbPath = join(dir, "preview.db");
+    const db = new Database(dbPath);
+    const legacyKey = createHash("sha256")
+      .update([raw.rawEventId, raw.payloadHash, raw.sourceTimestamp, raw.observedTimestamp].join("\n"))
+      .digest("hex");
+    db.exec("DROP TRIGGER raw_event_observations_no_update");
+    db.prepare("UPDATE raw_event_observations SET observation_key = ? WHERE raw_event_id = ?")
+      .run(legacyKey, raw.rawEventId);
+    db.close();
+
+    store = new StateStore(dbPath);
+    store.recordRawEvent({
+      sourceId: "tx-legacy:token:BUY",
+      payload: { price: 0.5, type: "TRADE" },
+      sourceTimestamp: 123,
+      observedTimestamp: 2000,
+    });
+
+    expect(store.listRawEventObservations(raw.rawEventId)).toEqual([
+      expect.objectContaining({
+        observationKey: legacyKey,
+        sourceTimestamp: 123,
+        observedTimestamp: 1000,
       }),
     ]);
   });

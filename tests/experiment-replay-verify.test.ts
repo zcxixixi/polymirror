@@ -104,7 +104,8 @@ describe("sealed deterministic replay", () => {
     store.adjustCash(-1, 10);
     store.recordDecision({
       rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "already_seen",
-      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", reason: "already seen", preview: true },
+      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", size: 10, price: 0.5,
+        reason: "already seen", preview: true },
       decidedAt: 3,
     });
     store.close();
@@ -114,6 +115,59 @@ describe("sealed deterministic replay", () => {
     });
     const result = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
     expect(result.match, JSON.stringify(result, null, 2)).toBe(true);
+  });
+
+  it("replays ordered decisions for changed payload observations sharing one raw event", async () => {
+    const dbPath = join(dir, "changed-observation.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.risk.startingCapitalUsd = 10;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1 };
+    const exp = store.startOrResumeExperiment({
+      accountId: "candidate-changed", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate",
+    }, 100);
+    const first = store.recordRawEvent({
+      sourceId: "buy", payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "token-a",
+        price: 0.5, size: 10, timestamp: 1 },
+      sourceTimestamp: 1, observedTimestamp: 1,
+    });
+    store.recordDecision({
+      rawEventId: first.rawEventId, action: "DETECT", reasonCode: "detected",
+      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", size: 10, price: 0.5, preview: true },
+      decidedAt: 1,
+    });
+    store.recordDecision({
+      rawEventId: first.rawEventId, action: "COPY", reasonCode: "copy_executed",
+      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", requestedShares: 2,
+        requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0, reason: "Fixed $1.00", preview: true },
+      decidedAt: 2,
+    });
+    store.applyCopyFill("whale", "token-a", "BUY", 2, 0.5);
+    store.adjustCash(-1, 10);
+    store.recordRawEvent({
+      sourceId: "buy", payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "token-a",
+        price: 0.6, size: 10, timestamp: 1 },
+      sourceTimestamp: 1, observedTimestamp: 2,
+    });
+    store.setDecisionRawEventIds([first.rawEventId]);
+    store.audit({
+      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.6, preview: true,
+    });
+    store.audit({
+      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.6, reason: "already seen", preview: true,
+    });
+    store.setDecisionRawEventIds([]);
+    store.close();
+
+    const archived = await archiveExperimentEvidence({
+      dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "changed-observation-archive"),
+    });
+    const result = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
+    expect(result.match, JSON.stringify(result, null, 2)).toBe(true);
+    expect(result.actual.coverage).toEqual({ buyPct: 50, sellPct: 0, totalPct: 50 });
   });
 
   it("detects when stored outcomes diverge from the decision evidence", async () => {

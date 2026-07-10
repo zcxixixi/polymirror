@@ -833,14 +833,21 @@ export class StateStore {
     this.db.prepare(
       `INSERT OR IGNORE INTO raw_event_observations
        (observation_key, raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
-       VALUES (?, ?, ?, ?, ?, ?)`
+       SELECT ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM raw_event_observations
+         WHERE raw_event_id = ? AND payload_hash = ? AND source_timestamp = ?
+       )`
     ).run(
       observationKey,
       row.rawEventId,
       payloadHash,
       normalizedPayloadJson(input.payload),
       input.sourceTimestamp,
-      observedTimestamp
+      observedTimestamp,
+      row.rawEventId,
+      payloadHash,
+      input.sourceTimestamp
     );
     return this.getRawEvent(row.rawEventId)!;
     })();

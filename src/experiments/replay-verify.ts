@@ -20,7 +20,8 @@ export interface ReplayEvidenceSummary {
 }
 interface StoredDecision { decisionId: string; rawEventId: string; action: string; reasonCode: string; exactTermsJson: string }
 interface RegeneratedDecision { rawEventId: string; action: string; reasonCode: string; exactTermsJson: string }
-interface RawEvidence { rawEventId: string; sourceId: string | null; payloadHash: string; payloadJson: string; observedTimestamp: number; observationCount: number; rawOrder: number }
+interface RawObservationEvidence { payloadHash: string; payloadJson: string; sourceTimestamp: number; observedTimestamp: number; observationId: number }
+interface RawEvidence { rawEventId: string; sourceId: string | null; payloadHash: string; payloadJson: string; observedTimestamp: number; observationCount: number; rawOrder: number; observations: RawObservationEvidence[] }
 
 function round(value: number): number { return Math.round((value + Number.EPSILON) * 1e8) / 1e8; }
 function requiredNumber(terms: Record<string, unknown>, key: string): number {
@@ -124,11 +125,19 @@ function expectedSettlementSkip(
 }
 
 function loadEvidence(db: Database.Database, experimentId: string): { raw: RawEvidence[]; decisions: StoredDecision[] } {
-  const raw = db.prepare(`SELECT r.raw_event_id AS rawEventId, r.source_id AS sourceId, r.payload_hash AS payloadHash,
+  const rawRows = db.prepare(`SELECT r.raw_event_id AS rawEventId, r.source_id AS sourceId, r.payload_hash AS payloadHash,
     r.normalized_payload_json AS payloadJson, r.observed_timestamp AS observedTimestamp,
     (SELECT COUNT(*) FROM raw_event_observations o WHERE o.raw_event_id=r.raw_event_id) AS observationCount,
     (SELECT MIN(observation_id) FROM raw_event_observations o WHERE o.raw_event_id=r.raw_event_id) AS rawOrder
-    FROM raw_events r WHERE r.experiment_id=? ORDER BY rawOrder`).all(experimentId) as RawEvidence[];
+    FROM raw_events r WHERE r.experiment_id=? ORDER BY rawOrder`).all(experimentId) as Array<Omit<RawEvidence, "observations">>;
+  const observationStmt = db.prepare(`SELECT payload_hash AS payloadHash,
+    normalized_payload_json AS payloadJson, source_timestamp AS sourceTimestamp,
+    observed_timestamp AS observedTimestamp, observation_id AS observationId
+    FROM raw_event_observations WHERE raw_event_id=? ORDER BY observation_id`);
+  const raw = rawRows.map((row): RawEvidence => ({
+    ...row,
+    observations: observationStmt.all(row.rawEventId) as RawObservationEvidence[],
+  }));
   const decisions = db.prepare(`SELECT decision_id AS decisionId, raw_event_id AS rawEventId, action,
     reason_code AS reasonCode, exact_terms_json AS exactTermsJson FROM decisions
     WHERE experiment_id=? ORDER BY decision_order, decided_at, decision_id`).all(experimentId) as StoredDecision[];
@@ -136,14 +145,50 @@ function loadEvidence(db: Database.Database, experimentId: string): { raw: RawEv
   if (decisions.some((row) => !rawIds.has(row.rawEventId))) throw new Error("Replay evidence has decisions without stored raw events");
   for (const row of raw) {
     if (sha256Text(row.payloadJson) !== row.payloadHash) throw new Error("Replay raw observation payload checksum mismatch");
-    const observations = db.prepare(`SELECT payload_hash AS payloadHash, normalized_payload_json AS payloadJson
-      FROM raw_event_observations WHERE raw_event_id=?`).all(row.rawEventId) as { payloadHash: string; payloadJson: string }[];
-    if (decisions.some((d) => d.rawEventId === row.rawEventId) && observations.length === 0) throw new Error("Replay evidence has decisions without stored raw observation evidence");
-    for (const observation of observations) if (sha256Text(observation.payloadJson) !== observation.payloadHash) throw new Error("Replay raw observation payload checksum mismatch");
+    if (decisions.some((d) => d.rawEventId === row.rawEventId) && row.observations.length === 0) throw new Error("Replay evidence has decisions without stored raw observation evidence");
+    for (const observation of row.observations) if (sha256Text(observation.payloadJson) !== observation.payloadHash) throw new Error("Replay raw observation payload checksum mismatch");
   }
   return { raw, decisions };
 }
 function sha256Text(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+
+function splitDecisionGroups(decisions: StoredDecision[]): StoredDecision[][] {
+  const groups: StoredDecision[][] = [];
+  for (const decision of decisions) {
+    if (decision.action === "DETECT") groups.push([]);
+    const current = groups.at(-1);
+    if (!current) throw new Error("Re-execution decision set mismatch: terminal decision precedes DETECT");
+    current.push(decision);
+  }
+  return groups;
+}
+
+function matchesTradeDetection(observation: RawObservationEvidence, detection: StoredDecision): boolean {
+  const payload = JSON.parse(observation.payloadJson) as Activity & { leaderId?: string };
+  if (payload.type !== "TRADE") return false;
+  const terms = JSON.parse(detection.exactTermsJson) as Record<string, unknown>;
+  return terms.leaderId === payload.leaderId
+    && terms.tokenId === payload.asset
+    && terms.side === payload.side
+    && (terms.size === undefined || terms.size === null || terms.size === (payload.size ?? null))
+    && (terms.price === undefined || terms.price === null || terms.price === (payload.price ?? null));
+}
+
+function tradeDecisionGroups(raw: RawEvidence, decisions: StoredDecision[]): Array<{ activity: Activity & { leaderId?: string }; decisions: StoredDecision[] }> {
+  let observationIndex = 0;
+  return splitDecisionGroups(decisions).map((group) => {
+    const detection = group[0]!;
+    while (observationIndex < raw.observations.length && !matchesTradeDetection(raw.observations[observationIndex]!, detection)) {
+      observationIndex++;
+    }
+    const observation = raw.observations[observationIndex++];
+    if (!observation) throw new Error(`Re-execution decision evidence has no matching raw observation: ${raw.rawEventId}`);
+    return {
+      activity: JSON.parse(observation.payloadJson) as Activity & { leaderId?: string },
+      decisions: group,
+    };
+  });
+}
 
 function validateAndApplyTrade(
   config: RuntimeConfig, leader: LeaderConfig, activity: Activity, decisions: StoredDecision[],
@@ -193,7 +238,8 @@ function validateAndApplyTrade(
     return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: 0, copiedSell: 0,
       specs: [
         { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, size: activity.size ?? null, price: activity.price ?? null, preview: config.app.global.previewMode } },
-        { action: "SKIP", reasonCode: replaySkipReasonCode(reason), derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, reason, preview: config.app.global.previewMode } },
+        { action: "SKIP", reasonCode: replaySkipReasonCode(reason), derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side,
+          size: activity.size ?? null, price: activity.price ?? null, reason, preview: config.app.global.previewMode } },
       ] };
   }
   const trailingDuplicateSkip = decisions.length === 3 && decisions[2]?.action === "SKIP" && decisions[2]?.reasonCode === "already_seen";
@@ -266,7 +312,8 @@ function validateAndApplyTrade(
     } },
   ];
   if (trailingDuplicateSkip) specs.push({ action: "SKIP", reasonCode: "already_seen", derivedTerms: {
-    leaderId: leader.id, tokenId: activity.asset, side, reason: "already seen", preview: config.app.global.previewMode,
+    leaderId: leader.id, tokenId: activity.asset, side, size: activity.size ?? null, price: activity.price ?? null,
+    reason: "already seen", preview: config.app.global.previewMode,
   } });
   return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: side === "BUY" ? 1 : 0, copiedSell: side === "SELL" ? 1 : 0, specs };
 }
@@ -435,10 +482,17 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
             { action: "SKIP", reasonCode: "unsupported_or_incomplete_activity", derivedTerms: { leaderId, tokenId: payload.asset ?? null, side: payload.side ?? null, reason: "unsupported or incomplete activity" } },
           ])); continue;
         }
-        const result = validateAndApplyTrade(config, leader, payload, decisions, positions, cash, realized);
-        detectedBuy += result.detectedBuy; detectedSell += result.detectedSell;
-        copiedBuy += result.copiedBuy; copiedSell += result.copiedSell;
-        regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, result.specs));
+        for (const group of tradeDecisionGroups(raw, decisions)) {
+          const groupLeaderId = group.activity.leaderId;
+          const groupLeader = groupLeaderId
+            ? config.app.leaders.find((candidate) => candidate.id === groupLeaderId)
+            : undefined;
+          if (!groupLeader) throw new Error(`Re-execution leader is absent from canonical config: ${groupLeaderId ?? "missing"}`);
+          const result = validateAndApplyTrade(config, groupLeader, group.activity, group.decisions, positions, cash, realized);
+          detectedBuy += result.detectedBuy; detectedSell += result.detectedSell;
+          copiedBuy += result.copiedBuy; copiedSell += result.copiedSell;
+          regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, group.decisions, result.specs));
+        }
       } else if (payload.type === "REDEEM" || (payload as { type?: string }).type === "AUTO_SETTLEMENT") {
         const redeem = decisions.find((decision) => decision.action === "REDEEM");
         if (!redeem) {
