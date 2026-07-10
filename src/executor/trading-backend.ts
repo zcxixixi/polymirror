@@ -29,12 +29,23 @@ export interface OpenOrderRow {
   size: number;
 }
 
+export interface CompletedOrderFill {
+  orderId: string;
+  tokenId: string;
+  side: TradeSide;
+  averagePrice: number;
+  shares: number;
+  usd: number;
+  matchedAt: number;
+}
+
 export interface TradingBackend {
   readonly kind: WalletConfig["tradingBackend"];
   submitOrder(req: SubmitOrderRequest): Promise<SubmitOrderResponse>;
   getOrderStatus(orderId: string, tokenId?: string): Promise<OrderStatusResult>;
   cancelOrder(orderId: string): Promise<{ ok: boolean; error?: string }>;
   listOpenOrders(filter?: { tokenId?: string }): Promise<OpenOrderRow[]>;
+  listRecentCompletedFills(sinceMs: number): Promise<CompletedOrderFill[]>;
 }
 
 export function createTradingBackend(wallet: WalletConfig): TradingBackend {

@@ -1,5 +1,6 @@
 import type { LiveOrderIntentRow, StateStore } from "../state/store.js";
 import type { ClobExecutor } from "../executor/clob.js";
+import type { CompletedOrderFill } from "../executor/trading-backend.js";
 import { logInfo } from "../notify/logger.js";
 
 /** Leader id for orders recovered from CLOB without local metadata. */
@@ -7,6 +8,10 @@ export const RECOVERED_ORDER_LEADER = "_recovered";
 const INTENT_PRICE_TOLERANCE = 0.01;
 const INTENT_SIZE_TOLERANCE = 0.05;
 const LIVE_ORDER_INTENT_RECOVERY_MS = 2 * 60_000;
+const COMPLETED_FILL_CLOCK_SKEW_MS = 5_000;
+const COMPLETED_FILL_PRICE_EPSILON = 1e-8;
+const COMPLETED_BUY_NOTIONAL_TOLERANCE_PCT = 0.05;
+const COMPLETED_BUY_NOTIONAL_TOLERANCE_USD = 0.05;
 
 type OpenOrder = Awaited<ReturnType<ClobExecutor["listOpenOrders"]>>[number];
 
@@ -31,18 +36,55 @@ function roundUsd(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function matchesCompletedFill(
+  intent: LiveOrderIntentRow,
+  fill: CompletedOrderFill
+): boolean {
+  if (intent.tokenId !== fill.tokenId || intent.side !== fill.side) return false;
+  if (
+    !Number.isFinite(fill.averagePrice) ||
+    fill.averagePrice <= 0 ||
+    !Number.isFinite(fill.shares) ||
+    fill.shares <= 0 ||
+    !Number.isFinite(fill.usd) ||
+    fill.usd <= 0 ||
+    !Number.isFinite(fill.matchedAt)
+  ) {
+    return false;
+  }
+  if (fill.matchedAt < intent.createdAt - COMPLETED_FILL_CLOCK_SKEW_MS) return false;
+  if (fill.matchedAt > intent.createdAt + LIVE_ORDER_INTENT_RECOVERY_MS) return false;
+
+  if (intent.side === "BUY") {
+    if (fill.averagePrice > intent.price + COMPLETED_FILL_PRICE_EPSILON) return false;
+    const expectedUsd = roundUsd(intent.price * intent.size);
+    const shortfallTolerance = Math.max(
+      COMPLETED_BUY_NOTIONAL_TOLERANCE_USD,
+      expectedUsd * COMPLETED_BUY_NOTIONAL_TOLERANCE_PCT
+    );
+    return (
+      fill.usd >= expectedUsd - shortfallTolerance &&
+      fill.usd <= expectedUsd + 0.01
+    );
+  }
+
+  if (fill.averagePrice < intent.price - COMPLETED_FILL_PRICE_EPSILON) return false;
+  return Math.abs(fill.shares - intent.size) <= INTENT_SIZE_TOLERANCE;
+}
+
 function expireStaleIntents(
   store: StateStore,
   intents: LiveOrderIntentRow[],
-  claimedIntentIds: Set<string>,
+  retainedIntentIds: Set<string>,
   now: number
 ): string[] {
   const warnings: string[] = [];
   for (const intent of intents) {
-    if (claimedIntentIds.has(intent.intentId)) continue;
+    if (retainedIntentIds.has(intent.intentId)) continue;
     if (now - intent.createdAt < LIVE_ORDER_INTENT_RECOVERY_MS) continue;
 
-    const reason = "uncertain live order intent expired without matching open CLOB order";
+    const reason =
+      "uncertain live order intent expired without matching open order or completed fill";
     store.expireLiveOrderIntentAsUncertain(intent, reason);
     warnings.push(
       `expired uncertain live order intent ${intent.intentId.slice(0, 12)} for ${intent.leaderId}`
@@ -57,10 +99,21 @@ export async function adoptUntrackedOpenOrders(
   store: StateStore
 ): Promise<{ adopted: number; warnings: string[] }> {
   const warnings: string[] = [];
-  const open = await executor.listOpenOrders();
+  let open: OpenOrder[];
+  try {
+    open = await executor.listOpenOrders();
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    warnings.push(`open order recovery lookup failed (${message}); live intents retained`);
+    return { adopted: 0, warnings };
+  }
   const pendingIds = new Set(store.listPendingOrders().map((r) => r.orderId));
   const intents = store.listLiveOrderIntents();
   const claimedIntentIds = new Set<string>();
+  const reservedOrderIds = new Set<string>([
+    ...pendingIds,
+    ...open.map((order) => order.orderId),
+  ]);
   let adopted = 0;
 
   for (const order of open) {
@@ -132,7 +185,89 @@ export async function adoptUntrackedOpenOrders(
     });
   }
 
-  warnings.push(...expireStaleIntents(store, intents, claimedIntentIds, Date.now()));
+  const unmatchedIntents = intents.filter(
+    (intent) => !claimedIntentIds.has(intent.intentId)
+  );
+  if (unmatchedIntents.length === 0) return { adopted, warnings };
+
+  const earliestIntentAt = Math.min(...unmatchedIntents.map((intent) => intent.createdAt));
+  const fillLookup = await executor.listRecentCompletedFills(
+    Math.max(0, earliestIntentAt - COMPLETED_FILL_CLOCK_SKEW_MS)
+  );
+  if (fillLookup.kind === "transient") {
+    warnings.push(
+      `completed fill recovery lookup failed (${fillLookup.message}); live intents retained`
+    );
+    return { adopted, warnings };
+  }
+
+  const availableFills = fillLookup.fills.filter(
+    (fill) => !reservedOrderIds.has(fill.orderId)
+  );
+  const candidatesByIntent = new Map<string, CompletedOrderFill[]>();
+  const matchingIntentCountByOrder = new Map<string, number>();
+  for (const intent of unmatchedIntents) {
+    const candidates = availableFills.filter((fill) => matchesCompletedFill(intent, fill));
+    candidatesByIntent.set(intent.intentId, candidates);
+    for (const fill of candidates) {
+      matchingIntentCountByOrder.set(
+        fill.orderId,
+        (matchingIntentCountByOrder.get(fill.orderId) ?? 0) + 1
+      );
+    }
+  }
+
+  const ambiguousIntentIds = new Set<string>();
+  for (const intent of unmatchedIntents) {
+    const candidates = candidatesByIntent.get(intent.intentId) ?? [];
+    const fill = candidates[0];
+    const isUnique =
+      candidates.length === 1 &&
+      fill !== undefined &&
+      matchingIntentCountByOrder.get(fill.orderId) === 1;
+    if (!isUnique) {
+      if (candidates.length > 0) {
+        ambiguousIntentIds.add(intent.intentId);
+        warnings.push(
+          `ambiguous completed fill recovery for live order intent ${intent.intentId.slice(0, 12)}`
+        );
+      }
+      continue;
+    }
+
+    store.recordLiveOrderAccepted({
+      tradeKeys: intent.tradeKeys,
+      leaderId: intent.leaderId,
+      tokenId: fill.tokenId,
+      side: fill.side,
+      price: fill.averagePrice,
+      orderSize: fill.shares,
+      filledShares: fill.shares,
+      filledUsd: fill.usd,
+      auditReason: `${intent.reasoning}; recovered completed immediate fill after restart`,
+      orderId: fill.orderId,
+      pendingRemaining: 0,
+      trackPendingGtc: false,
+      market: intent.market,
+      intentId: intent.intentId,
+    });
+    claimedIntentIds.add(intent.intentId);
+    reservedOrderIds.add(fill.orderId);
+    adopted++;
+    logInfo("Recovered completed immediate CLOB fill from live intent", {
+      orderId: fill.orderId.slice(0, 12),
+      token: fill.tokenId.slice(0, 12),
+      side: fill.side,
+      shares: fill.shares,
+      usd: fill.usd,
+    });
+  }
+
+  const retainedIntentIds = new Set([
+    ...claimedIntentIds,
+    ...ambiguousIntentIds,
+  ]);
+  warnings.push(...expireStaleIntents(store, intents, retainedIntentIds, Date.now()));
   return { adopted, warnings };
 }
 

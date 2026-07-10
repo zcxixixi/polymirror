@@ -11,11 +11,13 @@ import {
 
 const mockListOpenOrders = vi.fn();
 const mockGetOrderStatus = vi.fn();
+const mockListRecentCompletedFills = vi.fn();
 
 vi.mock("../src/executor/clob.js", () => ({
   ClobExecutor: class {
     listOpenOrders = mockListOpenOrders;
     getOrderStatus = mockGetOrderStatus;
+    listRecentCompletedFills = mockListRecentCompletedFills;
   },
 }));
 
@@ -27,6 +29,8 @@ beforeEach(() => {
   store = new StateStore(join(dir, "test.db"));
   mockListOpenOrders.mockReset();
   mockGetOrderStatus.mockReset();
+  mockListRecentCompletedFills.mockReset();
+  mockListRecentCompletedFills.mockResolvedValue({ kind: "ok", fills: [] });
 });
 
 afterEach(() => {
@@ -107,6 +111,187 @@ describe("adoptUntrackedOpenOrders", () => {
     expect(row?.tradeKey).toBe("source-a");
     expect(row?.filledShares).toBe(5);
     expect(store.getPosition("whale", "tok-abc")).toBe(5);
+  });
+
+  it("recovers a completed immediate fill after submit succeeded but local commit crashed", async () => {
+    const createdAt = Date.now() - 10 * 60_000;
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-a", "source-b"],
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      price: 0.55,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, createdAt);
+    mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockResolvedValue({
+      kind: "ok",
+      fills: [
+        {
+          orderId: "clob-fok-1",
+          tokenId: "tok-abc",
+          side: "BUY",
+          averagePrice: 0.54,
+          shares: 20,
+          usd: 10.8,
+          matchedAt: createdAt + 1_000,
+        },
+      ],
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(1);
+    expect(warnings).toEqual([]);
+    expect(store.getPosition("whale", "tok-abc")).toBe(20);
+    expect(store.hasSeen("source-a")).toBe(true);
+    expect(store.hasSeen("source-b")).toBe(true);
+    expect(store.listLiveOrderIntents()).toHaveLength(0);
+    expect(store.countPendingOrders()).toBe(0);
+    expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      size: 20,
+      price: 0.54,
+    });
+  });
+
+  it("keeps a stale intent when completed fill matching is ambiguous", async () => {
+    const createdAt = Date.now() - 10 * 60_000;
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-a"],
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      price: 0.55,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, createdAt);
+    mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockResolvedValue({
+      kind: "ok",
+      fills: [
+        {
+          orderId: "clob-fok-1",
+          tokenId: "tok-abc",
+          side: "BUY",
+          averagePrice: 0.54,
+          shares: 20,
+          usd: 10.8,
+          matchedAt: createdAt + 1_000,
+        },
+        {
+          orderId: "clob-fok-2",
+          tokenId: "tok-abc",
+          side: "BUY",
+          averagePrice: 0.53,
+          shares: 20.5,
+          usd: 10.87,
+          matchedAt: createdAt + 2_000,
+        },
+      ],
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(0);
+    expect(warnings.some((w) => w.includes("ambiguous completed fill recovery"))).toBe(true);
+    expect(store.hasSeen("source-a")).toBe(false);
+    expect(store.listLiveOrderIntents().map((r) => r.intentId)).toEqual([intentId]);
+    expect(store.getPosition("whale", "tok-abc")).toBe(0);
+  });
+
+  it("does not adopt a completed BUY fill above the intent limit", async () => {
+    const createdAt = Date.now() - 10 * 60_000;
+    store.recordLiveOrderIntent({
+      tradeKeys: ["source-a"],
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      price: 0.55,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    const [intent] = store.listLiveOrderIntents();
+    store.setLiveOrderIntentTimestamps(intent!.intentId, createdAt);
+    mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockResolvedValue({
+      kind: "ok",
+      fills: [
+        {
+          orderId: "clob-other-1",
+          tokenId: "tok-abc",
+          side: "BUY",
+          averagePrice: 0.555,
+          shares: 19.64,
+          usd: 10.9,
+          matchedAt: createdAt + 1_000,
+        },
+      ],
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(0);
+    expect(warnings.some((w) => w.includes("expired uncertain live order intent"))).toBe(true);
+    expect(store.getPosition("whale", "tok-abc")).toBe(0);
+    expect(store.listLiveOrderIntents()).toHaveLength(0);
+  });
+
+  it("keeps a stale intent when completed fill lookup is transient", async () => {
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-a"],
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      price: 0.55,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, Date.now() - 10 * 60_000);
+    mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockResolvedValue({
+      kind: "transient",
+      message: "CLOB unavailable",
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(0);
+    expect(warnings.some((w) => w.includes("completed fill recovery lookup failed"))).toBe(true);
+    expect(store.hasSeen("source-a")).toBe(false);
+    expect(store.listLiveOrderIntents().map((r) => r.intentId)).toEqual([intentId]);
+  });
+
+  it("keeps a stale intent when open order lookup is transient", async () => {
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-a"],
+      leaderId: "whale",
+      tokenId: "tok-abc",
+      side: "BUY",
+      price: 0.55,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, Date.now() - 10 * 60_000);
+    mockListOpenOrders.mockRejectedValue(new Error("open orders unavailable"));
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(0);
+    expect(warnings.some((w) => w.includes("open order recovery lookup failed"))).toBe(true);
+    expect(mockListRecentCompletedFills).not.toHaveBeenCalled();
+    expect(store.hasSeen("source-a")).toBe(false);
+    expect(store.listLiveOrderIntents().map((r) => r.intentId)).toEqual([intentId]);
   });
 
   it("expires stale live order intents as uncertain without retrying the source trade", async () => {

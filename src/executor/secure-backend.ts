@@ -4,6 +4,7 @@ import type { OrderStatusResult } from "./clob.js";
 import { formatPriceForTick } from "./orderbook.js";
 import { getSecureClient } from "./secure-client.js";
 import type {
+  CompletedOrderFill,
   OpenOrderRow,
   SubmitOrderRequest,
   SubmitOrderResponse,
@@ -24,6 +25,19 @@ function isTerminalStatus(status: string): boolean {
  */
 function isOrderNoLongerOpen(msg: string): boolean {
   return /404|not found/i.test(msg) || /expected object, received null/i.test(msg);
+}
+
+function parseMatchedAt(value: string): number {
+  const raw = String(value);
+  if (/^\d+$/.test(raw)) {
+    const epoch = Number(raw);
+    return epoch < 1_000_000_000_000 ? epoch * 1000 : epoch;
+  }
+  return Date.parse(raw);
+}
+
+function roundFillValue(value: number): number {
+  return Math.round(value * 100_000_000) / 100_000_000;
 }
 
 function mapAcceptedResponse(resp: {
@@ -65,10 +79,12 @@ export class SecureTradingBackend implements TradingBackend {
 
     const sdkOrderType = req.orderType === "FOK" ? SdkOrderType.FOK : SdkOrderType.FAK;
     if (req.side === "BUY") {
+      const amount = Math.round(parseFloat(price) * req.size * 100) / 100;
       const resp = await client.placeMarketOrder({
         tokenId: req.tokenId,
         side: OrderSide.BUY,
-        amount: Math.round(parseFloat(price) * req.size * 100) / 100,
+        amount,
+        maxSpend: amount,
         maxPrice: price,
         orderType: sdkOrderType,
       });
@@ -140,6 +156,76 @@ export class SecureTradingBackend implements TradingBackend {
       }
     }
     return Math.round(matched * 100) / 100;
+  }
+
+  async listRecentCompletedFills(sinceMs: number): Promise<CompletedOrderFill[]> {
+    const client = await getSecureClient(this.wallet);
+    const groups = new Map<
+      string,
+      CompletedOrderFill & { invalid: boolean }
+    >();
+    const after = String(Math.floor(sinceMs / 1000));
+
+    for await (const page of client.listAccountTrades({ after })) {
+      for (const trade of page.items) {
+        if (String(trade.status ?? "").toUpperCase().includes("FAILED")) continue;
+        if (String(trade.traderSide ?? "").toUpperCase() !== "TAKER") continue;
+
+        const orderId = String(trade.takerOrderId ?? "").trim();
+        const tokenId = String(trade.tokenId ?? "").trim();
+        const sideValue = String(trade.side ?? "").toUpperCase();
+        const side = sideValue === "BUY" || sideValue === "SELL" ? sideValue : undefined;
+        const price = parseFloat(String(trade.price ?? "0"));
+        const shares = parseFloat(String(trade.size ?? "0"));
+        const matchedAt = parseMatchedAt(String(trade.matchedAt ?? ""));
+        if (
+          !orderId ||
+          !tokenId ||
+          !side ||
+          !Number.isFinite(price) ||
+          price <= 0 ||
+          !Number.isFinite(shares) ||
+          shares <= 0 ||
+          !Number.isFinite(matchedAt) ||
+          matchedAt < sinceMs
+        ) {
+          continue;
+        }
+
+        const usd = price * shares;
+        const existing = groups.get(orderId);
+        if (!existing) {
+          groups.set(orderId, {
+            orderId,
+            tokenId,
+            side,
+            averagePrice: price,
+            shares,
+            usd,
+            matchedAt,
+            invalid: false,
+          });
+          continue;
+        }
+        if (existing.tokenId !== tokenId || existing.side !== side) {
+          existing.invalid = true;
+          continue;
+        }
+        existing.shares += shares;
+        existing.usd += usd;
+        existing.matchedAt = Math.max(existing.matchedAt, matchedAt);
+      }
+    }
+
+    return [...groups.values()]
+      .filter((fill) => !fill.invalid && fill.shares > 0 && fill.usd > 0)
+      .map(({ invalid: _invalid, ...fill }) => ({
+        ...fill,
+        averagePrice: roundFillValue(fill.usd / fill.shares),
+        shares: roundFillValue(fill.shares),
+        usd: roundFillValue(fill.usd),
+      }))
+      .sort((a, b) => a.matchedAt - b.matchedAt || a.orderId.localeCompare(b.orderId));
   }
 
   async cancelOrder(orderId: string): Promise<{ ok: boolean; error?: string }> {

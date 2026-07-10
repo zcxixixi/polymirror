@@ -5,7 +5,11 @@ import {
   roundToTick,
   toOrderType,
 } from "./orderbook.js";
-import { createTradingBackend, type TradingBackend } from "./trading-backend.js";
+import {
+  createTradingBackend,
+  type CompletedOrderFill,
+  type TradingBackend,
+} from "./trading-backend.js";
 import { logError, logInfo } from "../notify/logger.js";
 import { OrderType } from "@polymarket/client";
 
@@ -40,6 +44,10 @@ export interface OrderStatusSnapshot {
 export type OrderStatusResult =
   | { kind: "ok"; status: OrderStatusSnapshot }
   | { kind: "not_found" }
+  | { kind: "transient"; message: string };
+
+export type CompletedFillLookupResult =
+  | { kind: "ok"; fills: CompletedOrderFill[] }
   | { kind: "transient"; message: string };
 
 /** Parse CLOB POST /order body (V1 orderID or V2 order_id; empty string = missing). */
@@ -330,7 +338,21 @@ export class ClobExecutor {
       logError("List open orders failed", {
         error: e instanceof Error ? e.message : String(e),
       });
-      return [];
+      throw e;
+    }
+  }
+
+  async listRecentCompletedFills(sinceMs: number): Promise<CompletedFillLookupResult> {
+    if (this.global.previewMode) return { kind: "ok", fills: [] };
+    try {
+      return {
+        kind: "ok",
+        fills: await this.backend.listRecentCompletedFills(sinceMs),
+      };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      logError("List recent completed fills failed", { error: message });
+      return { kind: "transient", message };
     }
   }
 

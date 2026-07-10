@@ -6,6 +6,7 @@ import type { GlobalConfig, WalletConfig } from "../src/config/types.js";
 const mockSubmitOrder = vi.fn();
 const mockGetOrderStatus = vi.fn();
 const mockListOpenOrders = vi.fn(async () => []);
+const mockListRecentCompletedFills = vi.fn(async () => []);
 
 vi.mock("../src/executor/orderbook.js", () => ({
   fetchOrderBookMeta: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock("../src/executor/trading-backend.js", () => ({
 	    getOrderStatus: mockGetOrderStatus,
 	    cancelOrder: vi.fn(),
 	    listOpenOrders: mockListOpenOrders,
+	    listRecentCompletedFills: mockListRecentCompletedFills,
 	  })),
 	}));
 
@@ -79,6 +81,8 @@ describe("ClobExecutor", () => {
     mockGetOrderStatus.mockReset();
     mockListOpenOrders.mockReset();
     mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockReset();
+    mockListRecentCompletedFills.mockResolvedValue([]);
     mockFetchOrderBookMeta.mockReset();
     mockFetchOrderBookMeta.mockResolvedValue({ tickSize: "0.01", negRisk: false });
   });
@@ -197,5 +201,23 @@ describe("ClobExecutor", () => {
       filledUsd: 1,
       pendingRemaining: 0,
     });
+  });
+
+  it("reports completed fill lookup failures as transient", async () => {
+    mockListRecentCompletedFills.mockRejectedValueOnce(new Error("CLOB unavailable"));
+
+    const result = await new ClobExecutor(wallet, global).listRecentCompletedFills(
+      Date.now() - 60_000
+    );
+
+    expect(result).toEqual({ kind: "transient", message: "CLOB unavailable" });
+  });
+
+  it("propagates open order lookup failures to recovery", async () => {
+    mockListOpenOrders.mockRejectedValueOnce(new Error("open orders unavailable"));
+
+    await expect(new ClobExecutor(wallet, global).listOpenOrders()).rejects.toThrow(
+      "open orders unavailable"
+    );
   });
 });
