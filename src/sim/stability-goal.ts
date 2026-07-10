@@ -4,6 +4,8 @@ export type StabilityGoalStatus = "qualified" | "collecting" | "not_qualified";
 
 export interface StabilityGoalThresholds {
   minObservationDays: number;
+  minActiveTradingDays: number;
+  maxLastCopyAgeHours: number;
   minRedeemCount: number;
   minSettledMarkets: number;
   minOverallWinRatePct: number;
@@ -45,6 +47,8 @@ export interface StabilityGoalEvidence {
 
 const DEFAULT_THRESHOLDS: StabilityGoalThresholds = {
   minObservationDays: 14,
+  minActiveTradingDays: 10,
+  maxLastCopyAgeHours: 24,
   minRedeemCount: 100,
   minSettledMarkets: 30,
   minOverallWinRatePct: 70,
@@ -103,6 +107,14 @@ export function assessStabilityGoal(
 
   const recentErrorCount =
     evidence.recentErrorCount ?? report.recentWindow?.errorCount ?? report.errorCount;
+  const lastCopyAgeHours =
+    goal.lastCopyAtMs === null
+      ? null
+      : Math.max(0, (Date.now() - goal.lastCopyAtMs) / (60 * 60_000));
+  const lastCopyFresh =
+    lastCopyAgeHours !== null && lastCopyAgeHours <= t.maxLastCopyAgeHours;
+  const lastCopyStale =
+    lastCopyAgeHours !== null && lastCopyAgeHours > t.maxLastCopyAgeHours;
   const unclassifiedCopyGap =
     report.copyQuality.copyGap.buy.unclassified +
     report.copyQuality.copyGap.sell.unclassified;
@@ -137,6 +149,22 @@ export function assessStabilityGoal(
       t.minObservationDays,
       ">=",
       goal.observationDays >= t.minObservationDays
+    ),
+    check(
+      "active_trading_days",
+      `活跃交易日 >= ${t.minActiveTradingDays} 天`,
+      goal.activeTradingDays,
+      t.minActiveTradingDays,
+      ">=",
+      goal.activeTradingDays >= t.minActiveTradingDays
+    ),
+    check(
+      "last_copy_age",
+      `最近 COPY <= ${t.maxLastCopyAgeHours} 小时`,
+      lastCopyAgeHours,
+      t.maxLastCopyAgeHours,
+      "<=",
+      lastCopyFresh
     ),
     check(
       "slippage_observation_days",
@@ -315,6 +343,7 @@ export function assessStabilityGoal(
   const failedChecks = failed.map((entry) => entry.key);
   const evidenceChecks = new Set([
     "observation_days",
+    "active_trading_days",
     "slippage_observation_days",
     "redeem_sample",
     "settled_markets",
@@ -325,6 +354,7 @@ export function assessStabilityGoal(
   const sampleEvidenceIncomplete = failed.some(
     (entry) =>
       evidenceChecks.has(entry.key) ||
+      (entry.key === "last_copy_age" && lastCopyAgeHours === null) ||
       (entry.key === "overall_slip" && overallSlip === null) ||
       (entry.key === "recent20_slip" && recent20Slip === null)
   );
@@ -332,6 +362,7 @@ export function assessStabilityGoal(
   const matureRecent20 = goal.recent20.marketCount >= t.minRecent20Markets;
   const hasHardFailure =
     !executableGuarded ||
+    lastCopyStale ||
     !accountingClean ||
     !pendingClean ||
     recentErrorCount > 0 ||

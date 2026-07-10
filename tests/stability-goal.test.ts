@@ -17,7 +17,7 @@ function goalMetrics(): PreviewGoalMetrics {
     observationDays: 16,
     activeTradingDays: 15,
     firstCopyAtMs: 1,
-    lastCopyAtMs: 2,
+    lastCopyAtMs: Date.now() - 60 * 60_000,
     settledMarketCount: 40,
     copyPnlUsd: 20,
     grossCopyVolumeUsd: 200,
@@ -147,6 +147,42 @@ describe("assessStabilityGoal", () => {
       status: "qualified",
       failedChecks: [],
     });
+  });
+
+  it("does not qualify a 14-day observation with only one active trading day", () => {
+    const input = report();
+    input.goalMetrics!.activeTradingDays = 1;
+
+    const result = assessStabilityGoal(input);
+
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toContain("active_trading_days");
+    expect(result.blockers).toContain("活跃交易日 >= 10 天");
+    expect(result.thresholds.minActiveTradingDays).toBe(10);
+  });
+
+  it("does not qualify enough active days when the last copy is stale", () => {
+    const input = report();
+    input.goalMetrics!.activeTradingDays = 10;
+    input.goalMetrics!.lastCopyAtMs = Date.now() - 25 * 60 * 60_000;
+
+    const result = assessStabilityGoal(input);
+
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toContain("last_copy_age");
+    expect(result.blockers).toContain("最近 COPY <= 24 小时");
+    expect(result.thresholds.maxLastCopyAgeHours).toBe(24);
+  });
+
+  it("keeps the goal collecting when the last copy timestamp is missing", () => {
+    const input = report();
+    input.goalMetrics!.lastCopyAtMs = null;
+
+    const result = assessStabilityGoal(input);
+
+    expect(result.passed).toBe(false);
+    expect(result.status).toBe("collecting");
+    expect(result.failedChecks).toContain("last_copy_age");
   });
 
   it("treats unavailable slippage as missing evidence instead of zero loss", () => {
