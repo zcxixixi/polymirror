@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readRuntimeProvenance } from "../src/experiments/provenance.js";
 
@@ -76,6 +77,23 @@ describe("Candidate deployment provenance", () => {
       expect(patchCopy).toBeGreaterThan(-1);
       expect(patchCopy).toBeLessThan(rootInstall);
     }
+  });
+
+  it("copies every dashboard repository-relative raw dependency before build", () => {
+    const sourcePath = "dashboard/src/pages/Docs.tsx";
+    const source = readFileSync(sourcePath, "utf8");
+    const imports = [...source.matchAll(/from\s+["'](\.\.\/\.\.\/\.\.\/[^"']+\?raw)["']/g)]
+      .map((match) => match[1]!.replace(/\?raw$/, ""));
+    expect(imports.length).toBeGreaterThan(0);
+    for (const imported of imports) {
+      expect(existsSync(resolve(dirname(sourcePath), imported))).toBe(true);
+    }
+
+    const builder = readFileSync("Dockerfile", "utf8").split(/^FROM .* AS runner$/m)[0]!;
+    const docsCopy = builder.indexOf("COPY docs ./docs");
+    const build = builder.indexOf("RUN npm run build");
+    expect(docsCopy).toBeGreaterThan(-1);
+    expect(docsCopy).toBeLessThan(build);
   });
 
   it("requires Candidate provenance in Compose and provides a fail-closed deployment script", () => {
