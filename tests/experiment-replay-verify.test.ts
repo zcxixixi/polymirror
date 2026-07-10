@@ -2,6 +2,7 @@ import { appendFileSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import { archiveExperimentEvidence } from "../src/experiments/archive.js";
 import { verifyExperimentReplay } from "../src/experiments/replay-verify.js";
 import { StateStore } from "../src/state/store.js";
@@ -44,17 +45,17 @@ describe("sealed deterministic replay", () => {
       { leaderId: "whale", type: "REDEEM", conditionId: "condition-a", timestamp: 3 },
     ].map((payload, index) => store.recordRawEvent({ sourceId: ["buy", "sell", "redeem"][index], payload, sourceTimestamp: index + 1, observedTimestamp: index + 1 }));
     store.upsertTokenMarket({ tokenId: "token-a", conditionId: "condition-a" });
-    store.recordDecision({ rawEventId: raw[0]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY" }, decidedAt: 1 });
-    store.recordDecision({ rawEventId: raw[0]!.rawEventId, action: "COPY", reasonCode: "copy_executed", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", requestedShares: 4, requestedPrice: 0.5, filledShares: 4, filledUsd: 2, feeUsd: 0 }, decidedAt: 2 });
+    store.recordDecision({ rawEventId: raw[0]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", size: 10, price: 0.5, preview: true }, decidedAt: 1 });
+    store.recordDecision({ rawEventId: raw[0]!.rawEventId, action: "COPY", reasonCode: "copy_executed", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", requestedShares: 4, requestedPrice: 0.5, filledShares: 4, filledUsd: 2, feeUsd: 0, reason: "Fixed $2.00", preview: true }, decidedAt: 2 });
     store.applyCopyFill("whale", "token-a", "BUY", 4, 0.5);
     store.adjustCash(-2, 10);
-    store.recordDecision({ rawEventId: raw[1]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "SELL" }, decidedAt: 3 });
-    store.recordDecision({ rawEventId: raw[1]!.rawEventId, action: "SELL", reasonCode: "sell_executed", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "SELL", requestedShares: 2.67, requestedPrice: 0.75, filledShares: 2, filledUsd: 1.5, feeUsd: 0 }, decidedAt: 4 });
+    store.recordDecision({ rawEventId: raw[1]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "SELL", size: 10, price: 0.75, preview: true }, decidedAt: 3 });
+    store.recordDecision({ rawEventId: raw[1]!.rawEventId, action: "SELL", reasonCode: "sell_executed", exactTerms: { leaderId: "whale", tokenId: "token-a", side: "SELL", requestedShares: 2.67, requestedPrice: 0.75, filledShares: 2, filledUsd: 1.5, feeUsd: 0, reason: "Fixed $2.00", preview: true }, decidedAt: 4 });
     const sell = store.applyCopyFill("whale", "token-a", "SELL", 2, 0.75);
     expect(sell.realizedPnl).toBe(0.5);
     store.adjustCash(1.5, 10);
     store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM" }, decidedAt: 5 });
-    store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled", exactTerms: { leaderId: "whale", tokenId: "token-a", conditionId: "condition-a", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1 }, decidedAt: 6 });
+    store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM", size: 2, price: 1, reason: "settled 1 position(s); pnl $1.00", conditionId: "condition-a", settlementSource: "condition_resolution", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1 }, decidedAt: 6 });
     store.applyCopyFill("whale", "token-a", "SELL", 2, 1);
     store.adjustCash(2, 10);
     store.close();
@@ -76,9 +77,9 @@ describe("sealed deterministic replay", () => {
     const exp = store.startOrResumeExperiment({ accountId: "candidate-b", candidateAddresses: [], config,
       gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" });
     const raw = store.recordRawEvent({ sourceId: "buy", payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "token", price: 0.5, size: 10, timestamp: 1 }, sourceTimestamp: 1, observedTimestamp: 1 });
-    store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY", size: 10, price: 0.5, preview: true }, decidedAt: 1 });
     store.recordDecision({ rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
-      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY", requestedShares: 2, requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0 }, decidedAt: 2 });
+      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY", requestedShares: 2, requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0, reason: "Fixed $1.00", preview: true }, decidedAt: 2 });
     // Deliberately omit the corresponding cash/position outcome writes.
     store.close();
     const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "diverged-archive") });
@@ -102,13 +103,13 @@ describe("sealed deterministic replay", () => {
       { leaderId: "whale", type: "REDEEM", conditionId: "condition-a", timestamp: 3 },
     ].map((payload, index) => store.recordRawEvent({ sourceId: ["a", "b", "redeem-a"][index], payload, sourceTimestamp: index, observedTimestamp: index }));
     for (const [index, tokenId] of ["token-a", "token-b"].entries()) {
-      store.recordDecision({ rawEventId: raws[index]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId, side: "BUY" }, decidedAt: index * 2 + 1 });
-      store.recordDecision({ rawEventId: raws[index]!.rawEventId, action: "COPY", reasonCode: "copy_executed", exactTerms: { leaderId: "whale", tokenId, side: "BUY", requestedShares: 2, requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0 }, decidedAt: index * 2 + 2 });
+      store.recordDecision({ rawEventId: raws[index]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId, side: "BUY", size: 10, price: 0.5, preview: true }, decidedAt: index * 2 + 1 });
+      store.recordDecision({ rawEventId: raws[index]!.rawEventId, action: "COPY", reasonCode: "copy_executed", exactTerms: { leaderId: "whale", tokenId, side: "BUY", requestedShares: 2, requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0, reason: "Fixed $1.00", preview: true }, decidedAt: index * 2 + 2 });
       store.applyCopyFill("whale", tokenId, "BUY", 2, 0.5); store.adjustCash(-1, 10);
     }
     store.recordDecision({ rawEventId: raws[2]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM" }, decidedAt: 5 });
     store.recordDecision({ rawEventId: raws[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled",
-      exactTerms: { leaderId: "whale", conditionId: "condition-a", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1 }, decidedAt: 6 });
+      exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM", size: 2, price: 1, reason: "settled 1 position(s); pnl $1.00", conditionId: "condition-a", settlementSource: "condition_resolution", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1 }, decidedAt: 6 });
     store.applyCopyFill("whale", "token-a", "SELL", 2, 1); store.adjustCash(2, 10);
     store.close();
     const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "conditions-archive") });
@@ -151,5 +152,66 @@ describe("sealed deterministic replay", () => {
     store.close();
     await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "invalid-archive") }))
       .rejects.toThrow(/filledUsd|oversell|accounting/i);
+  });
+
+  it("rejects extra decisions on a rejected candidate and swapped global decision order", async () => {
+    const dbPath = join(dir, "ordered.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "ordered", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    for (const [index, tokenId] of ["a", "b"].entries()) {
+      const raw = store.recordRawEvent({ sourceId: `rejected-${tokenId}`,
+        payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: tokenId, price: 0.5, size: 1,
+          timestamp: index + 1, candidate: false, rejectionReasonCode: "poll_rejected_activity" },
+        sourceTimestamp: index + 1, observedTimestamp: index + 1 });
+      store.setDecisionRawEventIds([raw.rawEventId]);
+      store.audit({ leaderId: "whale", action: "DETECT", tokenId, side: "BUY", size: 1, price: 0.5, reason: "raw activity detected", preview: true });
+      store.audit({ leaderId: "whale", action: "SKIP", tokenId, side: "BUY", size: 1, price: 0.5,
+        reason: "poll rejected activity", reasonCode: "poll_rejected_activity", preview: true });
+      store.setDecisionRawEventIds([]);
+    }
+    store.close();
+    const db = new Database(dbPath); db.exec("DROP TRIGGER decisions_no_update");
+    db.exec(`UPDATE decisions SET decision_order=decision_order+10;
+      UPDATE decisions SET decision_order=decision_order-12 WHERE raw_event_id=(SELECT raw_event_id FROM raw_events ORDER BY observed_timestamp DESC LIMIT 1)`);
+    db.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "ordered-archive") }))
+      .rejects.toThrow(/global decision order|decision set mismatch/i);
+  });
+
+  it("rejects an extra COPY after an incomplete activity and fabricated skip terms", async () => {
+    const dbPath = join(dir, "extra.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "extra", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "incomplete",
+      payload: { leaderId: "whale", type: "TRADE", timestamp: 1, candidate: true }, sourceTimestamp: 1, observedTimestamp: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected",
+      exactTerms: { leaderId: "whale", tokenId: null, side: null, size: null, price: null, preview: true }, decidedAt: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "unsupported_or_incomplete_activity",
+      exactTerms: { leaderId: "whale", tokenId: null, side: null, reason: "fabricated reason", requestedPrice: 0.99 }, decidedAt: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
+      exactTerms: { leaderId: "whale", tokenId: "fake", side: "BUY", requestedShares: 1, requestedPrice: 0.5,
+        filledShares: 1, filledUsd: 0.5, feeUsd: 0 }, decidedAt: 2 });
+    store.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "extra-archive") }))
+      .rejects.toThrow(/incomplete trade|decision set mismatch/i);
+  });
+
+  it("rejects an extra decision after the exact rejected-candidate pair", async () => {
+    const dbPath = join(dir, "rejected-extra.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "rejected-extra", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "rejected",
+      payload: { leaderId: "whale", type: "TRADE", asset: "token", side: "BUY", size: 1, price: 0.5,
+        timestamp: 1, candidate: false, rejectionReasonCode: "poll_rejected_activity" },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected",
+      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 1 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "poll_rejected_activity",
+      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 2 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
+      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 3 });
+    store.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "rejected-extra-archive") })).rejects.toThrow(/poll rejection|decision set mismatch/i);
   });
 });

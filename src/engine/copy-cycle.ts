@@ -567,6 +567,15 @@ export async function runCopyCycle(
 
     if (!activity.asset || !activity.side) {
       skipped++;
+      store.audit({
+        leaderId,
+        action: "DETECT",
+        tokenId: activity.asset,
+        side: activity.side,
+        size: activity.size,
+        price: activity.price,
+        preview,
+      });
       skip(store, leaderId, activity, "unsupported or incomplete activity", preview);
       continue;
     }

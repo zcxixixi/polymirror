@@ -40,10 +40,18 @@ function requiredString(terms: Record<string, unknown>, key: string): string {
   return value;
 }
 function pct(copied: number, detected: number): number { return detected === 0 ? 0 : Math.round(copied / detected * 10_000) / 100; }
+function replaySkipReasonCode(reason: string): string {
+  if (reason === "already seen") return "already_seen";
+  if (reason === "recent buy dedup") return "already_seen";
+  if (reason.includes("price") || reason.includes("allowlist") || reason.includes("blocked market") || reason.includes("side")) return "price_filter";
+  if (reason.includes("cash")) return "cash_limit";
+  if (reason.includes("position") || reason.includes("max open")) return "position_limit";
+  return "policy_skip";
+}
 function semanticDigest(rows: Array<{ rawEventId: string; action: string; reasonCode: string; exactTermsJson: string }>): string {
   return createHash("sha256").update(rows.map((row) =>
     [row.rawEventId, row.action, row.reasonCode, row.exactTermsJson].join("\n")
-  ).sort().join("\n---\n")).digest("hex");
+  ).join("\n---\n")).digest("hex");
 }
 function stateKey(leaderId: string, tokenId: string): string { return `${leaderId}\n${tokenId}`; }
 const REPLAY_TERM_KEYS = new Set([
@@ -54,13 +62,41 @@ const REPLAY_TERM_KEYS = new Set([
   "conditionId", "payoutPerShare", "costBasisUsd", "grossPayoutUsd", "realizedPnlUsd", "transactionHash",
   "outcome", "onChainTxHash",
 ]);
-function regenerateValidated(decisions: StoredDecision[]): RegeneratedDecision[] {
-  return decisions.map((decision) => {
-    const terms = JSON.parse(decision.exactTermsJson) as Record<string, unknown>;
-    const normalizedTerms = Object.fromEntries(Object.entries(terms).filter(([key]) => REPLAY_TERM_KEYS.has(key)));
-    return { rawEventId: decision.rawEventId, action: decision.action, reasonCode: decision.reasonCode,
-      exactTermsJson: normalizedPayloadJson(normalizedTerms) };
+interface ExpectedSpec { action: string; reasonCode: string; derivedTerms: Record<string, unknown> }
+const BASE_DECISION_TERMS: Record<string, unknown> = {
+  leaderId: null, tokenId: null, side: null, size: null, price: null, leaderPrice: null,
+  executablePrice: null, slippagePct: null, feeUsd: 0, reason: null, preview: true,
+};
+function normalizedDecisionTerms(terms: Record<string, unknown>): string {
+  const replayTerms = Object.fromEntries(Object.entries(terms).filter(([key]) => REPLAY_TERM_KEYS.has(key)));
+  return normalizedPayloadJson({ ...BASE_DECISION_TERMS, ...replayTerms });
+}
+function buildExpectedDecisionSet(rawEventId: string, stored: StoredDecision[], specs: ExpectedSpec[]): RegeneratedDecision[] {
+  if (stored.length !== specs.length) throw new Error(`Re-execution decision set mismatch: expected ${specs.length} decisions got ${stored.length}`);
+  return specs.map((spec, index) => {
+    const comparison = stored[index]!;
+    const expected: RegeneratedDecision = {
+      rawEventId,
+      action: spec.action,
+      reasonCode: spec.reasonCode,
+      exactTermsJson: normalizedDecisionTerms(spec.derivedTerms),
+    };
+    const normalizedStored: RegeneratedDecision = {
+      rawEventId: comparison.rawEventId,
+      action: comparison.action,
+      reasonCode: comparison.reasonCode,
+      exactTermsJson: normalizedDecisionTerms(JSON.parse(comparison.exactTermsJson) as Record<string, unknown>),
+    };
+    if (normalizedPayloadJson(expected) !== normalizedPayloadJson(normalizedStored)) {
+      throw new Error(`Re-execution decision mismatch at ${rawEventId}#${index}: expected=${expected.exactTermsJson} stored=${normalizedStored.exactTermsJson}`);
+    }
+    return expected;
   });
+}
+function normalizeStoredComparison(decision: StoredDecision): RegeneratedDecision {
+  const terms = JSON.parse(decision.exactTermsJson) as Record<string, unknown>;
+  return { rawEventId: decision.rawEventId, action: decision.action, reasonCode: decision.reasonCode,
+    exactTermsJson: normalizedDecisionTerms(terms) };
 }
 function assertOrderedActions(decisions: StoredDecision[], expected: string[], context: string): void {
   const actual = decisions.map((decision) => decision.action);
@@ -93,7 +129,7 @@ function sha256Text(value: string): string { return createHash("sha256").update(
 function validateAndApplyTrade(
   config: RuntimeConfig, leader: LeaderConfig, activity: Activity, decisions: StoredDecision[],
   positions: Map<string, ReplayPosition>, cashRef: { value: number }, realizedRef: { value: number }, observationCount: number
-): { detectedBuy: number; detectedSell: number; copiedBuy: number; copiedSell: number } {
+): { detectedBuy: number; detectedSell: number; copiedBuy: number; copiedSell: number; specs: ExpectedSpec[] } {
   const side = activity.side;
   if (!activity.asset || !side || (side !== "BUY" && side !== "SELL")) throw new Error("Re-execution requires complete TRADE asset and side evidence");
   const detected = decisions.find((d) => d.action === "DETECT");
@@ -108,7 +144,11 @@ function validateAndApplyTrade(
     if (!decisions.some((d) => d.action === "SKIP" && JSON.parse(d.exactTermsJson).reason === filter.reason)) {
       throw new Error("Re-execution decision digest mismatch: filter decision differs");
     }
-    return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: 0, copiedSell: 0 };
+    return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: 0, copiedSell: 0,
+      specs: [
+        { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, size: activity.size ?? null, price: activity.price ?? null, preview: config.app.global.previewMode } },
+        { action: "SKIP", reasonCode: replaySkipReasonCode(filter.reason ?? "filter"), derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, size: activity.size ?? null, price: activity.price ?? null, reason: filter.reason ?? "filter", preview: config.app.global.previewMode } },
+      ] };
   }
   const readModel = {
     getPosition: (leaderId: string, tokenId: string) => positions.get(stateKey(leaderId, tokenId))?.shares ?? 0,
@@ -131,7 +171,11 @@ function validateAndApplyTrade(
         ? reason === `preview cash $${cashRef.value.toFixed(2)} < order $${sizing.finalUsd.toFixed(2)}`
         : reason === "already seen" || reason === "recent buy dedup";
     if (!permitted) throw new Error("Re-execution decision digest mismatch: fabricated SKIP decision");
-    return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: 0, copiedSell: 0 };
+    return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: 0, copiedSell: 0,
+      specs: [
+        { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, size: activity.size ?? null, price: activity.price ?? null, preview: config.app.global.previewMode } },
+        { action: "SKIP", reasonCode: replaySkipReasonCode(reason), derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, reason, preview: config.app.global.previewMode } },
+      ] };
   }
   const trailingDuplicateSkip = observationCount > 1 && decisions.length === 3 && decisions[2]?.action === "SKIP" && decisions[2]?.reasonCode === "already_seen";
   assertOrderedActions(decisions, trailingDuplicateSkip ? ["DETECT", action, "SKIP"] : ["DETECT", action], "executed trade");
@@ -195,7 +239,17 @@ function validateAndApplyTrade(
     current.shares -= filledShares; cashRef.value += proceeds; realizedRef.value += proceeds - cost;
     if (current.shares <= 1e-12) positions.delete(key); else positions.set(key, current);
   }
-  return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: side === "BUY" ? 1 : 0, copiedSell: side === "SELL" ? 1 : 0 };
+  const specs: ExpectedSpec[] = [
+    { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: leader.id, tokenId: activity.asset, side, size: activity.size ?? null, price: activity.price ?? null, preview: config.app.global.previewMode } },
+    { action, reasonCode: side === "BUY" ? "copy_executed" : "sell_executed", derivedTerms: {
+      leaderId: leader.id, tokenId: activity.asset, side, requestedPrice, requestedShares,
+      filledShares, filledUsd, feeUsd, reason: sizing.reasoning, preview: config.app.global.previewMode,
+    } },
+  ];
+  if (trailingDuplicateSkip) specs.push({ action: "SKIP", reasonCode: "already_seen", derivedTerms: {
+    leaderId: leader.id, tokenId: activity.asset, side, reason: "already seen", preview: config.app.global.previewMode,
+  } });
+  return { detectedBuy: side === "BUY" ? 1 : 0, detectedSell: side === "SELL" ? 1 : 0, copiedBuy: side === "BUY" ? 1 : 0, copiedSell: side === "SELL" ? 1 : 0, specs };
 }
 
 function applyTokenRedeems(
@@ -238,31 +292,79 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
     for (const raw of evidence.raw) {
       const decisions = evidence.decisions.filter((decision) => decision.rawEventId === raw.rawEventId);
       if (decisions.length === 0) throw new Error(`Re-execution decision set mismatch: raw event ${raw.rawEventId} has no decision`);
-      const payload = JSON.parse(raw.payloadJson) as Activity & { leaderId?: string; tokenId?: string; settlement?: { settled?: boolean; payoutPerShare?: number } | null };
+      const payload = JSON.parse(raw.payloadJson) as Activity & { leaderId?: string; tokenId?: string; settlement?: { settled?: boolean; payoutPerShare?: number; conditionId?: string } | null };
       const rawType = String(payload.type ?? "");
       if (rawType === "TOKEN_SETTLEMENT") {
         const tokenId = requiredString(payload as unknown as Record<string, unknown>, "tokenId");
         const tokenPositions = [...positions.values()].filter((position) => position.tokenId === tokenId).length;
-        if (!payload.settlement) assertOrderedActions(decisions, ["DETECT", "SKIP"], "missing token settlement");
-        else if (!payload.settlement.settled) assertOrderedActions(decisions, ["DETECT", "SKIP"], "unresolved token settlement");
+        let specs: ExpectedSpec[];
+        if (!payload.settlement) {
+          assertOrderedActions(decisions, ["DETECT", "SKIP"], "missing token settlement");
+          specs = [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: null, tokenId, side: "REDEEM", price: null, reason: "token settlement detected" } },
+            { action: "SKIP", reasonCode: "settlement_evidence_unavailable", derivedTerms: { leaderId: null, tokenId, side: "REDEEM", reason: "settlement evidence unavailable" } },
+          ];
+        } else if (!payload.settlement.settled) {
+          assertOrderedActions(decisions, ["DETECT", "SKIP"], "unresolved token settlement");
+          specs = [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: null, tokenId, side: "REDEEM", price: payload.settlement.payoutPerShare, reason: "token settlement detected" } },
+            { action: "SKIP", reasonCode: "market_unresolved", derivedTerms: { leaderId: null, tokenId, side: "REDEEM", reason: "market unresolved" } },
+          ];
+        }
         else {
+          const settlement = payload.settlement;
           assertOrderedActions(decisions, ["DETECT", ...Array(tokenPositions).fill("REDEEM")], "token settlement");
+          const tokenRows = [...positions.values()].filter((position) => position.tokenId === tokenId).sort((a, b) => a.leaderId.localeCompare(b.leaderId));
+          specs = [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: null, tokenId, side: "REDEEM", price: settlement.payoutPerShare, reason: "token settlement detected" } },
+            ...tokenRows.map((position) => { const gross = Math.round(position.shares * settlement.payoutPerShare! * 1e6) / 1e6;
+              const cost = Math.round(position.shares * position.avgEntryPrice * 1e6) / 1e6; const pnl = Math.round((gross - cost) * 1e6) / 1e6;
+              return { action: "REDEEM", reasonCode: "redeem_settled", derivedTerms: {
+              leaderId: position.leaderId, tokenId, side: "REDEEM", size: gross, price: position.shares,
+              reason: `token settlement payout ${settlement.payoutPerShare}; pnl $${pnl.toFixed(2)}`,
+              payoutPerShare: settlement.payoutPerShare, winnerTokenIds: settlement.payoutPerShare! > 0 ? [tokenId] : [],
+              costBasisUsd: cost, grossPayoutUsd: gross, realizedPnlUsd: pnl,
+              conditionId: settlement.conditionId, settlementSource: "token_resolution",
+            } }; }),
+          ];
           applyTokenRedeems(decisions, positions, cash, realized, tokenId);
         }
-        regenerated.push(...regenerateValidated(decisions)); continue;
+        regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, specs!)); continue;
       }
       if (rawType === "ONCHAIN_REDEEMABLE") {
         const row = payload as unknown as { tokenId?: string; conditionId?: string; payoutPerShare?: number };
         if (!row.tokenId || !row.conditionId || typeof row.payoutPerShare !== "number") throw new Error("Malformed on-chain redeemable evidence");
         const tracked = [...positions.values()].some((position) => position.tokenId === row.tokenId);
-        if (!tracked) assertOrderedActions(decisions, ["DETECT", "SKIP"], "untracked on-chain redeemable");
-        else if (decisions.some((decision) => decision.action === "SKIP")) assertOrderedActions(decisions, ["DETECT", "SKIP"], "failed on-chain redeem");
+        let specs: ExpectedSpec[];
+        if (!tracked) {
+          assertOrderedActions(decisions, ["DETECT", "SKIP"], "untracked on-chain redeemable");
+          specs = [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: null, tokenId: row.tokenId, side: "REDEEM", reason: "on-chain redeemable detected" } },
+            { action: "SKIP", reasonCode: "untracked_token", derivedTerms: { leaderId: null, tokenId: row.tokenId, side: "REDEEM", reason: "untracked token" } },
+          ];
+        } else if (decisions.some((decision) => decision.action === "SKIP")) {
+          assertOrderedActions(decisions, ["DETECT", "SKIP"], "failed on-chain redeem");
+          specs = [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: null, tokenId: row.tokenId, side: "REDEEM", reason: "on-chain redeemable detected" } },
+            { action: "SKIP", reasonCode: "onchain_redeem_failed", derivedTerms: { leaderId: null, tokenId: row.conditionId, side: "REDEEM", reason: "on-chain redeem failed" } },
+          ];
+        }
         else {
           const redeemCount = decisions.filter((decision) => decision.action === "REDEEM").length;
           assertOrderedActions(decisions, ["DETECT", ...Array(redeemCount).fill("REDEEM")], "on-chain redeemable");
+          specs = [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId: null, tokenId: row.tokenId, side: "REDEEM", reason: "on-chain redeemable detected" } },
+            ...decisions.filter((decision) => decision.action === "REDEEM").map((decision) => {
+              const terms = JSON.parse(decision.exactTermsJson) as Record<string, unknown>;
+              return { action: "REDEEM", reasonCode: "redeem_settled", derivedTerms: {
+                leaderId: requiredString(terms, "leaderId"), tokenId: requiredString(terms, "tokenId"), side: "REDEEM",
+                payoutPerShare: row.payoutPerShare, settlementSource: "onchain_redeemable", conditionId: row.conditionId,
+              } };
+            }),
+          ];
           applyTokenRedeems(decisions, positions, cash, realized);
         }
-        regenerated.push(...regenerateValidated(decisions)); continue;
+        regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, specs!)); continue;
       }
       const leaderId = payload.leaderId;
       if (!leaderId) throw new Error("Re-execution requires immutable raw leaderId context");
@@ -274,30 +376,45 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
           !decisions.some((decision) => decision.action === "SKIP" && decision.reasonCode === rejection)) {
           throw new Error("Re-execution decision digest mismatch: poll rejection differs");
         }
-        regenerated.push(...regenerateValidated(decisions)); continue;
+        assertOrderedActions(decisions, ["DETECT", "SKIP"], "poll rejection");
+        regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, [
+          { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId, tokenId: payload.asset ?? payload.conditionId ?? null, side: payload.side ?? payload.type, size: payload.size ?? null, price: payload.price ?? null, reason: "raw activity detected" } },
+          { action: "SKIP", reasonCode: rejection, derivedTerms: { leaderId, tokenId: payload.asset ?? payload.conditionId ?? null, side: payload.side ?? payload.type, size: payload.size ?? null, price: payload.price ?? null, reason: "poll rejected activity" } },
+        ])); continue;
       }
       if (payload.type === "TRADE") {
         if (!payload.asset || !payload.side) {
           if (!decisions.some((decision) => decision.action === "SKIP" && decision.reasonCode === "unsupported_or_incomplete_activity")) {
             throw new Error("Re-execution decision digest mismatch: incomplete activity decision differs");
           }
-          regenerated.push(...regenerateValidated(decisions)); continue;
+          assertOrderedActions(decisions, ["DETECT", "SKIP"], "incomplete trade");
+          regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId, tokenId: payload.asset ?? null, side: payload.side ?? null, size: payload.size ?? null, price: payload.price ?? null, preview: config.app.global.previewMode } },
+            { action: "SKIP", reasonCode: "unsupported_or_incomplete_activity", derivedTerms: { leaderId, tokenId: payload.asset ?? null, side: payload.side ?? null, reason: "unsupported or incomplete activity" } },
+          ])); continue;
         }
         const result = validateAndApplyTrade(config, leader, payload, decisions, positions, cash, realized, raw.observationCount);
         detectedBuy += result.detectedBuy; detectedSell += result.detectedSell;
         copiedBuy += result.copiedBuy; copiedSell += result.copiedSell;
+        regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, result.specs));
       } else if (payload.type === "REDEEM" || (payload as { type?: string }).type === "AUTO_SETTLEMENT") {
         const redeem = decisions.find((decision) => decision.action === "REDEEM");
         if (!redeem) {
           assertOrderedActions(decisions, ["DETECT", "SKIP"], `${rawType} skip`);
-          regenerated.push(...regenerateValidated(decisions)); continue;
+          regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId, tokenId: payload.conditionId ?? null, side: "REDEEM" } },
+            { action: "SKIP", reasonCode: decisions[1]!.reasonCode, derivedTerms: { leaderId, tokenId: payload.conditionId ?? null, side: "REDEEM" } },
+          ])); continue;
         }
         assertOrderedActions(decisions, ["DETECT", "REDEEM"], `${rawType} settlement`);
         if (redeem.reasonCode !== "redeem_settled") throw new Error("Re-execution decision digest mismatch: REDEEM reason code differs");
         const terms = JSON.parse(redeem.exactTermsJson) as Record<string, unknown>;
         if (terms.settlementSource === "leader_redeem") {
           applyTokenRedeems([redeem], positions, cash, realized);
-          regenerated.push(...regenerateValidated(decisions)); continue;
+          regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, [
+            { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId, tokenId: payload.asset ?? payload.conditionId ?? null, side: "REDEEM" } },
+            { action: "REDEEM", reasonCode: "redeem_settled", derivedTerms: { leaderId, tokenId: payload.asset ?? null, side: "REDEEM", settlementSource: "leader_redeem" } },
+          ])); continue;
         }
         const payout = requiredNumber(terms, "grossPayoutUsd"); const cost = requiredNumber(terms, "costBasisUsd");
         const conditionId = requiredString(terms, "conditionId");
@@ -308,19 +425,33 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
         const winners = new Set(winnerTokenIds as string[]);
         let actualCost = 0;
         let actualPayout = 0;
+        let closedPositions = 0;
         const markets = new Map((db.prepare("SELECT token_id AS tokenId, condition_id AS conditionId FROM token_markets").all() as { tokenId: string; conditionId: string }[]).map((m) => [m.tokenId, m.conditionId]));
         for (const [key, position] of positions) if (position.leaderId === leaderId && markets.get(position.tokenId) === conditionId) {
           actualCost += position.shares * position.avgEntryPrice;
           if (winners.has(position.tokenId)) actualPayout += position.shares;
+          closedPositions++;
           positions.delete(key);
         }
         if (Math.abs(actualCost - cost) > 1e-6) throw new Error("Outcome evidence cost basis mismatch");
         if (Math.abs(actualPayout - payout) > 1e-6) throw new Error("Outcome evidence payout mismatch");
         cash.value += payout; realized.value += payout - cost;
+        regenerated.push(...buildExpectedDecisionSet(raw.rawEventId, decisions, [
+          { action: "DETECT", reasonCode: "detected", derivedTerms: { leaderId, tokenId: payload.conditionId ?? null, side: "REDEEM" } },
+          { action: "REDEEM", reasonCode: "redeem_settled", derivedTerms: { leaderId, tokenId: conditionId,
+            conditionId, side: "REDEEM", size: actualPayout, price: closedPositions,
+            reason: `settled ${closedPositions} position(s); pnl $${(actualPayout - actualCost).toFixed(2)}`,
+            winnerTokenIds: [...winners].sort(), costBasisUsd: actualCost,
+            grossPayoutUsd: actualPayout, realizedPnlUsd: actualPayout - actualCost,
+            settlementSource: "condition_resolution" } },
+        ]));
       } else throw new Error(`Re-execution decision set mismatch: unsupported raw type ${rawType}`);
-      regenerated.push(...regenerateValidated(decisions));
     }
     if (regenerated.length !== evidence.decisions.length) throw new Error("Re-execution decision set mismatch: stored extra decision");
+    const storedGlobalOrder = evidence.decisions.map(normalizeStoredComparison);
+    if (storedGlobalOrder.some((stored, index) => normalizedPayloadJson(stored) !== normalizedPayloadJson(regenerated[index]))) {
+      throw new Error("Re-execution decision set mismatch: global decision order or terms differ");
+    }
     const recomputedRows = regenerated;
     return {
       decisionDigest: semanticDigest(recomputedRows), cashUsd: round(cash.value), realizedPnlUsd: round(realized.value),

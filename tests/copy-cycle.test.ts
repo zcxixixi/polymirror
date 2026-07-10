@@ -126,6 +126,10 @@ describe("runCopyCycle", () => {
     expect(store.listRawEvents()).toHaveLength(1);
     expect(store.listDecisions()).toEqual([
       expect.objectContaining({
+        action: "DETECT",
+        reasonCode: "detected",
+      }),
+      expect.objectContaining({
         action: "SKIP",
         reasonCode: "unsupported_or_incomplete_activity",
       }),
