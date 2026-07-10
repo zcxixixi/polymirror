@@ -22,6 +22,101 @@ afterEach(() => {
 });
 
 describe("readPreviewAccountReport", () => {
+  it("keeps a fresh zero-sample strategy in collecting state", () => {
+    const report = readPreviewAccountReport({
+      accountId: "fresh-goal",
+      dbPath,
+      startingCapitalUsd: 200,
+    });
+
+    expect(report.stabilityGoal).toMatchObject({
+      passed: false,
+      status: "collecting",
+    });
+  });
+
+  it("keeps the stability copy-path gate on a fixed 14-day window", () => {
+    const nowMs = Date.now() + 1_000;
+    const dayMs = 24 * 60 * 60_000;
+
+    store.recordCopySuccess({
+      tradeKey: "goal-path-buy",
+      leaderId: "leader-a",
+      tokenId: "goal-path-token",
+      side: "BUY",
+      filledShares: 2,
+      price: 0.5,
+      filledUsd: 1,
+      auditReason: "Fixed $1.00",
+      preview: true,
+      cashInitialUsd: 200,
+      market: {
+        tokenId: "goal-path-token",
+        conditionId: "goal-path-condition",
+        slug: "goal-path-market",
+        title: "Goal path market",
+      },
+    });
+    store.recordCopySuccess({
+      tradeKey: "goal-path-sell",
+      leaderId: "leader-a",
+      tokenId: "goal-path-token",
+      side: "SELL",
+      filledShares: 1,
+      price: 0.6,
+      filledUsd: 0.6,
+      auditReason: "Fixed $0.60",
+      preview: true,
+      cashInitialUsd: 200,
+    });
+    store.audit({
+      leaderId: "leader-a",
+      action: "REDEEM",
+      tokenId: "goal-path-condition",
+      side: "REDEEM",
+      reason: "settled; pnl $0.10",
+      preview: true,
+    });
+    store.audit({
+      leaderId: "leader-a",
+      action: "DETECT",
+      tokenId: "goal-path-unclassified-1",
+      side: "BUY",
+      size: 1,
+      price: 0.5,
+      preview: true,
+    });
+    store.audit({
+      leaderId: "leader-a",
+      action: "DETECT",
+      tokenId: "goal-path-unclassified-2",
+      side: "BUY",
+      size: 1,
+      price: 0.5,
+      preview: true,
+    });
+
+    const db = new Database(dbPath);
+    try {
+      db.prepare("UPDATE audit_log SET ts = ? WHERE token_id LIKE 'goal-path-unclassified-%'").run(
+        nowMs - 2 * dayMs
+      );
+    } finally {
+      db.close();
+    }
+
+    const report = readPreviewAccountReport({
+      accountId: "fixed-goal-path-window",
+      dbPath,
+      startingCapitalUsd: 200,
+      recentWindowMs: 60 * 60_000,
+      nowMs,
+    });
+
+    expect(report.copyQuality.copyGap.buy.unclassified).toBe(0);
+    expect(report.stabilityGoal?.failedChecks).toContain("copy_path");
+  });
+
   it("summarizes cash, open positions, realized pnl, errors, and skip reasons", () => {
     store.recordCopySuccess({
       tradeKey: "buy-a",
@@ -298,6 +393,138 @@ describe("readPreviewAccountReport", () => {
     expect(report.profitabilityGate.blockers).toContain(
       "accounting diagnostics not clean"
     );
+  });
+
+  it("reports the exact time-window and recent-20 metrics used by the stability goal", () => {
+    const nowMs = 1_800_000_000_000;
+    const dayMs = 24 * 60 * 60_000;
+    const db = new Database(dbPath);
+    try {
+      for (let index = 0; index < 21; index++) {
+        const ageMs =
+          index === 0
+            ? 15 * dayMs
+            : Math.floor(((20 - index) * 13 * dayMs) / 19);
+        const ts = nowMs - ageMs;
+        const pnl = index === 0 ? -5 : index % 5 === 1 ? -0.25 : 1;
+        const tokenId = `goal-token-${index}`;
+        const conditionId = `goal-condition-${index}`;
+
+        db.prepare(
+          `INSERT INTO token_markets (token_id, condition_id, title, slug, outcome)
+           VALUES (?, ?, ?, ?, 'Yes')`
+        ).run(tokenId, conditionId, `Goal market ${index}`, `goal-market-${index}`);
+        db.prepare(
+          `INSERT INTO audit_log (ts, leader_id, action, token_id, side, size, price, reason, preview)
+           VALUES (?, 'leader-a', 'COPY', ?, 'BUY', 10, 0.5, 'Fixed $5.00', 1)`
+        ).run(ts, tokenId);
+        db.prepare(
+          `INSERT INTO audit_log (ts, leader_id, action, token_id, side, size, price, reason, preview)
+           VALUES (?, 'leader-a', 'REDEEM', ?, 'REDEEM', 1, 1, ?, 1)`
+        ).run(ts + 1, conditionId, `settled 1 position(s); pnl $${pnl.toFixed(2)}`);
+      }
+    } finally {
+      db.close();
+    }
+
+    const report = readPreviewAccountReport({
+      accountId: "goal-metrics",
+      dbPath,
+      startingCapitalUsd: 200,
+      nowMs,
+    });
+
+    expect(report.goalMetrics).toMatchObject({
+      observationDays: 15,
+      settledMarketCount: 21,
+      copyPnlUsd: 10,
+      grossCopyVolumeUsd: 105,
+      pnlVolumePct: 9.52,
+      overall: {
+        marketCount: 21,
+        pnlUsd: 10,
+        winRatePct: 76.19,
+        profitFactor: 2.67,
+      },
+      recent20: {
+        marketCount: 20,
+        pnlUsd: 15,
+        winRatePct: 80,
+        profitFactor: 16,
+      },
+      windows: {
+        h24: { pnlUsd: 2 },
+        d7: { pnlUsd: 8.5 },
+        d14: { pnlUsd: 15 },
+      },
+    });
+  });
+
+  it("reports volume-weighted slippage and refuses to treat missing quotes as zero", () => {
+    const nowMs = 1_800_000_000_000;
+    const db = new Database(dbPath);
+    try {
+      const rows = [
+        { token: "slip-buy", condition: "slip-condition-buy", side: "BUY", size: 10, slip: 10 },
+        { token: "slip-sell", condition: "slip-condition-sell", side: "SELL", size: 10, slip: 10 },
+        { token: "slip-missing", condition: "slip-condition-missing", side: "BUY", size: 20, slip: null },
+      ] as const;
+      for (const [index, row] of rows.entries()) {
+        db.prepare(
+          `INSERT INTO token_markets (token_id, condition_id, title, slug, outcome)
+           VALUES (?, ?, ?, ?, 'Yes')`
+        ).run(row.token, row.condition, row.condition, row.condition);
+        db.prepare(
+          `INSERT INTO audit_log
+           (ts, leader_id, action, token_id, side, size, price, leader_price,
+            executable_price, slippage_pct, reason, preview)
+           VALUES (?, 'leader-a', 'COPY', ?, ?, ?, 0.5, 0.5, ?, ?, 'observed', 1)`
+        ).run(
+          nowMs - (3 - index) * 60_000,
+          row.token,
+          row.side,
+          row.size,
+          row.slip === null ? null : row.side === "BUY" ? 0.55 : 0.45,
+          row.slip
+        );
+        db.prepare(
+          `INSERT INTO audit_log (ts, leader_id, action, token_id, side, reason, preview)
+           VALUES (?, 'leader-a', 'REDEEM', ?, 'REDEEM', 'settled; pnl $1.00', 1)`
+        ).run(nowMs - (3 - index) * 30_000, row.condition);
+      }
+    } finally {
+      db.close();
+    }
+
+    const report = readPreviewAccountReport({
+      accountId: "slippage-metrics",
+      dbPath,
+      startingCapitalUsd: 200,
+      nowMs,
+    });
+
+    expect(report.goalMetrics.slippage).toMatchObject({
+      copyCount: 3,
+      sampleCount: 2,
+      totalNotionalUsd: 20,
+      sampledNotionalUsd: 10,
+      coveragePct: 50,
+      lossPct: 10,
+    });
+    expect(report.goalMetrics.recent20).toMatchObject({
+      slippageSampleCount: 2,
+      slippageCoveragePct: 50,
+      slippageLossPct: 10,
+    });
+    expect(report.stabilityGoal).toMatchObject({
+      passed: false,
+      failedChecks: expect.arrayContaining([
+        "slippage_observation_days",
+        "redeem_sample",
+        "settled_markets",
+        "overall_slip_coverage",
+      ]),
+    });
   });
 
   it("parses common settled pnl audit formats without corrupting performance metrics", () => {

@@ -368,12 +368,14 @@ function handlePreviewQuality(
   const allRuntimes = ctx.manager.list();
   const reportRuntimes = includeDisabled ? allRuntimes : allRuntimes.filter((rt) => rt.enabled);
   const runtimeCopyState = (rt: (typeof allRuntimes)[number]) => {
-    const enabledLeaderCount = rt.config.app.leaders.filter((leader) => leader.enabled).length;
+    const enabledLeaders = rt.config.app.leaders.filter((leader) => leader.enabled);
+    const enabledLeaderCount = enabledLeaders.length;
+    const enabledLeaderIds = enabledLeaders.map((leader) => leader.address ?? leader.id).sort();
     const copyingActive =
       rt.enabled &&
       rt.config.app.global.risk.enableCopyTrading &&
       enabledLeaderCount > 0;
-    return { enabledLeaderCount, copyingActive };
+    return { enabledLeaderCount, enabledLeaderIds, copyingActive };
   };
   const buildReports = (runtimes: typeof reportRuntimes, recentWindowMinutes: number) =>
     runtimes.map((rt) => {
@@ -414,6 +416,7 @@ function handlePreviewQuality(
   const summarizeQualityReports = (qualityReports: typeof enabledReports) => {
     const issueCounts = new Map<string, number>();
     const gateCounts = new Map<string, number>();
+    const stabilityGoalCounts = new Map<string, number>();
     const copyGap = {
       accountsWithUnclassified: 0,
       unclassifiedBuy: 0,
@@ -431,6 +434,14 @@ function handlePreviewQuality(
           ? report.profitabilityGate.grade
           : "unknown";
       gateCounts.set(gate, (gateCounts.get(gate) ?? 0) + 1);
+      const stabilityStatus =
+        "stabilityGoal" in report && report.stabilityGoal
+          ? report.stabilityGoal.status
+          : "unavailable";
+      stabilityGoalCounts.set(
+        stabilityStatus,
+        (stabilityGoalCounts.get(stabilityStatus) ?? 0) + 1
+      );
       if ("copyQuality" in report) {
         const buy = report.copyQuality.copyGap.buy.unclassified;
         const sell = report.copyQuality.copyGap.sell.unclassified;
@@ -443,6 +454,7 @@ function handlePreviewQuality(
     return {
       issueCounts: Object.fromEntries(issueCounts.entries()),
       gateCounts: Object.fromEntries(gateCounts.entries()),
+      stabilityGoalCounts: Object.fromEntries(stabilityGoalCounts.entries()),
       copyGap,
     };
   };
@@ -450,6 +462,17 @@ function handlePreviewQuality(
   const activeSummary = summarizeQualityReports(
     enabledReports.filter((report) => report.copyingActive)
   );
+  const qualifiedStrategies = enabledReports.filter(
+    (report) =>
+      report.copyingActive &&
+      report.previewMode &&
+      "stabilityGoal" in report &&
+      report.stabilityGoal?.passed
+  );
+  const independentQualifiedStrategies = new Set(
+    qualifiedStrategies.map((report) => report.enabledLeaderIds.join("|"))
+  ).size;
+  const requiredQualifiedStrategies = 2;
   const freshEnabledReports = buildReports(
     allRuntimes.filter((rt) => rt.enabled),
     freshCopyGapWindowMinutes
@@ -475,7 +498,16 @@ function handlePreviewQuality(
         copyGap: enabledSummary.copyGap,
         activeIssueCounts: activeSummary.issueCounts,
         activeGateCounts: activeSummary.gateCounts,
+        activeStabilityGoalCounts: activeSummary.stabilityGoalCounts,
         activeCopyGap: activeSummary.copyGap,
+        stabilityGoal: {
+          requiredQualifiedStrategies,
+          qualifiedStrategies: qualifiedStrategies.length,
+          independentQualifiedStrategies,
+          strategyRequirementPassed:
+            qualifiedStrategies.length >= requiredQualifiedStrategies &&
+            independentQualifiedStrategies >= requiredQualifiedStrategies,
+        },
         freshActiveCopyGap: {
           windowMinutes: freshCopyGapWindowMinutes,
           copyGap: freshActiveSummary.copyGap,

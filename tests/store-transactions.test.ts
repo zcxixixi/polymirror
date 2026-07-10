@@ -79,6 +79,34 @@ describe("StateStore transactions", () => {
     expect(audit.items[0]?.size).toBe(10);
   });
 
+  it("persists preview slippage observations without changing the accounting price", () => {
+    store.recordCopySuccess({
+      tradeKey: "observed-slip",
+      leaderId: "whale",
+      tokenId: "tok-slip",
+      side: "BUY",
+      filledShares: 10,
+      price: 0.5,
+      filledUsd: 5,
+      auditReason: "observed quote",
+      preview: true,
+      cashInitialUsd: 200,
+      leaderPrice: 0.5,
+      executablePrice: 0.55,
+      slippagePct: 10,
+    });
+
+    const [audit] = store.listAuditLog({ action: "COPY" }).items;
+    expect(audit).toMatchObject({
+      price: 0.5,
+      leaderPrice: 0.5,
+      executablePrice: 0.55,
+      slippagePct: 10,
+    });
+    expect(store.getPosition("whale", "tok-slip")).toBe(10);
+    expect(store.getCashBalance(200)).toBe(195);
+  });
+
   it("moves preview cash on BUY and SELL without treating SELL as buy volume", () => {
     store.recordCopySuccess({
       tradeKey: "cash-buy",

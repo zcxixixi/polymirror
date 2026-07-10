@@ -205,8 +205,45 @@ describe("syncApiServer", () => {
       "main",
     ]);
     expect(
-      (current.body as { summary?: { totalAccounts?: number; enabledAccounts?: number } }).summary
-    ).toMatchObject({ totalAccounts: 2, enabledAccounts: 1 });
+      (
+        current.body as {
+          summary?: {
+            totalAccounts?: number;
+            enabledAccounts?: number;
+            stabilityGoal?: {
+              requiredQualifiedStrategies: number;
+              qualifiedStrategies: number;
+              independentQualifiedStrategies: number;
+              strategyRequirementPassed: boolean;
+            };
+          };
+        }
+      ).summary
+    ).toMatchObject({
+      totalAccounts: 2,
+      enabledAccounts: 1,
+      stabilityGoal: {
+        requiredQualifiedStrategies: 2,
+        qualifiedStrategies: 0,
+        independentQualifiedStrategies: 0,
+        strategyRequirementPassed: false,
+      },
+    });
+    expect(
+      (
+        current.body as {
+          reports?: Array<{
+            accountId: string;
+            enabledLeaderIds?: string[];
+            stabilityGoal?: { passed: boolean };
+          }>;
+        }
+      ).reports?.[0]
+    ).toMatchObject({
+      accountId: "main",
+      enabledLeaderIds: ["0x0000000000000000000000000000000000000001"],
+      stabilityGoal: { passed: false },
+    });
 
     const withHistory = await fetchJson(
       `http://127.0.0.1:${portA}/api/quality?includeDisabled=1`

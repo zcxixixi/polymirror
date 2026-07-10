@@ -4,6 +4,7 @@ import { runCopyCycle } from "../src/engine/copy-cycle.js";
 import { pollLeaders } from "../src/monitor/poll.js";
 import { tradeEventKey, type Activity } from "../src/monitor/data-api.js";
 import { fetchResolvedMarketOutcome } from "../src/monitor/market-resolve.js";
+import { fetchBestExecutablePrice } from "../src/executor/orderbook.js";
 import { previewRuntimeConfig, testActivity, testLeader } from "./helpers/fixtures.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -17,8 +18,13 @@ vi.mock("../src/monitor/market-resolve.js", () => ({
   fetchResolvedMarketOutcome: vi.fn(),
 }));
 
+vi.mock("../src/executor/orderbook.js", () => ({
+  fetchBestExecutablePrice: vi.fn(),
+}));
+
 const mockPollLeaders = vi.mocked(pollLeaders);
 const mockFetchResolvedMarketOutcome = vi.mocked(fetchResolvedMarketOutcome);
+const mockFetchBestExecutablePrice = vi.mocked(fetchBestExecutablePrice);
 
 let dir: string;
 let store: StateStore;
@@ -28,6 +34,8 @@ beforeEach(() => {
   store = new StateStore(join(dir, "test.db"));
   mockPollLeaders.mockReset();
   mockFetchResolvedMarketOutcome.mockReset();
+  mockFetchBestExecutablePrice.mockReset();
+  mockFetchBestExecutablePrice.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -51,6 +59,35 @@ describe("runCopyCycle", () => {
     expect(store.getPosition("whale", activity.asset!)).toBe(10);
     expect(store.hasSeen(tradeEventKey(activity))).toBe(true);
     expect(store.getDailyVolumeUsd()).toBe(5);
+  });
+
+  it("observes adverse preview slippage without changing the simulated fill price", async () => {
+    const activity = testActivity({ price: 0.5 });
+    const config = previewRuntimeConfig();
+    mockPollLeaders.mockResolvedValue([
+      { leaderId: "whale", fetched: 1, candidates: [activity] },
+    ]);
+    mockFetchBestExecutablePrice.mockResolvedValue(0.55);
+
+    const result = await runCopyCycle(config, store);
+
+    expect(result.copied).toBe(1);
+    expect(mockFetchBestExecutablePrice).toHaveBeenCalledWith(
+      config.wallet.clobUrl,
+      config.wallet.chainId,
+      activity.asset,
+      "BUY"
+    );
+    expect(store.getPosition("whale", activity.asset!)).toBe(10);
+    expect(store.getCashBalance(config.app.global.risk.startingCapitalUsd)).toBe(
+      config.app.global.risk.startingCapitalUsd - 5
+    );
+    expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
+      price: 0.5,
+      leaderPrice: 0.5,
+      executablePrice: 0.55,
+      slippagePct: 10,
+    });
   });
 
   it("skips already-seen trades on the next cycle", async () => {

@@ -10,6 +10,12 @@ import {
   assessProfitabilityGate,
   type ProfitabilityGateAssessment,
 } from "./profitability-gate.js";
+import {
+  assessStabilityGoal,
+  type StabilityGoalAssessment,
+} from "./stability-goal.js";
+
+const STABILITY_GOAL_COPY_PATH_WINDOW_MS = 14 * 24 * 60 * 60_000;
 
 export interface PreviewSkipReason {
   reason: string;
@@ -90,6 +96,58 @@ export interface PreviewPerformanceSummary {
   recent: PreviewPerformanceRecentSummary;
 }
 
+export interface PreviewGoalWindowSummary {
+  sinceMs: number;
+  marketCount: number;
+  pnlUsd: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  grossProfitUsd: number;
+  grossLossUsd: number;
+}
+
+export interface PreviewGoalRecent20Summary {
+  marketCount: number;
+  pnlUsd: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  grossProfitUsd: number;
+  grossLossUsd: number;
+  slippageSampleCount: number;
+  slippageCoveragePct: number;
+  slippageLossPct: number | null;
+}
+
+export interface PreviewGoalSlippageSummary {
+  observationStartedAtMs: number | null;
+  observationDays: number;
+  copyCount: number;
+  sampleCount: number;
+  totalNotionalUsd: number;
+  sampledNotionalUsd: number;
+  coveragePct: number;
+  lossPct: number | null;
+}
+
+export interface PreviewGoalMetrics {
+  observationDays: number;
+  activeTradingDays: number;
+  firstCopyAtMs: number | null;
+  lastCopyAtMs: number | null;
+  settledMarketCount: number;
+  copyPnlUsd: number;
+  grossCopyVolumeUsd: number;
+  pnlVolumePct: number;
+  overall: PreviewGoalRecent20Summary;
+  recent20: PreviewGoalRecent20Summary;
+  slippage: PreviewGoalSlippageSummary;
+  windows: {
+    h24: PreviewGoalWindowSummary;
+    d7: PreviewGoalWindowSummary;
+    d14: PreviewGoalWindowSummary;
+  };
+}
+
 export interface PreviewAccountReport {
   accountId: string;
   dbPath: string;
@@ -121,6 +179,8 @@ export interface PreviewAccountReport {
   recentWindow?: PreviewRecentWindowSummary;
   copyQuality: PreviewCopyQualitySummary;
   performance: PreviewPerformanceSummary;
+  goalMetrics?: PreviewGoalMetrics;
+  stabilityGoal?: StabilityGoalAssessment;
   profitabilityGate?: ProfitabilityGateAssessment;
 }
 
@@ -172,6 +232,68 @@ function emptyPerformance(sinceMs: number | null = null): PreviewPerformanceSumm
   };
 }
 
+function emptyGoalWindow(sinceMs: number): PreviewGoalWindowSummary {
+  return {
+    sinceMs,
+    marketCount: 0,
+    pnlUsd: 0,
+    winRatePct: 0,
+    profitFactor: null,
+    grossProfitUsd: 0,
+    grossLossUsd: 0,
+  };
+}
+
+function emptyGoalMetrics(nowMs: number): PreviewGoalMetrics {
+  return {
+    observationDays: 0,
+    activeTradingDays: 0,
+    firstCopyAtMs: null,
+    lastCopyAtMs: null,
+    settledMarketCount: 0,
+    copyPnlUsd: 0,
+    grossCopyVolumeUsd: 0,
+    pnlVolumePct: 0,
+    overall: {
+      marketCount: 0,
+      pnlUsd: 0,
+      winRatePct: 0,
+      profitFactor: null,
+      grossProfitUsd: 0,
+      grossLossUsd: 0,
+      slippageSampleCount: 0,
+      slippageCoveragePct: 0,
+      slippageLossPct: null,
+    },
+    recent20: {
+      marketCount: 0,
+      pnlUsd: 0,
+      winRatePct: 0,
+      profitFactor: null,
+      grossProfitUsd: 0,
+      grossLossUsd: 0,
+      slippageSampleCount: 0,
+      slippageCoveragePct: 0,
+      slippageLossPct: null,
+    },
+    slippage: {
+      observationStartedAtMs: null,
+      observationDays: 0,
+      copyCount: 0,
+      sampleCount: 0,
+      totalNotionalUsd: 0,
+      sampledNotionalUsd: 0,
+      coveragePct: 0,
+      lossPct: null,
+    },
+    windows: {
+      h24: emptyGoalWindow(nowMs - 24 * 60 * 60_000),
+      d7: emptyGoalWindow(nowMs - 7 * 24 * 60 * 60_000),
+      d14: emptyGoalWindow(nowMs - 14 * 24 * 60 * 60_000),
+    },
+  };
+}
+
 function emptyReport(options: ReadPreviewAccountReportOptions): PreviewAccountReport {
   const report: PreviewAccountReport = {
     accountId: options.accountId,
@@ -203,10 +325,12 @@ function emptyReport(options: ReadPreviewAccountReportOptions): PreviewAccountRe
     openMarkets: [],
     copyQuality: emptyPreviewCopyQuality(options.startingCapitalUsd ?? 0, 0, 0),
     performance: emptyPerformance(null),
+    goalMetrics: emptyGoalMetrics(options.nowMs ?? Date.now()),
   };
   return {
     ...report,
     profitabilityGate: assessProfitabilityGate(report),
+    stabilityGoal: assessStabilityGoal(report),
   };
 }
 
@@ -215,6 +339,11 @@ function tableExists(db: Database.Database, table: string): boolean {
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
     .get(table);
   return row !== undefined;
+}
+
+function columnExists(db: Database.Database, table: string, column: string): boolean {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return columns.some((entry) => entry.name === column);
 }
 
 function skipCountMatching(
@@ -311,6 +440,223 @@ function pct(part: number, total: number): number {
 function ratioOrNull(numerator: number, denominator: number): number | null {
   if (denominator <= 0) return null;
   return round2(numerator / denominator);
+}
+
+interface SettledMarketPnl {
+  marketId: string;
+  ts: number;
+  pnlUsd: number;
+}
+
+interface CopySlippageRow {
+  ts: number;
+  marketId: string;
+  size: number | null;
+  price: number | null;
+  leaderPrice: number | null;
+  executablePrice: number | null;
+  slippagePct: number | null;
+}
+
+function summarizeSlippage(rows: CopySlippageRow[]): Omit<
+  PreviewGoalSlippageSummary,
+  "observationStartedAtMs" | "observationDays"
+> {
+  let totalNotionalUsd = 0;
+  let sampledNotionalUsd = 0;
+  let weightedLoss = 0;
+  let sampleCount = 0;
+
+  for (const row of rows) {
+    const referencePrice = row.leaderPrice ?? row.price ?? 0;
+    const notional = Math.abs((row.size ?? 0) * referencePrice);
+    totalNotionalUsd += notional;
+    if (
+      row.executablePrice !== null &&
+      row.slippagePct !== null &&
+      Number.isFinite(row.slippagePct)
+    ) {
+      sampleCount++;
+      sampledNotionalUsd += notional;
+      weightedLoss += row.slippagePct * notional;
+    }
+  }
+
+  return {
+    copyCount: rows.length,
+    sampleCount,
+    totalNotionalUsd: round2(totalNotionalUsd),
+    sampledNotionalUsd: round2(sampledNotionalUsd),
+    coveragePct: totalNotionalUsd > 0 ? round2((sampledNotionalUsd / totalNotionalUsd) * 100) : 0,
+    lossPct: sampledNotionalUsd > 0 ? round2(weightedLoss / sampledNotionalUsd) : null,
+  };
+}
+
+function summarizeGoalMarketSlice(
+  rows: SettledMarketPnl[],
+  sinceMs?: number
+): Omit<PreviewGoalWindowSummary, "sinceMs"> {
+  const selected = sinceMs == null ? rows : rows.filter((row) => row.ts >= sinceMs);
+  const values = selected.map((row) => row.pnlUsd);
+  const wins = values.filter((value) => value > 0);
+  const losses = values.filter((value) => value < 0);
+  const grossProfitUsd = round2(wins.reduce((sum, value) => sum + value, 0));
+  const grossLossUsd = round2(Math.abs(losses.reduce((sum, value) => sum + value, 0)));
+  return {
+    marketCount: values.length,
+    pnlUsd: round2(values.reduce((sum, value) => sum + value, 0)),
+    winRatePct: pct(wins.length, values.length),
+    profitFactor: ratioOrNull(grossProfitUsd, grossLossUsd),
+    grossProfitUsd,
+    grossLossUsd,
+  };
+}
+
+function readGoalMetrics(
+  db: Database.Database,
+  hasAuditLog: boolean,
+  hasTokenMarkets: boolean,
+  hasSlippageTelemetry: boolean,
+  nowMs: number
+): PreviewGoalMetrics {
+  if (!hasAuditLog) return emptyGoalMetrics(nowMs);
+
+  const copy = db
+    .prepare(
+      `SELECT MIN(ts) AS firstCopyAtMs,
+              MAX(ts) AS lastCopyAtMs,
+              COUNT(DISTINCT date(ts / 1000, 'unixepoch')) AS activeTradingDays,
+              COALESCE(SUM(ABS(COALESCE(size, 0) * COALESCE(price, 0))), 0) AS volumeUsd
+       FROM audit_log
+       WHERE action = 'COPY'`
+    )
+    .get() as {
+    firstCopyAtMs: number | null;
+    lastCopyAtMs: number | null;
+    activeTradingDays: number;
+    volumeUsd: number;
+  };
+  const redeemRows = db
+    .prepare(
+      hasTokenMarkets
+        ? `SELECT a.ts,
+                  COALESCE(m.condition_id, a.token_id, 'audit:' || a.id) AS marketId,
+                  a.reason
+           FROM audit_log a
+           LEFT JOIN token_markets m ON m.token_id = a.token_id
+           WHERE a.action = 'REDEEM'
+           ORDER BY a.ts ASC, a.id ASC`
+        : `SELECT ts,
+                  COALESCE(token_id, 'audit:' || id) AS marketId,
+                  reason
+           FROM audit_log
+           WHERE action = 'REDEEM'
+           ORDER BY ts ASC, id ASC`
+    )
+    .all() as { ts: number; marketId: string; reason: string | null }[];
+  const byMarket = new Map<string, SettledMarketPnl>();
+  for (const row of redeemRows) {
+    const current = byMarket.get(row.marketId);
+    byMarket.set(row.marketId, {
+      marketId: row.marketId,
+      ts: Math.max(current?.ts ?? 0, row.ts),
+      pnlUsd: round2((current?.pnlUsd ?? 0) + parseAuditPnl(row.reason)),
+    });
+  }
+  const markets = [...byMarket.values()].sort((a, b) => a.ts - b.ts);
+  const copySlippageRows = hasSlippageTelemetry
+    ? (db
+        .prepare(
+          hasTokenMarkets
+            ? `SELECT a.ts,
+                      COALESCE(m.condition_id, a.token_id, 'audit:' || a.id) AS marketId,
+                      a.size, a.price, a.leader_price AS leaderPrice,
+                      a.executable_price AS executablePrice,
+                      a.slippage_pct AS slippagePct
+               FROM audit_log a
+               LEFT JOIN token_markets m ON m.token_id = a.token_id
+               WHERE a.action = 'COPY'
+               ORDER BY a.ts ASC, a.id ASC`
+            : `SELECT ts,
+                      COALESCE(token_id, 'audit:' || id) AS marketId,
+                      size, price, leader_price AS leaderPrice,
+                      executable_price AS executablePrice,
+                      slippage_pct AS slippagePct
+               FROM audit_log
+               WHERE action = 'COPY'
+               ORDER BY ts ASC, id ASC`
+        )
+        .all() as CopySlippageRow[])
+    : [];
+  const observationStartedAtMs =
+    copySlippageRows.find((row) => row.leaderPrice !== null)?.ts ?? null;
+  const observedEraRows =
+    observationStartedAtMs === null
+      ? []
+      : copySlippageRows.filter((row) => row.ts >= observationStartedAtMs);
+  const slippage = summarizeSlippage(observedEraRows);
+  const all = summarizeGoalMarketSlice(markets);
+  const recent20Markets = markets.slice(-20);
+  const recent20 = summarizeGoalMarketSlice(recent20Markets);
+  const recent20MarketIds = new Set(recent20Markets.map((row) => row.marketId));
+  const recent20Slippage = summarizeSlippage(
+    copySlippageRows.filter((row) => recent20MarketIds.has(row.marketId))
+  );
+  const grossCopyVolumeUsd = round2(copy.volumeUsd);
+  const window = (durationMs: number): PreviewGoalWindowSummary => {
+    const sinceMs = nowMs - durationMs;
+    return { sinceMs, ...summarizeGoalMarketSlice(markets, sinceMs) };
+  };
+
+  return {
+    observationDays:
+      copy.firstCopyAtMs == null
+        ? 0
+        : round2(Math.max(0, nowMs - copy.firstCopyAtMs) / (24 * 60 * 60_000)),
+    activeTradingDays: copy.activeTradingDays,
+    firstCopyAtMs: copy.firstCopyAtMs,
+    lastCopyAtMs: copy.lastCopyAtMs,
+    settledMarketCount: markets.length,
+    copyPnlUsd: all.pnlUsd,
+    grossCopyVolumeUsd,
+    pnlVolumePct:
+      grossCopyVolumeUsd > 0 ? round2((all.pnlUsd / grossCopyVolumeUsd) * 100) : 0,
+    overall: {
+      marketCount: all.marketCount,
+      pnlUsd: all.pnlUsd,
+      winRatePct: all.winRatePct,
+      profitFactor: all.profitFactor,
+      grossProfitUsd: all.grossProfitUsd,
+      grossLossUsd: all.grossLossUsd,
+      slippageSampleCount: slippage.sampleCount,
+      slippageCoveragePct: slippage.coveragePct,
+      slippageLossPct: slippage.lossPct,
+    },
+    recent20: {
+      marketCount: recent20.marketCount,
+      pnlUsd: recent20.pnlUsd,
+      winRatePct: recent20.winRatePct,
+      profitFactor: recent20.profitFactor,
+      grossProfitUsd: recent20.grossProfitUsd,
+      grossLossUsd: recent20.grossLossUsd,
+      slippageSampleCount: recent20Slippage.sampleCount,
+      slippageCoveragePct: recent20Slippage.coveragePct,
+      slippageLossPct: recent20Slippage.lossPct,
+    },
+    slippage: {
+      observationStartedAtMs,
+      observationDays:
+        observationStartedAtMs === null
+          ? 0
+          : round2(Math.max(0, nowMs - observationStartedAtMs) / (24 * 60 * 60_000)),
+      ...slippage,
+    },
+    windows: {
+      h24: window(24 * 60 * 60_000),
+      d7: window(7 * 24 * 60 * 60_000),
+      d14: window(14 * 24 * 60 * 60_000),
+    },
+  };
 }
 
 function sharpeRatio(values: number[]): number | null {
@@ -436,6 +782,7 @@ export function readPreviewAccountReport(
 ): PreviewAccountReport {
   const limit = Math.min(50, Math.max(1, options.limit ?? 8));
   const initial = options.startingCapitalUsd ?? 200;
+  const nowMs = options.nowMs ?? Date.now();
   if (!existsSync(options.dbPath)) return emptyReport(options);
 
   const db = new Database(options.dbPath, { readonly: true });
@@ -446,6 +793,11 @@ export function readPreviewAccountReport(
     const hasTokenMarkets = tableExists(db, "token_markets");
     const hasPendingOrders = tableExists(db, "pending_orders");
     const hasLiveOrderIntents = tableExists(db, "live_order_intents");
+    const hasSlippageTelemetry =
+      hasAuditLog &&
+      columnExists(db, "audit_log", "leader_price") &&
+      columnExists(db, "audit_log", "executable_price") &&
+      columnExists(db, "audit_log", "slippage_pct");
 
     const cash = hasCashLedger
       ? (db
@@ -584,7 +936,7 @@ export function readPreviewAccountReport(
       .all(limit) as PreviewOpenMarketSummary[];
     const recentSinceMs =
       hasAuditLog && options.recentWindowMs && options.recentWindowMs > 0
-        ? (options.nowMs ?? Date.now()) - options.recentWindowMs
+        ? nowMs - options.recentWindowMs
         : undefined;
     const recentWindow =
       recentSinceMs != null ? summarizeRecentWindow(db, recentSinceMs) : undefined;
@@ -598,7 +950,7 @@ export function readPreviewAccountReport(
     const capitalDeltaUsd = round4(cashUsd + openCostUsd - initial - realizedPnlUsd);
     const errorCount = byAction.get("ERROR") ?? 0;
     const killSwitch = Boolean(latestStats?.killSwitch ?? 0);
-    const copyQuality = buildPreviewCopyQuality({
+    const copyQualityContext = {
       db,
       hasAuditLog,
       hasTokenMarkets,
@@ -613,14 +965,28 @@ export function readPreviewAccountReport(
       cashReplayDeltaUsd,
       capitalDeltaUsd,
       missingMarketMetadataCount,
-      sinceMs: recentSinceMs,
       limit,
+    };
+    const copyQuality = buildPreviewCopyQuality({
+      ...copyQualityContext,
+      sinceMs: recentSinceMs,
+    });
+    const stabilityCopyQuality = buildPreviewCopyQuality({
+      ...copyQualityContext,
+      sinceMs: nowMs - STABILITY_GOAL_COPY_PATH_WINDOW_MS,
     });
     const performance = readPreviewPerformance(
       db,
       hasAuditLog,
       initial,
       recentSinceMs
+    );
+    const goalMetrics = readGoalMetrics(
+      db,
+      hasAuditLog,
+      hasTokenMarkets,
+      hasSlippageTelemetry,
+      nowMs
     );
 
     const report: PreviewAccountReport = {
@@ -673,10 +1039,18 @@ export function readPreviewAccountReport(
       recentWindow,
       copyQuality,
       performance,
+      goalMetrics,
     };
     return {
       ...report,
       profitabilityGate: assessProfitabilityGate(report),
+      stabilityGoal: assessStabilityGoal({
+        ...report,
+        copyQuality: {
+          ...stabilityCopyQuality,
+          primaryIssue: copyQuality.primaryIssue,
+        },
+      }),
     };
   } finally {
     db.close();

@@ -30,6 +30,7 @@ import {
   getCachedGeoblockStatus,
 } from "../executor/geoblock.js";
 import { fetchBestExecutablePrice } from "../executor/orderbook.js";
+import { calculateCopySlippageLossPct } from "../sim/copy-slippage.js";
 import { logInfo, logError, logPreviewAction } from "../notify/logger.js";
 import {
   healthSnapshot,
@@ -617,7 +618,25 @@ export async function runCopyCycle(
       }
     }
 
-    if (!preview && config.app.global.risk.slippageTolerance > 0) {
+    let observedExecutablePrice: number | null = null;
+    let observedSlippagePct: number | null = null;
+    if (preview) {
+      try {
+        observedExecutablePrice = await fetchBestExecutablePrice(
+          config.wallet.clobUrl,
+          config.wallet.chainId,
+          activity.asset,
+          activity.side
+        );
+      } catch {
+        observedExecutablePrice = null;
+      }
+      observedSlippagePct = calculateCopySlippageLossPct(
+        activity.side,
+        leaderPrice,
+        observedExecutablePrice
+      );
+    } else if (config.app.global.risk.slippageTolerance > 0) {
       const ref = await fetchBestExecutablePrice(
         config.wallet.clobUrl,
         config.wallet.chainId,
@@ -745,6 +764,9 @@ export async function runCopyCycle(
         side: activity.side,
         filledShares: orderResult.filledShares,
         price: executionPrice,
+        leaderPrice,
+        executablePrice: observedExecutablePrice,
+        slippagePct: observedSlippagePct,
         filledUsd: orderResult.filledUsd,
         auditReason: sizing.reasoning,
         preview: true,

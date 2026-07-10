@@ -274,6 +274,72 @@ export interface ProfitabilityGateAssessment {
   };
 }
 
+export interface GoalMarketSummary {
+  marketCount: number;
+  pnlUsd: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  grossProfitUsd: number;
+  grossLossUsd: number;
+  slippageSampleCount: number;
+  slippageCoveragePct: number;
+  slippageLossPct: number | null;
+}
+
+export interface GoalWindowSummary {
+  sinceMs: number;
+  marketCount: number;
+  pnlUsd: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  grossProfitUsd: number;
+  grossLossUsd: number;
+}
+
+export interface StabilityGoalMetrics {
+  observationDays: number;
+  activeTradingDays: number;
+  firstCopyAtMs: number | null;
+  lastCopyAtMs: number | null;
+  settledMarketCount: number;
+  copyPnlUsd: number;
+  grossCopyVolumeUsd: number;
+  pnlVolumePct: number;
+  overall: GoalMarketSummary;
+  recent20: GoalMarketSummary;
+  slippage: {
+    observationStartedAtMs: number | null;
+    observationDays: number;
+    copyCount: number;
+    sampleCount: number;
+    totalNotionalUsd: number;
+    sampledNotionalUsd: number;
+    coveragePct: number;
+    lossPct: number | null;
+  };
+  windows: {
+    h24: GoalWindowSummary;
+    d7: GoalWindowSummary;
+    d14: GoalWindowSummary;
+  };
+}
+
+export interface StabilityGoalAssessment {
+  passed: boolean;
+  status: "qualified" | "collecting" | "not_qualified";
+  failedChecks: string[];
+  blockers: string[];
+  warnings: string[];
+  checks: Array<{
+    key: string;
+    label: string;
+    passed: boolean;
+    actual: number | null;
+    target: number;
+    comparator: ">=" | "<=" | ">" | "=";
+  }>;
+}
+
 export interface QualityAccountReport {
   accountId: string;
   label?: string;
@@ -281,6 +347,7 @@ export interface QualityAccountReport {
   previewMode: boolean;
   exists: boolean;
   enabledLeaderCount?: number;
+  enabledLeaderIds?: string[];
   copyingActive?: boolean;
   cashUsd?: number;
   openCostUsd?: number;
@@ -296,6 +363,8 @@ export interface QualityAccountReport {
   liveOrderIntentCount?: number;
   copyQuality?: CopyQualitySummary;
   performance?: PerformanceSummary;
+  goalMetrics?: StabilityGoalMetrics;
+  stabilityGoal?: StabilityGoalAssessment;
   profitabilityGate?: ProfitabilityGateAssessment;
   error?: string;
 }
@@ -319,6 +388,13 @@ export interface QualityResponse {
     };
     activeIssueCounts?: Record<string, number>;
     activeGateCounts?: Record<string, number>;
+    activeStabilityGoalCounts?: Record<string, number>;
+    stabilityGoal?: {
+      requiredQualifiedStrategies: number;
+      qualifiedStrategies: number;
+      independentQualifiedStrategies: number;
+      strategyRequirementPassed: boolean;
+    };
     activeCopyGap?: {
       accountsWithUnclassified: number;
       unclassifiedBuy: number;

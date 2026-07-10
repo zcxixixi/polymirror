@@ -131,7 +131,24 @@ function gateBadgeClass(grade?: string) {
   return "badge badge-muted";
 }
 
+function stabilityGoalLabel(status?: string) {
+  if (status === "qualified") return "Goal 达标";
+  if (status === "collecting") return "收集样本";
+  if (status === "not_qualified") return "未达标";
+  return "Goal 未部署";
+}
+
+function stabilityGoalBadgeClass(status?: string) {
+  if (status === "qualified") return "badge badge-live";
+  if (status === "collecting") return "badge badge-preview";
+  if (status === "not_qualified") return "badge badge-kill";
+  return "badge badge-muted";
+}
+
 function qualityVariant(q?: QualityAccountReport) {
+  const goal = q?.stabilityGoal?.status;
+  if (goal === "qualified") return "positive";
+  if (goal === "not_qualified") return "negative";
   const gate = q?.profitabilityGate?.grade;
   if (gate === "live_candidate") return "positive";
   if (gate === "reject") return "negative";
@@ -177,15 +194,14 @@ export function OverviewPage() {
   const activeQuality = enabledQuality.filter((r) => r.copyingActive !== false);
   const issueCounts = quality.data?.summary.issueCounts ?? {};
   const activeIssueCounts = quality.data?.summary.activeIssueCounts ?? issueCounts;
-  const gateCounts = quality.data?.summary.gateCounts ?? {};
-  const activeGateCounts = quality.data?.summary.activeGateCounts ?? gateCounts;
   const copyGapSummary = quality.data?.summary.copyGap;
   const activeCopyGapSummary = quality.data?.summary.activeCopyGap ?? copyGapSummary;
   const freshActiveCopyGap = quality.data?.summary.freshActiveCopyGap;
   const auditCopyGapSummary = freshActiveCopyGap?.copyGap ?? activeCopyGapSummary;
   const activeCopyAccounts = quality.data?.summary.activeCopyAccounts ?? enabledQuality.filter((r) => r.copyingActive).length;
   const settleOnlyAccounts = quality.data?.summary.settleOnlyAccounts ?? Math.max(0, enabledQuality.length - activeCopyAccounts);
-  const gateAvailable = activeQuality.some((r) => Boolean(r.profitabilityGate));
+  const goalProgress = quality.data?.summary.stabilityGoal;
+  const activeGoalCounts = quality.data?.summary.activeStabilityGoalCounts ?? {};
   const averageTradeCoverage =
     activeQuality.length > 0
       ? activeQuality.reduce(
@@ -220,37 +236,16 @@ export function OverviewPage() {
       ? activeQuality.reduce((sum, r) => sum + (effectiveCoverage(r.copyQuality)?.sellPct ?? 0), 0) /
         activeQuality.length
       : 0;
-  const performanceReports = activeQuality.filter((r) => r.performance);
-  const maturePerformanceReports = performanceReports.filter(
-    (r) => (r.performance?.tradeCount ?? 0) >= 30
-  );
-  const passingPerformanceReports = maturePerformanceReports.filter((r) => {
-    const p = r.performance;
-    if (!p) return false;
-    const profitFactor = effectiveProfitFactor(p) ?? 0;
-    return (
-      p.totalPnlUsd > 0 &&
-      p.winRatePct >= 60 &&
-      profitFactor >= 1.5 &&
-      p.maxDrawdownPct <= 10 &&
-      p.dependencyIssue !== "concentrated"
-    );
-  });
-  const maturePerformances = maturePerformanceReports
-    .map((r) => r.performance)
-    .filter((p): p is PerformanceSummary => Boolean(p));
-  const avgSharpe = meanFinite(maturePerformances.map((p) => p.sharpeRatio));
-  const avgProfitFactor = meanFinite(
-    maturePerformances.map((p) => p.profitFactor)
-  );
-  const avgWinRate = meanFinite(maturePerformances.map((p) => p.winRatePct)) ?? 0;
-  const avgPayoff = meanFinite(maturePerformances.map((p) => p.payoffRatio));
-  const avgEquityStability =
-    meanFinite(maturePerformances.map((p) => p.equityStabilityPct)) ?? 0;
-  const worstDrawdown =
-    maturePerformances.length > 0
-      ? Math.max(...maturePerformances.map((p) => p.maxDrawdownPct))
-      : 0;
+  const goalReports = activeQuality.filter((r) => r.goalMetrics && r.stabilityGoal);
+  const goalFocus = [...goalReports].sort((a, b) => {
+    const failedDelta =
+      (a.stabilityGoal?.failedChecks.length ?? 99) -
+      (b.stabilityGoal?.failedChecks.length ?? 99);
+    if (failedDelta) return failedDelta;
+    return (b.goalMetrics?.copyPnlUsd ?? 0) - (a.goalMetrics?.copyPnlUsd ?? 0);
+  })[0];
+  const focusGoal = goalFocus?.goalMetrics;
+  const focusName = goalFocus?.label || goalFocus?.accountId || "暂无策略";
   const rankedAccounts = sortAccountsForOps(accounts);
   const enabledAccounts = accounts.filter((a) => a.enabled);
   const profitableAccounts = enabledAccounts.filter((a) => accountPnl(a) > 0);
@@ -343,49 +338,41 @@ export function OverviewPage() {
 
       {qualityReports.length > 0 && (
         <section className="page-section">
-          <h2 className="section-title">盈利标准</h2>
+          <h2 className="section-title">稳定 Goal</h2>
           <div className="cards cards-compact">
             <DataCard
-              label="达标账户"
-              value={
-                gateAvailable
-                  ? `${activeGateCounts.live_candidate ?? 0}/${activeQuality.length}`
-                  : `${passingPerformanceReports.length}/${maturePerformanceReports.length}`
-              }
-              variant={
-                gateAvailable
-                  ? (activeGateCounts.live_candidate ?? 0) > 0
-                    ? "positive"
-                    : "accent"
-                  : passingPerformanceReports.length > 0
-                    ? "positive"
-                    : "accent"
-              }
+              label="独立达标策略"
+              value={`${goalProgress?.independentQualifiedStrategies ?? 0}/${goalProgress?.requiredQualifiedStrategies ?? 2}`}
+              variant={goalProgress?.strategyRequirementPassed ? "positive" : "accent"}
               hint={
                 <span className="muted">
-                  {gateAvailable
-                    ? `候选 ${activeGateCounts.candidate ?? 0} · 观察 ${activeGateCounts.watch ?? 0} · 淘汰 ${activeGateCounts.reject ?? 0}`
-                    : "远端还未部署盈利 gate，先按旧指标估算"}
+                  账户达标 {goalProgress?.qualifiedStrategies ?? 0} · 收集中 {activeGoalCounts.collecting ?? 0} · 未达标 {activeGoalCounts.not_qualified ?? 0}
                 </span>
               }
             />
             <DataCard
-              label="Sharpe / PF"
-              value={`${fmtNumber(avgSharpe)} / ${fmtNumber(avgProfitFactor)}`}
-              variant={(avgProfitFactor ?? 0) >= 1.5 ? "positive" : "accent"}
-              hint={<span className="muted">风险调整收益 / 总盈亏比</span>}
+              label="整体 / Recent 20 胜率"
+              value={`${fmtCoverage(focusGoal?.overall.winRatePct)} / ${fmtCoverage(focusGoal?.recent20.winRatePct)}`}
+              variant={(focusGoal?.overall.winRatePct ?? 0) >= 70 && (focusGoal?.recent20.winRatePct ?? 0) >= 70 ? "positive" : "accent"}
+              hint={<span className="muted">{focusName} · 目标均为 70%</span>}
             />
             <DataCard
-              label="胜率 / 盈亏比"
-              value={`${fmtCoverage(avgWinRate)} / ${fmtNumber(avgPayoff)}`}
-              variant={avgWinRate >= 60 ? "positive" : "accent"}
-              hint={<span className="muted">平均胜率 / 平均赚亏比</span>}
+              label="PF / PnL·Volume"
+              value={`${fmtNumber(focusGoal?.overall.profitFactor)} / ${fmtPct(focusGoal?.pnlVolumePct ?? 0)}`}
+              variant={(focusGoal?.overall.profitFactor ?? 0) >= 2 && (focusGoal?.pnlVolumePct ?? 0) >= 7 ? "positive" : "accent"}
+              hint={<span className="muted">{focusName} · 目标 2.0 / 7%</span>}
             />
             <DataCard
-              label="回撤 / 稳定"
-              value={`${fmtCoverage(worstDrawdown)} / ${fmtCoverage(avgEquityStability)}`}
-              variant={worstDrawdown <= 10 ? "positive" : "negative"}
-              hint={<span className="muted">按成熟账户已结算曲线估算</span>}
+              label="真实 Slip / 覆盖"
+              value={`${fmtNumber(focusGoal?.slippage.lossPct)}% / ${fmtCoverage(focusGoal?.slippage.coveragePct)}`}
+              variant={focusGoal?.slippage.lossPct != null && focusGoal.slippage.lossPct <= 10 && focusGoal.slippage.coveragePct >= 90 ? "positive" : "accent"}
+              hint={<span className="muted">Recent 20 {fmtNumber(focusGoal?.recent20.slippageLossPct)}% · 不把缺失报价算 0</span>}
+            />
+            <DataCard
+              label="24h / 7d / 14d PnL"
+              value={`${fmtUsd(focusGoal?.windows.h24.pnlUsd ?? 0)} / ${fmtUsd(focusGoal?.windows.d7.pnlUsd ?? 0)} / ${fmtUsd(focusGoal?.windows.d14.pnlUsd ?? 0)}`}
+              variant={(focusGoal?.windows.h24.pnlUsd ?? 0) > 0 && (focusGoal?.windows.d7.pnlUsd ?? 0) > 0 && (focusGoal?.windows.d14.pnlUsd ?? 0) > 0 ? "positive" : "accent"}
+              hint={<span className="muted">{focusName} · 三个窗口必须同时为正</span>}
             />
           </div>
 
@@ -440,13 +427,18 @@ export function OverviewPage() {
                 <div key={r.accountId} className="quality-row">
                   <div className="quality-main">
                     <strong>{r.label || r.accountId}</strong>
-                    <span className={gateBadgeClass(r.profitabilityGate?.grade)}>
-                      {gateLabel(r.profitabilityGate?.grade)}
+                    <span className={stabilityGoalBadgeClass(r.stabilityGoal?.status)}>
+                      {stabilityGoalLabel(r.stabilityGoal?.status)}
                     </span>
                     <span className={issueBadgeClass(q?.primaryIssue.severity)}>
                       {q?.primaryIssue.label ?? "无数据"}
                     </span>
                   </div>
+                  {r.goalMetrics && (
+                    <div className="quality-metrics muted">
+                      Goal：{fmtNumber(r.goalMetrics.observationDays, 1)} 天 · 市场 {r.goalMetrics.settledMarketCount} · REDEEM {r.redeemCount ?? 0} · 胜率 {fmtCoverage(r.goalMetrics.overall.winRatePct)} / R20 {fmtCoverage(r.goalMetrics.recent20.winRatePct)} · PF {fmtNumber(r.goalMetrics.overall.profitFactor)} · PnL/Vol {fmtPct(r.goalMetrics.pnlVolumePct)} · Slip {fmtNumber(r.goalMetrics.slippage.lossPct)}% ({fmtCoverage(r.goalMetrics.slippage.coveragePct)})
+                    </div>
+                  )}
                   <div className="quality-metrics muted">
                     COPY {r.copyCount ?? 0} · 有效 {fmtCoverage(effectiveCoverage(q)?.tradePct)} · 原始{" "}
                     {fmtCoverage(q?.coverage.tradePct)} · 买 {fmtCoverage(effectiveCoverage(q)?.buyPct)} · 卖{" "}
@@ -466,9 +458,9 @@ export function OverviewPage() {
                       {dependencyLabel(r.performance.dependencyIssue)}
                     </div>
                   )}
-                  {r.profitabilityGate && r.profitabilityGate.blockers.length > 0 && (
+                  {r.stabilityGoal && r.stabilityGoal.blockers.length > 0 && (
                     <div className="quality-metrics muted">
-                      门槛阻塞：{r.profitabilityGate.blockers.slice(0, 3).join(" · ")}
+                      Goal 差项：{r.stabilityGoal.blockers.slice(0, 4).join(" · ")}
                     </div>
                   )}
                 </div>
@@ -509,8 +501,8 @@ export function OverviewPage() {
                     </span>
                     {cq && (
                       <>
-                        <span className={gateBadgeClass(q?.profitabilityGate?.grade)}>
-                          {gateLabel(q?.profitabilityGate?.grade)}
+                        <span className={stabilityGoalBadgeClass(q?.stabilityGoal?.status)}>
+                          {stabilityGoalLabel(q?.stabilityGoal?.status)}
                         </span>
                         <span className={issueBadgeClass(cq.primaryIssue.severity)}>
                           {cq.primaryIssue.label}
@@ -532,9 +524,9 @@ export function OverviewPage() {
                         {dependencyLabel(q.performance.dependencyIssue)}
                       </span>
                     )}
-                    {q?.profitabilityGate && q.profitabilityGate.blockers.length > 0 && (
+                    {q?.stabilityGoal && q.stabilityGoal.blockers.length > 0 && (
                       <span className="muted">
-                        门槛 {q.profitabilityGate.blockers.slice(0, 2).join(" · ")}
+                        Goal {q.stabilityGoal.blockers.slice(0, 2).join(" · ")}
                       </span>
                     )}
                     <span className="muted">

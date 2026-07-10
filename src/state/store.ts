@@ -44,6 +44,9 @@ export interface AuditLogRow {
   side: string | null;
   size: number | null;
   price: number | null;
+  leaderPrice: number | null;
+  executablePrice: number | null;
+  slippagePct: number | null;
   reason: string | null;
   preview: boolean;
 }
@@ -214,6 +217,9 @@ export class StateStore {
         side TEXT,
         size REAL,
         price REAL,
+        leader_price REAL,
+        executable_price REAL,
+        slippage_pct REAL,
         reason TEXT,
         preview INTEGER NOT NULL DEFAULT 1
       );
@@ -293,6 +299,16 @@ export class StateStore {
     const dailyCols = this.db.prepare("PRAGMA table_info(daily_stats)").all() as { name: string }[];
     if (!dailyCols.some((c) => c.name === "realized_pnl")) {
       this.db.exec("ALTER TABLE daily_stats ADD COLUMN realized_pnl REAL NOT NULL DEFAULT 0");
+    }
+    const auditCols = this.db.prepare("PRAGMA table_info(audit_log)").all() as { name: string }[];
+    if (!auditCols.some((c) => c.name === "leader_price")) {
+      this.db.exec("ALTER TABLE audit_log ADD COLUMN leader_price REAL");
+    }
+    if (!auditCols.some((c) => c.name === "executable_price")) {
+      this.db.exec("ALTER TABLE audit_log ADD COLUMN executable_price REAL");
+    }
+    if (!auditCols.some((c) => c.name === "slippage_pct")) {
+      this.db.exec("ALTER TABLE audit_log ADD COLUMN slippage_pct REAL");
     }
   }
 
@@ -1039,6 +1055,9 @@ export class StateStore {
     side: "BUY" | "SELL";
     filledShares: number;
     price: number;
+    leaderPrice?: number;
+    executablePrice?: number | null;
+    slippagePct?: number | null;
     filledUsd: number;
     auditReason: string;
     preview: boolean;
@@ -1053,6 +1072,9 @@ export class StateStore {
       side,
       filledShares,
       price,
+      leaderPrice,
+      executablePrice,
+      slippagePct,
       filledUsd,
       auditReason,
       preview,
@@ -1087,6 +1109,9 @@ export class StateStore {
         side,
         size: appliedShares,
         price,
+        leaderPrice,
+        executablePrice,
+        slippagePct,
         reason: auditReason,
         preview,
       });
@@ -1220,13 +1245,18 @@ export class StateStore {
     side?: string;
     size?: number;
     price?: number;
+    leaderPrice?: number;
+    executablePrice?: number | null;
+    slippagePct?: number | null;
     reason?: string;
     preview: boolean;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO audit_log (ts, leader_id, action, token_id, side, size, price, reason, preview)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO audit_log
+         (ts, leader_id, action, token_id, side, size, price, leader_price,
+          executable_price, slippage_pct, reason, preview)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         Date.now(),
@@ -1236,6 +1266,9 @@ export class StateStore {
         entry.side ?? null,
         entry.size ?? null,
         entry.price ?? null,
+        entry.leaderPrice ?? null,
+        entry.executablePrice ?? null,
+        entry.slippagePct ?? null,
         entry.reason ?? null,
         entry.preview ? 1 : 0
       );
@@ -1361,7 +1394,9 @@ export class StateStore {
     const items = this.db
       .prepare(
         `SELECT id, ts, leader_id AS leaderId, action, token_id AS tokenId, side,
-                size, price, reason, preview
+                size, price, leader_price AS leaderPrice,
+                executable_price AS executablePrice, slippage_pct AS slippagePct,
+                reason, preview
          FROM audit_log ${where}
          ORDER BY ts DESC
          LIMIT ? OFFSET ?`
@@ -1378,7 +1413,9 @@ export class StateStore {
     const items = this.db
       .prepare(
         `SELECT id, ts, leader_id AS leaderId, action, token_id AS tokenId, side,
-                size, price, reason, preview
+                size, price, leader_price AS leaderPrice,
+                executable_price AS executablePrice, slippage_pct AS slippagePct,
+                reason, preview
          FROM audit_log
          WHERE id > ?
          ORDER BY id ASC
