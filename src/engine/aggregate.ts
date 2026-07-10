@@ -7,6 +7,20 @@ export interface AggregatedTrade {
   sourceCount: number;
   /** All tradeEventKeys merged into this bucket (for dedup on live). */
   sourceTradeKeys: string[];
+  /** Opaque caller-provided lineage handles merged into this bucket. */
+  sourceLineageKeys?: string[];
+}
+
+interface AggregationInput {
+  leaderId: string;
+  activity: Activity;
+  sourceLineageKeys?: string[];
+}
+
+function lineage(item: AggregationInput): Pick<AggregatedTrade, "sourceLineageKeys"> {
+  return item.sourceLineageKeys
+    ? { sourceLineageKeys: [...item.sourceLineageKeys] }
+    : {};
 }
 
 function activityTs(a: Activity): number {
@@ -22,7 +36,7 @@ function bucketKey(leaderId: string, activity: Activity): string {
  * windowMs <= 0 disables aggregation.
  */
 export function aggregateTrades(
-  items: { leaderId: string; activity: Activity }[],
+  items: AggregationInput[],
   windowMs: number
 ): AggregatedTrade[] {
   if (windowMs <= 0 || items.length === 0) {
@@ -31,6 +45,7 @@ export function aggregateTrades(
       activity: i.activity,
       sourceCount: 1,
       sourceTradeKeys: [tradeEventKey(i.activity)],
+      ...lineage(i),
     }));
   }
 
@@ -45,6 +60,7 @@ export function aggregateTrades(
         activity: { ...activity },
         sourceCount: 1,
         sourceTradeKeys: [tradeEventKey(activity)],
+        ...lineage(item),
       });
       continue;
     }
@@ -59,6 +75,7 @@ export function aggregateTrades(
         activity: { ...activity },
         sourceCount: 1,
         sourceTradeKeys: [tradeEventKey(activity)],
+        ...lineage(item),
       });
       continue;
     }
@@ -70,6 +87,7 @@ export function aggregateTrades(
         activity: { ...activity },
         sourceCount: 1,
         sourceTradeKeys: [tradeEventKey(activity)],
+        ...lineage(item),
       });
       continue;
     }
@@ -86,6 +104,10 @@ export function aggregateTrades(
     existing.activity.price = Math.round(vwap * 10000) / 10000;
     existing.sourceCount += 1;
     existing.sourceTradeKeys.push(tradeEventKey(activity));
+    if (item.sourceLineageKeys) {
+      existing.sourceLineageKeys ??= [];
+      existing.sourceLineageKeys.push(...item.sourceLineageKeys);
+    }
   }
 
   return [...buckets.values()].sort((a, b) => activityTs(b.activity) - activityTs(a.activity));

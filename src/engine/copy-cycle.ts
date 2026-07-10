@@ -15,7 +15,7 @@ import { isAnyTradeKeySeen, isRecentBuyDuplicate } from "../engine/dedup.js";
 import { ConflictTracker } from "../engine/conflict.js";
 import { aggregateTrades } from "../engine/aggregate.js";
 import { RiskGate, assertLiveTradingAllowed } from "../engine/risk.js";
-import type { StateStore, TokenMarketEntry } from "../state/store.js";
+import type { DecisionObservationRef, StateStore, TokenMarketEntry } from "../state/store.js";
 import { processPendingOrders } from "../engine/pending-orders.js";
 import { adoptUntrackedOpenOrders } from "../engine/order-reconcile.js";
 import {
@@ -66,7 +66,7 @@ interface QueuedTrade {
   leaderId: string;
   activity: Activity;
   sourceTradeKeys: string[];
-  rawEventIds?: string[];
+  rawObservationRefs?: DecisionObservationRef[];
 }
 
 const SETTLEMENT_CHECK_INTERVAL_MS = 60_000;
@@ -330,7 +330,7 @@ export async function runCopyCycle(
     options.pollActivityCache
   );
   const rawQueue: QueuedTrade[] = [];
-  const rawEventIdBySourceKey = new Map<string, string>();
+  const observationRefByLineageKey = new Map<string, DecisionObservationRef>();
 
   for (const result of pollResults) {
     if (result.error) {
@@ -357,9 +357,13 @@ export async function runCopyCycle(
             observedTimestamp: Date.now(),
           })
         : undefined;
-      if (rawEvent) rawEventIdBySourceKey.set(sourceKey, rawEvent.rawEventId);
+      const rawObservationRef = rawEvent ? store.latestObservationRef(rawEvent.rawEventId) : undefined;
+      const lineageKey = rawObservationRef
+        ? `${rawObservationRef.rawEventId}:${rawObservationRef.observationId}`
+        : undefined;
+      if (lineageKey && rawObservationRef) observationRefByLineageKey.set(lineageKey, rawObservationRef);
       if (!observation.candidate) {
-        store.setDecisionRawEventIds(rawEvent ? [rawEvent.rawEventId] : []);
+        store.setDecisionObservationRefs(rawObservationRef ? [rawObservationRef] : []);
         store.audit({
           leaderId: result.leaderId,
           action: "DETECT",
@@ -389,22 +393,26 @@ export async function runCopyCycle(
         leaderId: result.leaderId,
         activity,
         sourceTradeKeys: [sourceKey],
-        rawEventIds: rawEvent ? [rawEvent.rawEventId] : [],
+        rawObservationRefs: rawObservationRef ? [rawObservationRef] : [],
       });
     }
   }
 
   const aggregated = aggregateTrades(
-    rawQueue,
+    rawQueue.map((item) => ({
+      leaderId: item.leaderId,
+      activity: item.activity,
+      sourceLineageKeys: item.rawObservationRefs?.map((ref) => `${ref.rawEventId}:${ref.observationId}`),
+    })),
     config.app.global.tradeAggregationWindowMs
   );
   const queue: QueuedTrade[] = aggregated.map((a) => ({
     leaderId: a.leaderId,
     activity: a.activity,
     sourceTradeKeys: a.sourceTradeKeys,
-    rawEventIds: a.sourceTradeKeys
-      .map((key) => rawEventIdBySourceKey.get(key))
-      .filter((id): id is string => Boolean(id)),
+    rawObservationRefs: (a.sourceLineageKeys ?? [])
+      .map((key) => observationRefByLineageKey.get(key))
+      .filter((ref): ref is DecisionObservationRef => Boolean(ref)),
   }));
 
   const buyWindow = config.app.global.buyDedupWindowMs;
@@ -423,8 +431,8 @@ export async function runCopyCycle(
     }
   }
 
-  for (const { leaderId, activity, sourceTradeKeys, rawEventIds } of queue) {
-    store.setDecisionRawEventIds(rawEventIds ?? []);
+  for (const { leaderId, activity, sourceTradeKeys, rawObservationRefs } of queue) {
+    store.setDecisionObservationRefs(rawObservationRefs ?? []);
     const leader = registry.getById(leaderId);
     if (!leader || !leader.enabled) continue;
 

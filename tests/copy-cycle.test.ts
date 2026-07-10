@@ -12,6 +12,7 @@ import { previewRuntimeConfig, testActivity, testLeader } from "./helpers/fixtur
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 
 vi.mock("../src/monitor/poll.js", () => ({
   pollLeaders: vi.fn(),
@@ -103,6 +104,35 @@ describe("runCopyCycle", () => {
     });
     expect(decisions.find((decision) => decision.action === "SKIP")?.reasonCode)
       .toBe("already_seen");
+  });
+
+  it("links a queued accepted candidate to its own observation when a later poll observation rejects the same source", async () => {
+    const accepted = testActivity({ transactionHash: "0xversioned", timestamp: 123, price: 0.5 });
+    const rejected = { ...accepted, price: 0.7 };
+    const config = previewRuntimeConfig();
+    store.startOrResumeExperiment({
+      accountId: "candidate-versioned", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate",
+    });
+    mockPollLeaders.mockResolvedValue([{
+      leaderId: "whale", fetched: 2, candidates: [accepted],
+      observations: [
+        { activity: accepted, candidate: true },
+        { activity: rejected, candidate: false, rejectionReasonCode: "price_filter" },
+      ],
+    }]);
+
+    await runCopyCycle(config, store);
+
+    const db = new Database(join(dir, "test.db"), { readonly: true });
+    const linked = db.prepare(`SELECT o.normalized_payload_json AS payloadJson
+      FROM decisions d JOIN decision_observation_links l ON l.decision_id=d.decision_id
+      JOIN raw_event_observations o ON o.observation_id=l.observation_id
+      WHERE d.action='COPY'`).all() as Array<{ payloadJson: string }>;
+    db.close();
+    expect(linked.map((row) => JSON.parse(row.payloadJson))).toEqual([
+      expect.objectContaining({ candidate: true, price: 0.5 }),
+    ]);
   });
 
   it("links an incomplete raw activity to a terminal skip", async () => {

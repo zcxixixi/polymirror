@@ -26,7 +26,7 @@ export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
 export const STATE_SCHEMA_VERSION = 7;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
-interface DecisionObservationRef { rawEventId: string; observationId: number }
+export interface DecisionObservationRef { rawEventId: string; observationId: number }
 
 export interface PendingOrderRow {
   orderId: string;
@@ -330,7 +330,7 @@ export class StateStore {
   private db: Database.Database;
   private decisionRawEventIds: string[] = [];
   private latestObservationIdByRawEventId = new Map<string, number>();
-  private decisionObservationIdByRawEventId = new Map<string, number>();
+  private decisionObservationRefs: DecisionObservationRef[] = [];
 
   constructor(path = DEFAULT_DB) {
     const dir = dirname(path);
@@ -919,12 +919,17 @@ export class StateStore {
   }): DecisionRow {
     const raw = this.getRawEvent(input.rawEventId);
     if (!raw) throw new Error(`Raw event not found: ${input.rawEventId}`);
-    const observationId = this.decisionObservationIdByRawEventId.get(raw.rawEventId)
-      ?? this.latestObservationIdByRawEventId.get(raw.rawEventId)
+    const contextObservationIds = this.decisionObservationRefs
+      .filter((ref) => ref.rawEventId === raw.rawEventId)
+      .map((ref) => ref.observationId);
+    const fallbackObservationId = this.latestObservationIdByRawEventId.get(raw.rawEventId)
       ?? (this.db.prepare(
         "SELECT observation_id AS observationId FROM raw_event_observations WHERE raw_event_id = ? ORDER BY observation_id DESC LIMIT 1"
       ).get(raw.rawEventId) as { observationId: number } | undefined)?.observationId;
-    if (observationId === undefined) throw new Error(`Cannot record decision without raw observation context: ${raw.rawEventId}`);
+    const observationIds = contextObservationIds.length > 0
+      ? contextObservationIds
+      : fallbackObservationId === undefined ? [] : [fallbackObservationId];
+    if (observationIds.length === 0) throw new Error(`Cannot record decision without raw observation context: ${raw.rawEventId}`);
     return this.db.transaction(() => {
       const exactTermsJson = normalizedPayloadJson(input.exactTerms);
       const decidedAt = input.decidedAt ?? Date.now();
@@ -946,14 +951,18 @@ export class StateStore {
         decidedAt,
         decisionOrder
       );
-      const linkOrder = (this.db.prepare(
+      const nextLinkOrder = this.db.prepare(
         "SELECT COALESCE(MAX(link_order), 0) + 1 AS next FROM decision_observation_links WHERE experiment_id=?"
-      ).get(raw.experimentId) as { next: number }).next;
-      this.db.prepare(
+      );
+      const insertLink = this.db.prepare(
         `INSERT OR IGNORE INTO decision_observation_links
          (experiment_id, observation_id, decision_id, link_order, linked_at)
          VALUES (?, ?, ?, ?, ?)`
-      ).run(raw.experimentId, observationId, decisionId, linkOrder, decidedAt);
+      );
+      for (const observationId of observationIds) {
+        const linkOrder = (nextLinkOrder.get(raw.experimentId) as { next: number }).next;
+        insertLink.run(raw.experimentId, observationId, decisionId, linkOrder, decidedAt);
+      }
       return this.getDecision(decisionId)!;
     })();
   }
@@ -979,11 +988,8 @@ export class StateStore {
 
   setDecisionRawEventIds(rawEventIds: string[]): void {
     this.decisionRawEventIds = [...new Set(rawEventIds)];
-    this.decisionObservationIdByRawEventId = new Map();
-    this.decisionObservationIdByRawEventId = new Map(
-      this.observationRefsForRawEventIds(this.decisionRawEventIds)
-        .map((ref) => [ref.rawEventId, ref.observationId])
-    );
+    this.decisionObservationRefs = [];
+    this.decisionObservationRefs = this.observationRefsForRawEventIds(this.decisionRawEventIds);
   }
 
   private observationRefsForRawEventIds(rawEventIds: string[]): DecisionObservationRef[] {
@@ -991,8 +997,9 @@ export class StateStore {
       "SELECT observation_id AS observationId FROM raw_event_observations WHERE raw_event_id=? ORDER BY observation_id DESC LIMIT 1"
     );
     return [...new Set(rawEventIds)].flatMap((rawEventId) => {
-      const observationId = this.decisionObservationIdByRawEventId.get(rawEventId)
-        ?? this.latestObservationIdByRawEventId.get(rawEventId)
+      const context = this.decisionObservationRefs.filter((ref) => ref.rawEventId === rawEventId);
+      if (context.length > 0) return context;
+      const observationId = this.latestObservationIdByRawEventId.get(rawEventId)
         ?? (latest.get(rawEventId) as { observationId: number } | undefined)?.observationId;
       return observationId === undefined ? [] : [{ rawEventId, observationId }];
     });
@@ -1016,19 +1023,29 @@ export class StateStore {
     } catch { return []; }
   }
 
-  private setDecisionObservationRefs(refs: DecisionObservationRef[]): void {
+  setDecisionObservationRefs(refs: DecisionObservationRef[]): void {
     const owner = this.db.prepare(
       "SELECT 1 FROM raw_event_observations WHERE observation_id=? AND raw_event_id=?"
     );
-    const rawIds = new Set<string>();
+    const identities = new Set<string>();
     for (const ref of refs) {
-      if (rawIds.has(ref.rawEventId) || !owner.get(ref.observationId, ref.rawEventId)) {
+      const identity = `${ref.rawEventId}\n${ref.observationId}`;
+      if (identities.has(identity) || !owner.get(ref.observationId, ref.rawEventId)) {
         throw new Error("Invalid persisted decision observation context");
       }
-      rawIds.add(ref.rawEventId);
+      identities.add(identity);
     }
     this.decisionRawEventIds = [...new Set(refs.map((ref) => ref.rawEventId))];
-    this.decisionObservationIdByRawEventId = new Map(refs.map((ref) => [ref.rawEventId, ref.observationId]));
+    this.decisionObservationRefs = [...refs];
+  }
+
+  latestObservationRef(rawEventId: string): DecisionObservationRef {
+    const observationId = this.latestObservationIdByRawEventId.get(rawEventId)
+      ?? (this.db.prepare(
+        "SELECT observation_id AS observationId FROM raw_event_observations WHERE raw_event_id=? ORDER BY observation_id DESC LIMIT 1"
+      ).get(rawEventId) as { observationId: number } | undefined)?.observationId;
+    if (observationId === undefined) throw new Error(`Raw observation not found: ${rawEventId}`);
+    return { rawEventId, observationId };
   }
 
   private rawEventIdsForSourceKeys(sourceKeys: string[]): string[] {
@@ -2034,7 +2051,7 @@ export class StateStore {
     } = entry;
 
     const previousDecisionRawEventIds = this.decisionRawEventIds;
-    const previousDecisionObservationIds = new Map(this.decisionObservationIdByRawEventId);
+    const previousDecisionObservationRefs = [...this.decisionObservationRefs];
     const pendingLineage = orderId
       ? this.db.prepare(
         `SELECT trade_key AS tradeKey, price, size, leader_price AS leaderPrice,
@@ -2173,7 +2190,7 @@ export class StateStore {
       apply();
     } finally {
       this.decisionRawEventIds = previousDecisionRawEventIds;
-      this.decisionObservationIdByRawEventId = previousDecisionObservationIds;
+      this.decisionObservationRefs = previousDecisionObservationRefs;
     }
   }
 
@@ -2218,7 +2235,7 @@ export class StateStore {
     } = entry;
     const keys = tradeKeys ?? (tradeKey ? [tradeKey] : []);
     const previousDecisionRawEventIds = this.decisionRawEventIds;
-    const previousDecisionObservationIds = new Map(this.decisionObservationIdByRawEventId);
+    const previousDecisionObservationRefs = [...this.decisionObservationRefs];
     if (this.decisionRawEventIds.length === 0) {
       this.setDecisionObservationRefs(this.observationRefsForSourceKeys(keys));
     }
@@ -2273,7 +2290,7 @@ export class StateStore {
       apply();
     } finally {
       this.decisionRawEventIds = previousDecisionRawEventIds;
-      this.decisionObservationIdByRawEventId = previousDecisionObservationIds;
+      this.decisionObservationRefs = previousDecisionObservationRefs;
     }
   }
 
@@ -2326,7 +2343,7 @@ export class StateStore {
     const primaryKey = tradeKeys[0] ?? "";
     const now = Date.now();
     const previousDecisionRawEventIds = this.decisionRawEventIds;
-    const previousDecisionObservationIds = new Map(this.decisionObservationIdByRawEventId);
+    const previousDecisionObservationRefs = [...this.decisionObservationRefs];
     if (this.decisionRawEventIds.length === 0) {
       const persisted = intentId
         ? this.db.prepare("SELECT observation_refs_json AS refs FROM live_order_intents WHERE intent_id=?")
@@ -2437,7 +2454,7 @@ export class StateStore {
       apply();
     } finally {
       this.decisionRawEventIds = previousDecisionRawEventIds;
-      this.decisionObservationIdByRawEventId = previousDecisionObservationIds;
+      this.decisionObservationRefs = previousDecisionObservationRefs;
     }
   }
 
