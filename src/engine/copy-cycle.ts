@@ -916,33 +916,9 @@ export async function runCopyCycle(
     orderResult = await executor.placeLimitOrder(orderReq);
 
     if (orderResult.error) {
-      const partialFillError = orderResult.error;
       const recovered = await executor.recoverOrderAfterFailure(orderReq);
       if (recovered) {
         orderResult = recovered;
-      } else if (
-        !preview &&
-        orderResult.filledShares > 0 &&
-        orderResult.pendingRemaining <= 0
-      ) {
-        store.audit({
-          leaderId,
-          action: "ERROR",
-          tokenId: activity.asset,
-          side: activity.side,
-          size: orderResult.filledShares,
-          price: orderResult.executionPrice ?? orderPrice,
-          leaderPrice: executionAudit?.leaderPrice,
-          executablePrice: executionAudit?.executablePrice,
-          slippagePct: executionAudit?.slippagePct,
-          reason: `${partialFillError}; filled portion will be recorded`,
-          preview,
-        });
-        orderResult = {
-          ...orderResult,
-          error: undefined,
-          orderStatus: `${orderResult.orderStatus ?? "partial fill"}; ${partialFillError}`,
-        };
       } else {
         errors.push(`${leaderId}: ${orderResult.error}`);
         store.audit({

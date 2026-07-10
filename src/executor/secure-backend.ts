@@ -41,8 +41,14 @@ function roundFillValue(value: number): number {
   return Math.round(value * 100_000_000) / 100_000_000;
 }
 
-const ACTIVE_FILL_STATUSES = new Set(["MATCHED", "MINED", "CONFIRMED"]);
+function parseNonNegativeNumber(value: unknown): number {
+  if (value === null || value === undefined || value === "") return 0;
+  const parsed = parseFloat(String(value));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
 const CONFIRMED_FILL_STATUSES = new Set(["CONFIRMED"]);
+const FILL_EPSILON = 1e-8;
 
 interface AggregatedOrderFill {
   shares: number;
@@ -118,14 +124,16 @@ export class SecureTradingBackend implements TradingBackend {
     const client = await getSecureClient(this.wallet);
     try {
       const order = await client.fetchOrder({ orderId });
-      const sizeMatched = parseFloat(String(order.sizeMatched ?? "0"));
+      const reportedSizeMatched = parseFloat(String(order.sizeMatched ?? "0"));
       const originalSize = parseFloat(String(order.originalSize ?? "0"));
       const status = String(order.status ?? "unknown");
-      const terminal =
-        isTerminalStatus(status) || (originalSize > 0 && sizeMatched >= originalSize * 0.99);
-      const fill = tokenId && sizeMatched > 0
-        ? await this.aggregateOrderFillFromTrades(orderId, tokenId, ACTIVE_FILL_STATUSES)
+      const fill = tokenId && reportedSizeMatched > 0
+        ? await this.aggregateOrderFillFromTrades(orderId, tokenId, CONFIRMED_FILL_STATUSES)
         : null;
+      const sizeMatched = fill?.shares ?? 0;
+      const terminal =
+        isTerminalStatus(status) ||
+        (originalSize > 0 && sizeMatched >= originalSize - FILL_EPSILON);
       return {
         kind: "ok",
         status: {
@@ -157,9 +165,9 @@ export class SecureTradingBackend implements TradingBackend {
               kind: "ok",
               status: {
                 sizeMatched: fill.shares,
-                originalSize: fill.shares,
-                status: "CONFIRMED",
-                terminal: true,
+                originalSize: 0,
+                status: "CONFIRMED_CLOSED",
+                terminal: false,
                 filledUsd: fill.usd,
                 averagePrice: fill.averagePrice,
                 feeUsd: fill.feeUsd,
@@ -234,61 +242,97 @@ export class SecureTradingBackend implements TradingBackend {
       CompletedOrderFill & { invalid: boolean }
     >();
     const after = String(Math.floor(sinceMs / 1000));
+    const ownMakerAddress = this.wallet.proxyAddress?.toLowerCase();
+
+    const addFill = (input: {
+      orderId: string;
+      tokenId: string;
+      sideValue: string;
+      price: number;
+      shares: number;
+      feeRateBps: number;
+      matchedAt: number;
+    }): void => {
+      const side = input.sideValue === "BUY" || input.sideValue === "SELL"
+        ? input.sideValue
+        : undefined;
+      if (
+        !input.orderId ||
+        !input.tokenId ||
+        !side ||
+        !Number.isFinite(input.price) ||
+        input.price <= 0 ||
+        !Number.isFinite(input.shares) ||
+        input.shares <= 0 ||
+        !Number.isFinite(input.matchedAt) ||
+        input.matchedAt < sinceMs
+      ) {
+        return;
+      }
+
+      const usd = input.price * input.shares;
+      const feeUsd = calculateFeeFromBps(usd, input.feeRateBps);
+      const existing = groups.get(input.orderId);
+      if (!existing) {
+        groups.set(input.orderId, {
+          orderId: input.orderId,
+          tokenId: input.tokenId,
+          side,
+          averagePrice: input.price,
+          shares: input.shares,
+          usd,
+          feeUsd,
+          matchedAt: input.matchedAt,
+          invalid: false,
+        });
+        return;
+      }
+      if (existing.tokenId !== input.tokenId || existing.side !== side) {
+        existing.invalid = true;
+        return;
+      }
+      existing.shares += input.shares;
+      existing.usd += usd;
+      existing.feeUsd = (existing.feeUsd ?? 0) + feeUsd;
+      existing.matchedAt = Math.max(existing.matchedAt, input.matchedAt);
+    };
 
     for await (const page of client.listAccountTrades({ after })) {
       for (const trade of page.items) {
         if (String(trade.status ?? "").toUpperCase() !== "CONFIRMED") continue;
-        if (String(trade.traderSide ?? "").toUpperCase() !== "TAKER") continue;
-
-        const orderId = String(trade.takerOrderId ?? "").trim();
-        const tokenId = String(trade.tokenId ?? "").trim();
-        const sideValue = String(trade.side ?? "").toUpperCase();
-        const side = sideValue === "BUY" || sideValue === "SELL" ? sideValue : undefined;
-        const price = parseFloat(String(trade.price ?? "0"));
-        const shares = parseFloat(String(trade.size ?? "0"));
         const matchedAt = parseMatchedAt(String(trade.matchedAt ?? ""));
-        if (
-          !orderId ||
-          !tokenId ||
-          !side ||
-          !Number.isFinite(price) ||
-          price <= 0 ||
-          !Number.isFinite(shares) ||
-          shares <= 0 ||
-          !Number.isFinite(matchedAt) ||
-          matchedAt < sinceMs
-        ) {
-          continue;
+        const traderSide = String(trade.traderSide ?? "").toUpperCase();
+        if (traderSide === "TAKER") {
+          addFill({
+            orderId: String(trade.takerOrderId ?? "").trim(),
+            tokenId: String(trade.tokenId ?? "").trim(),
+            sideValue: String(trade.side ?? "").toUpperCase(),
+            price: parseFloat(String(trade.price ?? "0")),
+            shares: parseFloat(String(trade.size ?? "0")),
+            feeRateBps: parseNonNegativeNumber(trade.feeRateBps),
+            matchedAt,
+          });
         }
 
-        const usd = price * shares;
-        const feeUsd = calculateFeeFromBps(
-          usd,
-          parseFloat(String(trade.feeRateBps ?? "0"))
-        );
-        const existing = groups.get(orderId);
-        if (!existing) {
-          groups.set(orderId, {
-            orderId,
-            tokenId,
-            side,
-            averagePrice: price,
-            shares,
-            usd,
-            feeUsd,
-            matchedAt,
-            invalid: false,
-          });
-          continue;
+        if (traderSide === "MAKER") {
+          for (const maker of trade.makerOrders ?? []) {
+            if (
+              ownMakerAddress &&
+              String(maker.makerAddress ?? "").toLowerCase() !== ownMakerAddress
+            ) {
+              continue;
+            }
+            addFill({
+              orderId: String(maker.orderId ?? "").trim(),
+              tokenId: String(maker.tokenId ?? "").trim(),
+              sideValue: String(maker.side ?? "").toUpperCase(),
+              price: parseFloat(String(maker.price ?? "0")),
+              shares: parseFloat(String(maker.matchedAmount ?? "0")),
+              feeRateBps: parseNonNegativeNumber(maker.feeRateBps),
+              matchedAt,
+            });
+          }
         }
-        if (existing.tokenId !== tokenId || existing.side !== side) {
-          existing.invalid = true;
-          continue;
-        }
-        existing.shares += shares;
-        existing.usd += usd;
-        existing.feeUsd = (existing.feeUsd ?? 0) + feeUsd;
-        existing.matchedAt = Math.max(existing.matchedAt, matchedAt);
       }
     }
 

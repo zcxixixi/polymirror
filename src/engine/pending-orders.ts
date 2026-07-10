@@ -25,6 +25,10 @@ const defaultDeps: PendingOrderDeps = {
   createExecutor: (config) => new ClobExecutor(config.wallet, config.app.global),
 };
 
+function roundFillAmount(value: number): number {
+  return Math.round(value * 100_000_000) / 100_000_000;
+}
+
 interface RowProcessResult {
   resolved: number;
   filled: number;
@@ -95,17 +99,36 @@ async function processPendingOrderRow(
       };
     }
     if (statusResult.kind === "not_found") {
-      store.removePendingOrder(row.orderId);
-      return { ...empty, resolved: 1 };
+      return {
+        ...empty,
+        errors: [
+          `pending ${row.orderId.slice(0, 12)}: confirmation unavailable after order left open book`,
+        ],
+      };
     }
 
     const status = statusResult.status;
     const matched = Math.min(status.sizeMatched, row.size);
-    const delta = Math.round((matched - row.filledShares) * 100) / 100;
+    const delta = roundFillAmount(matched - row.filledShares);
     const reportedFilledUsd = status.filledUsd;
     const matchedFilledUsd = reportedFilledUsd !== undefined && reportedFilledUsd > 0
       ? reportedFilledUsd * (matched / status.sizeMatched)
       : matched * row.price;
+    if (
+      delta > 0 &&
+      (
+        reportedFilledUsd === undefined ||
+        !Number.isFinite(reportedFilledUsd) ||
+        matchedFilledUsd <= row.filledUsd + 1e-8
+      )
+    ) {
+      return {
+        ...empty,
+        errors: [
+          `pending ${row.orderId.slice(0, 12)}: cumulative fill evidence lagged matched shares`,
+        ],
+      };
+    }
     const deltaUsd = Math.max(0, matchedFilledUsd - row.filledUsd);
     const reportedFeeUsd = status.feeUsd;
     const matchedFeeUsd = reportedFeeUsd !== undefined && reportedFeeUsd >= 0 && status.sizeMatched > 0
@@ -113,7 +136,9 @@ async function processPendingOrderRow(
       : row.feeUsd;
     const deltaFeeUsd = Math.max(0, matchedFeeUsd - row.feeUsd);
     const fill = buildFillPayload(row, delta, deltaUsd, deltaFeeUsd, preview);
-    const terminal = status.terminal || matched >= row.size * 0.99;
+    const terminal =
+      status.terminal ||
+      (status.status === "CONFIRMED_CLOSED" && matched >= row.size - 1e-8);
     const filled = fill ? 1 : 0;
 
     if (terminal) {

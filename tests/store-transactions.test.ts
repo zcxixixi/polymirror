@@ -202,6 +202,41 @@ describe("StateStore transactions", () => {
     expect(sell).toMatchObject({ price: 0.6, feeUsd: 0.12 });
   });
 
+  it("preserves precise shares and sub-cent fees in realized pnl", () => {
+    store.recordCopySuccess({
+      tradeKey: "precise-buy",
+      leaderId: "whale",
+      tokenId: "tok-precise",
+      side: "BUY",
+      filledShares: 4.9475,
+      price: 0.5,
+      filledUsd: 2.47375,
+      auditReason: "precise buy",
+      preview: true,
+      cashInitialUsd: 200,
+    });
+
+    expect(store.getPosition("whale", "tok-precise")).toBe(4.9475);
+
+    store.recordCopySuccess({
+      tradeKey: "precise-sell",
+      leaderId: "whale",
+      tokenId: "tok-precise",
+      side: "SELL",
+      filledShares: 4.9475,
+      price: 0.6,
+      filledUsd: 2.9685,
+      feeUsd: 0.004,
+      auditReason: "precise sell",
+      preview: true,
+      cashInitialUsd: 200,
+    });
+
+    expect(store.getPosition("whale", "tok-precise")).toBe(0);
+    expect(store.getDailyRealizedPnl()).toBeCloseTo(0.49075, 8);
+    expect(store.getCashBalance(200)).toBe(200.49075);
+  });
+
   it("caps preview SELL cash, pnl, and audit size to actual held shares", () => {
     store.recordCopySuccess({
       tradeKey: "oversell-buy",

@@ -56,6 +56,8 @@ function matchesCompletedFill(
   }
   if (fill.matchedAt < intent.createdAt - COMPLETED_FILL_CLOCK_SKEW_MS) return false;
   if (fill.matchedAt > intent.createdAt + LIVE_ORDER_INTENT_RECOVERY_MS) return false;
+  const shareTolerance = Math.max(INTENT_SIZE_TOLERANCE, intent.size * 0.05);
+  if (fill.shares > intent.size + shareTolerance) return false;
 
   if (intent.side === "BUY") {
     if (fill.averagePrice > intent.price + COMPLETED_FILL_PRICE_EPSILON) return false;
@@ -64,7 +66,7 @@ function matchesCompletedFill(
   }
 
   if (fill.averagePrice < intent.price - COMPLETED_FILL_PRICE_EPSILON) return false;
-  return fill.shares <= intent.size + INTENT_SIZE_TOLERANCE;
+  return true;
 }
 
 function expireStaleIntents(

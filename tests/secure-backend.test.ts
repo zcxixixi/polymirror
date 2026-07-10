@@ -8,7 +8,7 @@ vi.mock("../src/executor/secure-client.js", () => ({
   getSecureClient: vi.fn(),
 }));
 
-const wallet = {} as WalletConfig;
+const wallet = { proxyAddress: `0x${"2".repeat(40)}` } as WalletConfig;
 const mockGetSecureClient = vi.mocked(getSecureClient);
 const placeMarketOrder = vi.fn();
 const listAccountTrades = vi.fn();
@@ -113,6 +113,114 @@ describe("SecureTradingBackend", () => {
     ]);
   });
 
+  it("recovers confirmed maker fills by maker order id", async () => {
+    const since = Date.parse("2026-07-10T00:00:00.000Z");
+    listAccountTrades.mockReturnValue(
+      (async function* () {
+        yield {
+          items: [
+            {
+              tokenId: "taker-token",
+              side: "SELL",
+              price: "0.55",
+              size: "3.5",
+              feeRateBps: "100",
+              status: "CONFIRMED",
+              takerOrderId: "taker-order",
+              traderSide: "MAKER",
+              matchedAt: "2026-07-10T00:00:01.000Z",
+              makerOrders: [
+                {
+                  orderId: "maker-order",
+                  tokenId: "maker-token",
+                  side: "BUY",
+                  price: "0.45",
+                  matchedAmount: "3.5",
+                  feeRateBps: null,
+                  makerAddress: wallet.proxyAddress,
+                },
+                {
+                  orderId: "other-maker-order",
+                  tokenId: "maker-token",
+                  side: "BUY",
+                  price: "0.45",
+                  matchedAmount: "1",
+                  feeRateBps: "50",
+                  makerAddress: `0x${"3".repeat(40)}`,
+                },
+              ],
+            },
+          ],
+        };
+      })()
+    );
+
+    const fills = await new SecureTradingBackend(wallet).listRecentCompletedFills(since);
+
+    expect(fills).toEqual([
+      {
+        orderId: "maker-order",
+        tokenId: "maker-token",
+        side: "BUY",
+        averagePrice: 0.45,
+        shares: 3.5,
+        usd: 1.575,
+        feeUsd: 0,
+        matchedAt: Date.parse("2026-07-10T00:00:01.000Z"),
+      },
+    ]);
+  });
+
+  it("treats a nullable maker fee rate as zero in order status", async () => {
+    fetchOrder.mockResolvedValue({
+      sizeMatched: "3.5",
+      originalSize: "10",
+      status: "LIVE",
+    });
+    listAccountTrades.mockReturnValue(
+      (async function* () {
+        yield {
+          items: [
+            {
+              status: "CONFIRMED",
+              traderSide: "MAKER",
+              matchedAt: "2026-07-10T00:00:01.000Z",
+              makerOrders: [
+                {
+                  orderId: "maker-order",
+                  tokenId: "maker-token",
+                  side: "BUY",
+                  price: "0.45",
+                  matchedAmount: "3.5",
+                  feeRateBps: null,
+                  makerAddress: wallet.proxyAddress,
+                },
+              ],
+            },
+          ],
+        };
+      })()
+    );
+
+    const result = await new SecureTradingBackend(wallet).getOrderStatus(
+      "maker-order",
+      "maker-token"
+    );
+
+    expect(result).toEqual({
+      kind: "ok",
+      status: {
+        sizeMatched: 3.5,
+        originalSize: 10,
+        status: "LIVE",
+        terminal: false,
+        filledUsd: 1.575,
+        averagePrice: 0.45,
+        feeUsd: 0,
+      },
+    });
+  });
+
   it("returns trade-weighted fill details for an open partially filled order", async () => {
     fetchOrder.mockResolvedValue({
       sizeMatched: "10",
@@ -128,7 +236,7 @@ describe("SecureTradingBackend", () => {
               side: "BUY",
               price: "0.40",
               size: "4",
-              status: "MATCHED",
+              status: "CONFIRMED",
               takerOrderId: "order-1",
               traderSide: "TAKER",
               matchedAt: "2026-07-10T00:00:01.000Z",
@@ -139,7 +247,7 @@ describe("SecureTradingBackend", () => {
               side: "BUY",
               price: "0.60",
               size: "6",
-              status: "MINED",
+              status: "CONFIRMED",
               takerOrderId: "order-1",
               traderSide: "TAKER",
               matchedAt: "2026-07-10T00:00:02.000Z",
@@ -161,6 +269,103 @@ describe("SecureTradingBackend", () => {
         terminal: false,
         filledUsd: 5.2,
         averagePrice: 0.52,
+        feeUsd: 0,
+      },
+    });
+  });
+
+  it("exposes only confirmed shares and does not complete a 99 percent match", async () => {
+    fetchOrder.mockResolvedValue({
+      sizeMatched: "99",
+      originalSize: "100",
+      status: "MATCHED",
+    });
+    listAccountTrades.mockReturnValue(
+      (async function* () {
+        yield {
+          items: [
+            {
+              tokenId: "token-1",
+              side: "BUY",
+              price: "0.40",
+              size: "4",
+              feeRateBps: "100",
+              status: "CONFIRMED",
+              takerOrderId: "order-1",
+              traderSide: "TAKER",
+              matchedAt: "2026-07-10T00:00:01.000Z",
+              makerOrders: [],
+            },
+            {
+              tokenId: "token-1",
+              side: "BUY",
+              price: "0.60",
+              size: "95",
+              feeRateBps: "100",
+              status: "MINED",
+              takerOrderId: "order-1",
+              traderSide: "TAKER",
+              matchedAt: "2026-07-10T00:00:02.000Z",
+              makerOrders: [],
+            },
+          ],
+        };
+      })()
+    );
+
+    const result = await new SecureTradingBackend(wallet).getOrderStatus("order-1", "token-1");
+
+    expect(result).toEqual({
+      kind: "ok",
+      status: {
+        sizeMatched: 4,
+        originalSize: 100,
+        status: "MATCHED",
+        terminal: false,
+        filledUsd: 1.6,
+        averagePrice: 0.4,
+        feeUsd: 0.016,
+      },
+    });
+  });
+
+  it("keeps a closed order nonterminal while its final confirmed size is unknown", async () => {
+    fetchOrder.mockRejectedValue(new Error("404 not found"));
+    listAccountTrades.mockReturnValue(
+      (async function* () {
+        yield {
+          items: [
+            {
+              tokenId: "token-1",
+              side: "BUY",
+              price: "0.5",
+              size: "4",
+              feeRateBps: "0",
+              status: "CONFIRMED",
+              takerOrderId: "order-closed",
+              traderSide: "TAKER",
+              matchedAt: "2026-07-10T00:00:01.000Z",
+              makerOrders: [],
+            },
+          ],
+        };
+      })()
+    );
+
+    const result = await new SecureTradingBackend(wallet).getOrderStatus(
+      "order-closed",
+      "token-1"
+    );
+
+    expect(result).toEqual({
+      kind: "ok",
+      status: {
+        sizeMatched: 4,
+        originalSize: 0,
+        status: "CONFIRMED_CLOSED",
+        terminal: false,
+        filledUsd: 2,
+        averagePrice: 0.5,
         feeUsd: 0,
       },
     });

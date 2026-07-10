@@ -160,6 +160,10 @@ function roundCashUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
+function roundAccounting(value: number): number {
+  return Math.round(value * 100_000_000) / 100_000_000;
+}
+
 function uniqueTradeKeys(keys: string[]): string[] {
   return [...new Set(keys.map((k) => k.trim()).filter(Boolean))];
 }
@@ -628,7 +632,7 @@ export class StateStore {
 
   adjustPosition(leaderId: string, tokenId: string, deltaShares: number): void {
     const current = this.getPosition(leaderId, tokenId);
-    const next = Math.max(0, Math.round((current + deltaShares) * 100) / 100);
+    const next = Math.max(0, roundAccounting(current + deltaShares));
     this.db
       .prepare(
         `INSERT INTO positions (leader_id, token_id, shares, avg_entry_price) VALUES (?, ?, ?, 0)
@@ -652,7 +656,7 @@ export class StateStore {
     const avg = row?.avg_entry_price ?? 0;
 
     if (side === "BUY") {
-      const nextShares = Math.round((current + shares) * 100) / 100;
+      const nextShares = roundAccounting(current + shares);
       const nextAvg =
         nextShares > 0 ? (current * avg + shares * price) / nextShares : price;
       this.db
@@ -667,8 +671,8 @@ export class StateStore {
     }
 
     const sold = Math.min(current, shares);
-    const pnl = Math.round((price - avg) * sold * 100) / 100;
-    const nextShares = Math.max(0, Math.round((current - sold) * 100) / 100);
+    const pnl = roundAccounting((price - avg) * sold);
+    const nextShares = Math.max(0, roundAccounting(current - sold));
     this.db
       .prepare(
         `INSERT INTO positions (leader_id, token_id, shares, avg_entry_price) VALUES (?, ?, ?, ?)

@@ -152,8 +152,11 @@ describe("flushLivePendingBeforePreview", () => {
       status: {
         sizeMatched: 10,
         originalSize: 10,
-        status: "MATCHED",
+        status: "CONFIRMED",
         terminal: true,
+        filledUsd: 5,
+        averagePrice: 0.5,
+        feeUsd: 0,
       },
     });
 

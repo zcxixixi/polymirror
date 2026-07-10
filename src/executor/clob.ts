@@ -198,54 +198,10 @@ export class ClobExecutor {
         let orderId = submitted.orderId ?? extractOrderIdFromPostResponse(submitted.raw);
 
         if (!orderId) {
-          const immFill = parseImmediateFill(immediate, req.side, price);
-          if (immFill.shares > 0) {
-            const isImmediateOrder =
-              orderType === OrderType.FAK || orderType === OrderType.FOK;
-            const shares = isImmediateOrder
-              ? immFill.shares
-              : Math.min(immFill.shares, req.size);
-            const filledUsd = immFill.usd > 0
-              ? immFill.usd
-              : Math.round(shares * price * 100) / 100;
-            const executionPrice = averageFillPrice(shares, filledUsd, price);
-            const feeUsd = calculatePlatformFeeUsd(
-              shares,
-              executionPrice,
-              meta.feeRate,
-              meta.feeExponent
-            );
-            const pendingRemaining = Math.max(
-              0,
-              isImmediateOrder ? 0 : Math.round((req.size - shares) * 100) / 100
-            );
-            if (pendingRemaining > 0) {
-              const recovered = await this.findMatchingOpenOrder(req, price);
-              if (recovered?.orderId) return recovered;
-              return {
-                preview: false,
-                executionPrice,
-                error: "Partial fill without order ID — cannot track remaining GTC",
-                filledShares: shares,
-                filledUsd,
-                feeUsd,
-                orderStatus: immFill.status || immediate.status || "matched",
-                pendingRemaining: 0,
-              };
-            }
-            return {
-              preview: false,
-              executionPrice,
-              filledShares: shares,
-              filledUsd,
-              feeUsd,
-              orderStatus: immFill.status || immediate.status || "matched",
-              pendingRemaining: 0,
-            };
-          }
-
           const recovered = await this.findMatchingOpenOrder(req, price);
           if (recovered) return recovered;
+
+          const responseFill = parseImmediateFill(immediate, req.side, price);
 
           logError("Order response missing order id", {
             token: req.tokenId.slice(0, 12),
@@ -254,9 +210,13 @@ export class ClobExecutor {
           });
           return {
             preview: false,
-            error: "Order accepted but no order ID returned",
+            executionPrice: price,
+            error: responseFill.shares > 0
+              ? "Matched response awaiting confirmation but no order ID returned"
+              : "Order accepted but no order ID returned",
             filledShares: 0,
             filledUsd: 0,
+            orderStatus: immediate.status,
             pendingRemaining: 0,
           };
         }
@@ -268,6 +228,20 @@ export class ClobExecutor {
           orderType,
           immediate
         );
+
+        const immediateOrder = orderType === OrderType.FAK || orderType === OrderType.FOK;
+        if (immediateOrder && fill.shares <= 0 && !isTerminalStatus(fill.status)) {
+          return {
+            preview: false,
+            orderId,
+            executionPrice: price,
+            error: "Order accepted; fill confirmation pending",
+            filledShares: 0,
+            filledUsd: 0,
+            orderStatus: fill.status,
+            pendingRemaining: 0,
+          };
+        }
 
         const averagePrice = averageFillPrice(fill.shares, fill.usd, price);
         const feeUsd = fill.feeUsd ?? calculatePlatformFeeUsd(
@@ -433,7 +407,7 @@ export class ClobExecutor {
           : filledShares * matchPrice;
         const remaining = Math.max(
           0,
-          Math.round((req.size - filledShares) * 100) / 100
+          roundFillAmount(req.size - filledShares)
         );
         logInfo("Recovered open order after submit failure", {
           orderId: orderId.slice(0, 12),
@@ -468,16 +442,15 @@ export class ClobExecutor {
     immediate: { takingAmount?: string; makingAmount?: string; status?: string }
   ): Promise<{ shares: number; usd: number; feeUsd?: number; status: string; remaining: number }> {
     if (orderType === OrderType.FAK || orderType === OrderType.FOK) {
-      const fromResp = parseImmediateFill(immediate, req.side, price);
-      if (fromResp.shares > 0) {
-        return {
-          ...fromResp,
-          remaining: Math.max(0, Math.round((req.size - fromResp.shares) * 100) / 100),
-        };
-      }
-
-      const polled = await this.pollOrderFill(orderId, req.size, price, 3000, req.tokenId);
-      if (polled.shares > 0) return polled;
+      const polled = await this.pollOrderFill(
+        orderId,
+        req.size,
+        price,
+        3000,
+        req.tokenId,
+        true
+      );
+      if (polled.shares > 0) return { ...polled, remaining: 0 };
 
       return {
         shares: 0,
@@ -501,7 +474,8 @@ export class ClobExecutor {
     requestedShares: number,
     price: number,
     timeoutMs: number,
-    tokenId?: string
+    tokenId?: string,
+    allowOverfill = false
   ): Promise<{ shares: number; usd: number; feeUsd?: number; status: string; remaining: number }> {
     if (timeoutMs <= 0) {
       return {
@@ -524,15 +498,15 @@ export class ClobExecutor {
         const { sizeMatched: matched, originalSize: original, status } = statusResult.status;
 
         if (matched > 0) {
-          const shares = Math.min(matched, requestedShares);
+          const shares = allowOverfill ? matched : Math.min(matched, requestedShares);
           const actualUsd = statusResult.status.filledUsd;
           const usd = actualUsd !== undefined && actualUsd > 0
             ? actualUsd * (shares / matched)
             : shares * price;
-          const remaining = Math.max(0, Math.round((requestedShares - shares) * 100) / 100);
+          const remaining = Math.max(0, roundFillAmount(requestedShares - shares));
           return {
-            shares: Math.round(shares * 100) / 100,
-            usd: Math.round(usd * 100_000_000) / 100_000_000,
+            shares: roundFillAmount(shares),
+            usd: roundFillAmount(usd),
             feeUsd: statusResult.status.feeUsd === undefined
               ? undefined
               : statusResult.status.feeUsd * (shares / matched),
@@ -557,7 +531,9 @@ export class ClobExecutor {
     try {
       const statusResult = await this.getOrderStatus(orderId, tokenId);
       if (statusResult.kind === "ok" && statusResult.status.sizeMatched > 0) {
-        const shares = Math.min(statusResult.status.sizeMatched, requestedShares);
+        const shares = allowOverfill
+          ? statusResult.status.sizeMatched
+          : Math.min(statusResult.status.sizeMatched, requestedShares);
         const actualUsd = statusResult.status.filledUsd;
         const usd = actualUsd !== undefined && actualUsd > 0
           ? actualUsd * (shares / statusResult.status.sizeMatched)
@@ -567,13 +543,13 @@ export class ClobExecutor {
           matched: shares,
         });
         return {
-          shares: Math.round(shares * 100) / 100,
-          usd: Math.round(usd * 100_000_000) / 100_000_000,
+          shares: roundFillAmount(shares),
+          usd: roundFillAmount(usd),
           feeUsd: statusResult.status.feeUsd === undefined
             ? undefined
             : statusResult.status.feeUsd * (shares / statusResult.status.sizeMatched),
           status: `${statusResult.status.status} (partial, timeout)`,
-          remaining: Math.max(0, Math.round((requestedShares - shares) * 100) / 100),
+          remaining: Math.max(0, roundFillAmount(requestedShares - shares)),
         };
       }
     } catch {
@@ -591,7 +567,11 @@ export class ClobExecutor {
 
 function averageFillPrice(shares: number, usd: number, fallback: number): number {
   if (shares <= 0 || usd <= 0) return fallback;
-  return Math.round((usd / shares) * 100_000_000) / 100_000_000;
+  return roundFillAmount(usd / shares);
+}
+
+function roundFillAmount(value: number): number {
+  return Math.round(value * 100_000_000) / 100_000_000;
 }
 
 function parseImmediateFill(
@@ -605,15 +585,15 @@ function parseImmediateFill(
 
   if (side === "BUY" && taking > 0) {
     return {
-      shares: Math.round(taking * 100) / 100,
-      usd: making > 0 ? Math.round(making * 100) / 100 : Math.round(taking * price * 100) / 100,
+      shares: roundFillAmount(taking),
+      usd: roundFillAmount(making > 0 ? making : taking * price),
       status,
     };
   }
   if (side === "SELL" && making > 0) {
     return {
-      shares: Math.round(making * 100) / 100,
-      usd: taking > 0 ? Math.round(taking * 100) / 100 : Math.round(making * price * 100) / 100,
+      shares: roundFillAmount(making),
+      usd: roundFillAmount(taking > 0 ? taking : making * price),
       status,
     };
   }

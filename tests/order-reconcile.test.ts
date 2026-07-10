@@ -299,6 +299,42 @@ describe("adoptUntrackedOpenOrders", () => {
     expect(store.listLiveOrderIntents()).toHaveLength(0);
   });
 
+  it("does not match a low-price BUY fill that exceeds intended shares", async () => {
+    const createdAt = Date.now() - 10 * 60_000;
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-low-price"],
+      leaderId: "whale",
+      tokenId: "tok-low-price",
+      side: "BUY",
+      price: 0.5,
+      orderSize: 10,
+      auditReason: "fixed $5",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, createdAt);
+    mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockResolvedValue({
+      kind: "ok",
+      fills: [
+        {
+          orderId: "unrelated-large-fill",
+          tokenId: "tok-low-price",
+          side: "BUY",
+          averagePrice: 0.2,
+          shares: 20,
+          usd: 4,
+          feeUsd: 0,
+          matchedAt: createdAt + 1_000,
+        },
+      ],
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(0);
+    expect(store.getPosition("whale", "tok-low-price")).toBe(0);
+  });
+
   it("keeps a stale intent when completed fill lookup is transient", async () => {
     const intentId = store.recordLiveOrderIntent({
       tradeKeys: ["source-a"],

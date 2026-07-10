@@ -176,7 +176,7 @@ describe("runCopyCycle pending reconciliation", () => {
       status: {
         sizeMatched: 10,
         originalSize: 10,
-        status: "MATCHED",
+        status: "CONFIRMED",
         terminal: true,
         filledUsd: 4.8,
         averagePrice: 0.48,
@@ -198,6 +198,180 @@ describe("runCopyCycle pending reconciliation", () => {
       feeUsd: 0.048,
     });
     expect(result.errors.some((e) => e.includes("copy trading disabled"))).toBe(true);
+  });
+
+  it("keeps the final one percent of a confirmed partial order pending", async () => {
+    store.upsertPendingOrder({
+      orderId: "ord-live-99",
+      leaderId: "whale",
+      tokenId: "tok-99",
+      side: "BUY",
+      price: 0.5,
+      size: 100,
+      filledShares: 0,
+      filledUsd: 0,
+      tradeKey: "k99",
+      reasoning: "fixed",
+    });
+    mockGetOrderStatus.mockResolvedValue({
+      kind: "ok",
+      status: {
+        sizeMatched: 99,
+        originalSize: 100,
+        status: "CONFIRMED",
+        terminal: false,
+        filledUsd: 49.5,
+        averagePrice: 0.5,
+        feeUsd: 0,
+      },
+    });
+
+    await runCopyCycle(liveConfig(false), store);
+
+    expect(store.getPosition("whale", "tok-99")).toBe(99);
+    expect(store.listPendingOrders()).toEqual([
+      expect.objectContaining({
+        orderId: "ord-live-99",
+        filledShares: 99,
+        filledUsd: 49.5,
+      }),
+    ]);
+  });
+
+  it("applies confirmed pending deltas without rounding shares to cents", async () => {
+    store.upsertPendingOrder({
+      orderId: "ord-live-precise",
+      leaderId: "whale",
+      tokenId: "tok-precise",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 0,
+      filledUsd: 0,
+      tradeKey: "k-precise",
+      reasoning: "fixed",
+    });
+    mockGetOrderStatus.mockResolvedValue({
+      kind: "ok",
+      status: {
+        sizeMatched: 4.9475,
+        originalSize: 10,
+        status: "CONFIRMED",
+        terminal: false,
+        filledUsd: 2.47375,
+        averagePrice: 0.5,
+        feeUsd: 0,
+      },
+    });
+
+    await runCopyCycle(liveConfig(false), store);
+
+    expect(store.getPosition("whale", "tok-precise")).toBe(4.9475);
+    expect(store.listPendingOrders()[0]).toMatchObject({
+      filledShares: 4.9475,
+      filledUsd: 2.47375,
+    });
+  });
+
+  it("waits when matched shares advance before cumulative trade notional", async () => {
+    store.recordPendingFill({
+      leaderId: "whale",
+      tokenId: "tok-lagged",
+      side: "BUY",
+      delta: 4,
+      price: 0.5,
+      auditReason: "initial confirmed fill",
+      preview: false,
+    });
+    store.upsertPendingOrder({
+      orderId: "ord-live-lagged",
+      leaderId: "whale",
+      tokenId: "tok-lagged",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 4,
+      filledUsd: 2,
+      feeUsd: 0,
+      tradeKey: "k-lagged",
+      reasoning: "fixed",
+    });
+    mockGetOrderStatus.mockResolvedValue({
+      kind: "ok",
+      status: {
+        sizeMatched: 6,
+        originalSize: 10,
+        status: "CONFIRMED",
+        terminal: false,
+        filledUsd: 2,
+        averagePrice: 0.5,
+        feeUsd: 0,
+      },
+    });
+
+    const result = await runCopyCycle(liveConfig(false), store);
+
+    expect(store.getPosition("whale", "tok-lagged")).toBe(4);
+    expect(store.listPendingOrders()[0]).toMatchObject({
+      filledShares: 4,
+      filledUsd: 2,
+    });
+    expect(result.errors.some((error) => error.includes("cumulative fill evidence lagged"))).toBe(
+      true
+    );
+  });
+
+  it("retains pending state when an order disappears before confirmed trades arrive", async () => {
+    store.upsertPendingOrder({
+      orderId: "ord-live-disappeared",
+      leaderId: "whale",
+      tokenId: "tok-disappeared",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 0,
+      filledUsd: 0,
+      tradeKey: "k-disappeared",
+      reasoning: "fixed",
+    });
+    mockGetOrderStatus.mockResolvedValue({ kind: "not_found" });
+
+    const result = await runCopyCycle(liveConfig(false), store);
+
+    expect(store.listPendingOrders()).toHaveLength(1);
+    expect(result.errors.some((error) => error.includes("confirmation unavailable"))).toBe(true);
+  });
+
+  it("resolves a closed order only when its exact requested size is confirmed", async () => {
+    store.upsertPendingOrder({
+      orderId: "ord-live-closed-full",
+      leaderId: "whale",
+      tokenId: "tok-closed-full",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 0,
+      filledUsd: 0,
+      tradeKey: "k-closed-full",
+      reasoning: "fixed",
+    });
+    mockGetOrderStatus.mockResolvedValue({
+      kind: "ok",
+      status: {
+        sizeMatched: 10,
+        originalSize: 0,
+        status: "CONFIRMED_CLOSED",
+        terminal: false,
+        filledUsd: 5,
+        averagePrice: 0.5,
+        feeUsd: 0,
+      },
+    });
+
+    await runCopyCycle(liveConfig(false), store);
+
+    expect(store.getPosition("whale", "tok-closed-full")).toBe(10);
+    expect(store.listPendingOrders()).toHaveLength(0);
   });
 
   it("records a live order intent before submitting to CLOB", async () => {
@@ -229,7 +403,7 @@ describe("runCopyCycle pending reconciliation", () => {
     expect(mockPlaceLimitOrder).toHaveBeenCalledTimes(1);
   });
 
-  it("records the filled portion when CLOB reports a partial fill error without order id", async () => {
+  it("keeps an unconfirmed partial response unbooked when the order id is missing", async () => {
     const activity = testActivity({
       transactionHash: "0xpartialfill",
       asset: "tok-partial-fill",
@@ -251,17 +425,12 @@ describe("runCopyCycle pending reconciliation", () => {
 
     const result = await runCopyCycle(liveConfig(true), store);
 
-    expect(result.copied).toBe(1);
-    expect(result.errors).toEqual([]);
-    expect(store.getPosition("whale", activity.asset!)).toBe(4);
-    expect(store.hasSeen(tradeEventKey(activity))).toBe(true);
+    expect(result.copied).toBe(0);
+    expect(result.errors.some((error) => error.includes("cannot track remaining GTC"))).toBe(true);
+    expect(store.getPosition("whale", activity.asset!)).toBe(0);
+    expect(store.hasSeen(tradeEventKey(activity))).toBe(false);
     expect(store.countPendingOrders()).toBe(0);
-    expect(store.listLiveOrderIntents()).toEqual([]);
-    expect(
-      store
-        .listAuditLog({ action: "ERROR" })
-        .items.some((row) => row.reason?.includes("filled portion will be recorded"))
-    ).toBe(true);
+    expect(store.listLiveOrderIntents()).toHaveLength(1);
   });
 
   it("records guarded live COPY audit from the actual fill price", async () => {
