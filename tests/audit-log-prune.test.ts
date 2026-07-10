@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { prunePreviewAuditLog } from "../src/sim/audit-log-prune.js";
 import { StateStore } from "../src/state/store.js";
+import { previewRuntimeConfig } from "./helpers/fixtures.js";
 
 let dir: string;
 let dbPath: string;
@@ -64,6 +65,43 @@ function countByReason(reason: string): number {
 }
 
 describe("prunePreviewAuditLog", () => {
+  it("refuses to prune while experiment evidence is unsealed", () => {
+    const config = previewRuntimeConfig();
+    store.startOrResumeExperiment({
+      accountId: "candidate-a",
+      candidateAddresses: [],
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    });
+    audit("SKIP", "old unsealed evidence");
+    setAllAuditTs(1);
+
+    expect(() => prunePreviewAuditLog({
+      dbPath,
+      keepRecentMs: 1,
+      nowMs: 10,
+      dryRun: false,
+    })).toThrow(/unsealed experiment evidence/i);
+    expect(countByReason("old unsealed evidence")).toBe(1);
+  });
+
+  it("refuses a manually sealed experiment that has no verified archive record", () => {
+    const config = previewRuntimeConfig();
+    store.startOrResumeExperiment({ accountId: "candidate-a", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" });
+    const db = new Database(dbPath);
+    db.prepare("UPDATE experiments SET sealed_at=10, ended_at=10, state='ENDED'").run();
+    db.close();
+    audit("SKIP", "old sealed but unarchived evidence");
+    setAllAuditTs(1);
+    expect(() => prunePreviewAuditLog({ dbPath, keepRecentMs: 1, nowMs: 10, dryRun: false }))
+      .toThrow(/verified archive/i);
+    expect(countByReason("old sealed but unarchived evidence")).toBe(1);
+  });
+
   it("dry-runs and prunes only old DETECT/SKIP noise rows", () => {
     const nowMs = Date.parse("2026-07-06T12:00:00.000Z");
     const oldMs = nowMs - 72 * 3600_000;

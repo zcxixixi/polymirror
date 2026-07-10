@@ -27,6 +27,7 @@
     "preview:summary": "node dist/report-preview-summary.js",
     "preview:prune-audit": "node dist/prune-preview-audit.js",
     "preview:collect": "node dist/report-preview-collector.js",
+    "preview:verify-experiment": "node dist/report-preview-experiment-verify.js",
     "live:probe": "node dist/report-live-probe.js"
   },
   "keywords": [

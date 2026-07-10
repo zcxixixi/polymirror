@@ -22,7 +22,7 @@ import {
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 3;
+export const STATE_SCHEMA_VERSION = 4;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 
@@ -525,10 +525,33 @@ export class StateStore {
         decided_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_decisions_raw_event ON decisions(raw_event_id, decided_at);
+      CREATE TABLE IF NOT EXISTS experiment_archives (
+        experiment_id TEXT PRIMARY KEY REFERENCES experiments(experiment_id),
+        snapshot_sha256 TEXT NOT NULL,
+        manifest_sha256 TEXT NOT NULL,
+        archived_at INTEGER NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS experiment_archives_no_update
+        BEFORE UPDATE ON experiment_archives BEGIN SELECT RAISE(ABORT, 'experiment archive records are immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS experiment_archives_no_delete
+        BEFORE DELETE ON experiment_archives BEGIN SELECT RAISE(ABORT, 'experiment archive records are append-only'); END;
       CREATE TRIGGER IF NOT EXISTS decisions_no_update
         BEFORE UPDATE ON decisions BEGIN SELECT RAISE(ABORT, 'decisions are immutable'); END;
       CREATE TRIGGER IF NOT EXISTS decisions_no_delete
         BEFORE DELETE ON decisions BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS experiments_sealed_no_update
+        BEFORE UPDATE ON experiments WHEN OLD.sealed_at IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment is immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS raw_events_sealed_no_insert
+        BEFORE INSERT ON raw_events WHEN (SELECT sealed_at FROM experiments WHERE experiment_id=NEW.experiment_id) IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS decisions_sealed_no_insert
+        BEFORE INSERT ON decisions WHEN (SELECT sealed_at FROM experiments WHERE experiment_id=NEW.experiment_id) IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS raw_event_observations_sealed_no_insert
+        BEFORE INSERT ON raw_event_observations
+        WHEN (SELECT e.sealed_at FROM raw_events r JOIN experiments e ON e.experiment_id=r.experiment_id WHERE r.raw_event_id=NEW.raw_event_id) IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
     `);
     this.db.transaction(() => {
       this.migrate();

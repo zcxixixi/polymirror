@@ -41,6 +41,20 @@ export function prunePreviewAuditLog(
   const db = new Database(options.dbPath);
   try {
     db.pragma("busy_timeout = 5000");
+    const hasExperiments = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiments'").get();
+    if (hasExperiments) {
+      const unsealed = db.prepare("SELECT COUNT(*) AS count FROM experiments WHERE sealed_at IS NULL").get() as { count: number };
+      if (unsealed.count > 0) throw new Error(`Refusing to prune: ${unsealed.count} unsealed experiment evidence set(s)`);
+      const experimentCount = (db.prepare("SELECT COUNT(*) AS count FROM experiments").get() as { count: number }).count;
+      const hasArchives = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiment_archives'").get();
+      if (experimentCount > 0 && !hasArchives) throw new Error("Refusing to prune: sealed evidence has no verified archive record");
+      if (experimentCount > 0) {
+        const missingArchive = db.prepare(`SELECT COUNT(*) AS count FROM experiments e
+          LEFT JOIN experiment_archives a ON a.experiment_id=e.experiment_id
+          WHERE a.experiment_id IS NULL`).get() as { count: number };
+        if (missingArchive.count > 0) throw new Error(`Refusing to prune: ${missingArchive.count} experiment(s) have no verified archive record`);
+      }
+    }
     const params = [cutoffMs, "DETECT", "SKIP"] as const;
     const matched = db
       .prepare(
