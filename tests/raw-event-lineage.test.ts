@@ -53,6 +53,10 @@ describe("raw event lineage", () => {
         observedTimestamp: 1000,
       }),
     ]);
+    expect(store.listRawEventObservations(first.rawEventId)).toEqual([
+      expect.objectContaining({ sourceTimestamp: 123, observedTimestamp: 1000 }),
+      expect.objectContaining({ sourceTimestamp: 999, observedTimestamp: 2000 }),
+    ]);
   });
 
   it("deduplicates source-less events by the full normalized payload hash", () => {
@@ -138,7 +142,18 @@ describe("raw event lineage", () => {
     });
 
     expect(store.listDecisions()).toEqual([
-      expect.objectContaining({ rawEventId: raw.rawEventId, action: "COPY" }),
+      expect.objectContaining({
+        rawEventId: raw.rawEventId,
+        action: "COPY",
+        exactTerms: expect.objectContaining({
+          orderId: "order-pending",
+          orderType: "GTC",
+          requestedPrice: 0.5,
+          requestedShares: 2,
+          filledShares: 2,
+          filledUsd: 1,
+        }),
+      }),
     ]);
   });
 
@@ -164,7 +179,16 @@ describe("raw event lineage", () => {
     });
 
     expect(store.listDecisions()).toEqual([
-      expect.objectContaining({ rawEventId: raw.rawEventId, action: "SELL" }),
+      expect.objectContaining({
+        rawEventId: raw.rawEventId,
+        action: "SELL",
+        exactTerms: expect.objectContaining({
+          requestedPrice: 0.6,
+          requestedShares: 1,
+          filledShares: 1,
+          filledUsd: 0.6,
+        }),
+      }),
     ]);
   });
 });

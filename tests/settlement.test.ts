@@ -99,9 +99,47 @@ function seedPosition(tokenId = "token-a") {
   });
 }
 
+function startExperiment(preview: boolean): void {
+  store.startOrResumeExperiment({
+    accountId: "settlement-a",
+    candidateAddresses: [leader.address!],
+    config: { app: { global: { ...globalBase, previewMode: preview }, leaders: [leader] }, wallet },
+    gitSha: "git-a",
+    imageDigest: "image-a",
+    lockfileHash: "a".repeat(64),
+    trustClass: "verified",
+  });
+}
+
 describe("processSettlements", () => {
+  it("persists leader REDEEM evidence before size filters", async () => {
+    startExperiment(true);
+    vi.doMock("../src/monitor/data-api.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../src/monitor/data-api.js")>();
+      return {
+        ...actual,
+        getActivity: vi.fn(async () => [{
+          type: "REDEEM",
+          asset: "tiny-token",
+          size: 0.001,
+          usdcSize: 0.001,
+          timestamp: Date.now(),
+          transactionHash: "0xtiny",
+        }]),
+      };
+    });
+    const { processSettlements, resetSettlementCache } = await import("../src/engine/settlement.js");
+    resetSettlementCache();
+    await processSettlements(new LeaderRegistry([leader]), globalBase, store, true);
+    expect(store.listRawEvents()).toHaveLength(1);
+    expect(store.listDecisions()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "SKIP", reasonCode: "below_redeem_size" }),
+    ]));
+  });
+
   it("settles a preview leader REDEEM into local cash and REDEEM audit", async () => {
     seedPosition();
+    startExperiment(true);
 
     vi.doMock("../src/monitor/data-api.js", async (importOriginal) => {
       const actual = await importOriginal<typeof import("../src/monitor/data-api.js")>();
@@ -134,6 +172,15 @@ describe("processSettlements", () => {
     expect(store.getPosition("whale", "token-a")).toBe(0);
     expect(store.getCashBalance(500)).toBe(505);
     expect(store.listAuditLog({ action: "REDEEM" }).total).toBe(1);
+    expect(store.listRawEvents()).toEqual([
+      expect.objectContaining({ sourceId: "0xredeem:token-a:REDEEM" }),
+    ]);
+    expect(store.listDecisions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "DETECT", reasonCode: "detected" }),
+        expect.objectContaining({ action: "REDEEM", reasonCode: "redeem_settled" }),
+      ])
+    );
   });
 
   it("keeps live local positions open when on-chain redeem fails", async () => {
@@ -188,6 +235,7 @@ describe("processSettlements", () => {
 
   it("clears live local positions only after on-chain redeem succeeds", async () => {
     seedPosition();
+    startExperiment(false);
 
     vi.doMock("../src/monitor/data-api.js", async (importOriginal) => {
       const actual = await importOriginal<typeof import("../src/monitor/data-api.js")>();
@@ -233,5 +281,7 @@ describe("processSettlements", () => {
     expect(result.onChainRedeems).toBe(1);
     expect(store.getPosition("whale", "token-a")).toBe(0);
     expect(store.hasSeen("0xredeem-ok:token-a:REDEEM")).toBe(true);
+    expect(store.listRawEvents().length).toBeGreaterThanOrEqual(1);
+    expect(store.listDecisions().some((decision) => decision.action === "REDEEM")).toBe(true);
   });
 });

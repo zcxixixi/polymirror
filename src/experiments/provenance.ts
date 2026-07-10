@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import type { ExperimentTrustClass } from "./manifest.js";
 
 function sha256File(path: string): string {
   if (!existsSync(path)) return "unavailable";
@@ -32,6 +33,17 @@ export function readRuntimeProvenance(): RuntimeProvenance {
   };
 }
 
+export function provenanceTrustClass(
+  requested: ExperimentTrustClass,
+  provenance: RuntimeProvenance
+): ExperimentTrustClass {
+  const complete = provenance.gitSha !== "unknown"
+    && provenance.imageDigest !== "unknown"
+    && /^[a-f0-9]{64}$/i.test(provenance.lockfileHash);
+  if (!complete) return requested === "legacy" ? "legacy" : "partial";
+  return requested;
+}
+
 function normalized(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalized);
   if (value && typeof value === "object") {
@@ -58,6 +70,15 @@ export interface RawEventRow {
   rawEventId: string;
   experimentId: string;
   sourceId: string | null;
+  payloadHash: string;
+  payload: unknown;
+  sourceTimestamp: number;
+  observedTimestamp: number;
+}
+
+export interface RawEventObservationRow {
+  observationId: number;
+  rawEventId: string;
   payloadHash: string;
   payload: unknown;
   sourceTimestamp: number;

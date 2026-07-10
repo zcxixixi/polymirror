@@ -160,13 +160,36 @@ async function settleResolvedPreviewPositions(
 
     if (!resolved?.closed || resolved.winnerTokenIds.length === 0) continue;
 
+    const sourceKey = `auto-settle:${condition.leaderId}:${condition.conditionId}:${resolved.winnerTokenIds.join(",")}`;
+    const raw = store.getActiveExperiment()
+      ? store.recordRawEvent({
+          sourceId: sourceKey,
+          payload: {
+            type: "AUTO_SETTLEMENT",
+            leaderId: condition.leaderId,
+            conditionId: condition.conditionId,
+            slug: condition.slug,
+            winnerTokenIds: resolved.winnerTokenIds,
+          },
+          sourceTimestamp: now,
+          observedTimestamp: Date.now(),
+        })
+      : undefined;
+    store.setDecisionRawEventIds(raw ? [raw.rawEventId] : []);
+    store.audit({
+      leaderId: condition.leaderId,
+      action: "DETECT",
+      tokenId: condition.conditionId,
+      side: "REDEEM",
+      reason: "auto settlement detected",
+      preview: true,
+    });
+
     const result = store.settleCondition({
       leaderId: condition.leaderId,
       conditionId: condition.conditionId,
       winnerTokenIds: resolved.winnerTokenIds,
-      sourceKeys: [
-        `auto-settle:${condition.leaderId}:${condition.conditionId}:${resolved.winnerTokenIds.join(",")}`,
-      ],
+      sourceKeys: [sourceKey],
       cashInitialUsd: config.app.global.risk.startingCapitalUsd,
       title: condition.title ?? undefined,
       slug: condition.slug,
@@ -184,6 +207,7 @@ async function settleResolvedPreviewPositions(
         pnl: result.realizedPnl,
       });
     }
+    store.setDecisionRawEventIds([]);
   }
 
   return { settled, errors };
@@ -1022,6 +1046,20 @@ export async function runCopyCycle(
         preview: true,
         cashInitialUsd: config.app.global.risk.startingCapitalUsd,
         market,
+        decisionTerms: {
+          orderType: config.app.global.execution.orderType,
+          requestedPrice: orderPrice,
+          requestedShares: orderShares,
+          filledShares: orderResult.filledShares,
+          filledUsd: orderResult.filledUsd,
+          orderId: orderResult.orderId ?? null,
+          orderStatus: orderResult.orderStatus ?? null,
+          pendingRemaining: orderResult.pendingRemaining,
+          quoteBestPrice: observedExecutablePrice,
+          guardedTickSize: guardedTickSize ?? null,
+          guardedFeeRate,
+          guardedFeeExponent,
+        },
       });
     } else {
       if (
@@ -1068,6 +1106,20 @@ export async function runCopyCycle(
         trackPendingGtc: config.app.global.execution.orderType === "GTC",
         market,
         intentId: liveOrderIntentId,
+        decisionTerms: {
+          orderType: config.app.global.execution.orderType,
+          requestedPrice: orderPrice,
+          requestedShares: orderShares,
+          filledShares: orderResult.filledShares,
+          filledUsd: orderResult.filledUsd,
+          orderId: orderResult.orderId ?? null,
+          orderStatus: orderResult.orderStatus ?? null,
+          pendingRemaining: orderResult.pendingRemaining,
+          quoteBestPrice: observedExecutablePrice,
+          guardedTickSize: guardedTickSize ?? null,
+          guardedFeeRate,
+          guardedFeeExponent,
+        },
       });
       healthSnapshot.pendingOrders = store.countPendingOrders();
 

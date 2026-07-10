@@ -16,6 +16,7 @@ import {
   type DecisionAction,
   type DecisionRow,
   type RawEventRow,
+  type RawEventObservationRow,
 } from "../experiments/provenance.js";
 
 const DEFAULT_DB = "data/polymirror.db";
@@ -482,6 +483,20 @@ export class StateStore {
         BEFORE UPDATE ON raw_events BEGIN SELECT RAISE(ABORT, 'raw events are immutable'); END;
       CREATE TRIGGER IF NOT EXISTS raw_events_no_delete
         BEFORE DELETE ON raw_events BEGIN SELECT RAISE(ABORT, 'raw events are append-only'); END;
+      CREATE TABLE IF NOT EXISTS raw_event_observations (
+        observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        raw_event_id TEXT NOT NULL REFERENCES raw_events(raw_event_id),
+        payload_hash TEXT NOT NULL,
+        normalized_payload_json TEXT NOT NULL,
+        source_timestamp INTEGER NOT NULL,
+        observed_timestamp INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_raw_event_observations_event
+        ON raw_event_observations(raw_event_id, observation_id);
+      CREATE TRIGGER IF NOT EXISTS raw_event_observations_no_update
+        BEFORE UPDATE ON raw_event_observations BEGIN SELECT RAISE(ABORT, 'raw observations are immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS raw_event_observations_no_delete
+        BEFORE DELETE ON raw_event_observations BEGIN SELECT RAISE(ABORT, 'raw observations are append-only'); END;
       CREATE TABLE IF NOT EXISTS decisions (
         decision_id TEXT PRIMARY KEY,
         experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
@@ -507,10 +522,16 @@ export class StateStore {
   startOrResumeExperiment(input: ExperimentManifestInput, now = Date.now()): ExperimentManifestRow {
     const hash = configSha256(input.config);
     return this.db.transaction(() => {
-      const active = this.db.prepare(
-        "SELECT experiment_id AS experimentId, config_hash AS configHash FROM experiments WHERE account_id = ? AND ended_at IS NULL"
-      ).get(input.accountId) as { experimentId: string; configHash: string } | undefined;
-      if (active?.configHash === hash) return this.getExperiment(active.experimentId)!;
+      const active = this.getActiveExperiment(input.accountId);
+      const candidates = [...input.candidateAddresses].sort();
+      const sameIdentity = active?.configHash === hash
+        && JSON.stringify(active.candidateAddresses) === JSON.stringify(candidates)
+        && active.gitSha === input.gitSha
+        && active.imageDigest === input.imageDigest
+        && active.lockfileHash === input.lockfileHash
+        && active.schemaVersion === STATE_SCHEMA_VERSION
+        && active.trustClass === input.trustClass;
+      if (sameIdentity) return active!;
       if (active) {
         this.db.prepare("UPDATE experiments SET ended_at = ? WHERE experiment_id = ?")
           .run(now, active.experimentId);
@@ -525,7 +546,7 @@ export class StateStore {
       ).run(
         experimentId,
         input.accountId,
-        JSON.stringify([...input.candidateAddresses].sort()),
+        JSON.stringify(candidates),
         canonicalRedactedConfig(input.config),
         hash,
         input.gitSha,
@@ -605,6 +626,18 @@ export class StateStore {
           .get(experiment.experimentId, sourceId) as { rawEventId: string }
       : this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND payload_hash = ?")
           .get(experiment.experimentId, payloadHash) as { rawEventId: string };
+    const observedTimestamp = input.observedTimestamp ?? Date.now();
+    this.db.prepare(
+      `INSERT INTO raw_event_observations
+       (raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(
+      row.rawEventId,
+      payloadHash,
+      normalizedPayloadJson(input.payload),
+      input.sourceTimestamp,
+      observedTimestamp
+    );
     return this.getRawEvent(row.rawEventId)!;
   }
 
@@ -625,6 +658,19 @@ export class StateStore {
       "SELECT raw_event_id AS rawEventId FROM raw_events ORDER BY observed_timestamp, raw_event_id"
     ).all() as { rawEventId: string }[];
     return ids.map((row) => this.getRawEvent(row.rawEventId)!);
+  }
+
+  listRawEventObservations(rawEventId: string): RawEventObservationRow[] {
+    const rows = this.db.prepare(
+      `SELECT observation_id AS observationId, raw_event_id AS rawEventId,
+              payload_hash AS payloadHash, normalized_payload_json AS payloadJson,
+              source_timestamp AS sourceTimestamp, observed_timestamp AS observedTimestamp
+       FROM raw_event_observations WHERE raw_event_id = ? ORDER BY observation_id`
+    ).all(rawEventId) as Array<Omit<RawEventObservationRow, "payload"> & { payloadJson: string }>;
+    return rows.map(({ payloadJson, ...row }) => ({
+      ...row,
+      payload: JSON.parse(payloadJson),
+    }));
   }
 
   recordDecision(input: {
@@ -769,6 +815,18 @@ export class StateStore {
 
   hasLegacyEvidence(): boolean {
     return legacyCopyPriceModeState(this.db);
+  }
+
+  beginExperimentBatch(): void {
+    this.db.exec("BEGIN IMMEDIATE");
+  }
+
+  commitExperimentBatch(): void {
+    this.db.exec("COMMIT");
+  }
+
+  rollbackExperimentBatch(): void {
+    if (this.db.inTransaction) this.db.exec("ROLLBACK");
   }
 
   static getCopyPriceModeCompatibilityForPath(
@@ -1574,11 +1632,24 @@ export class StateStore {
     } = entry;
 
     const previousDecisionRawEventIds = this.decisionRawEventIds;
+    const pendingLineage = orderId
+      ? this.db.prepare(
+          `SELECT trade_key AS tradeKey, price, size, leader_price AS leaderPrice,
+                  executable_price AS executablePrice, slippage_pct AS slippagePct
+           FROM pending_orders WHERE order_id = ?`
+        ).get(orderId) as {
+          tradeKey: string;
+          price: number;
+          size: number;
+          leaderPrice: number | null;
+          executablePrice: number | null;
+          slippagePct: number | null;
+        } | undefined
+      : undefined;
     if (this.decisionRawEventIds.length === 0 && orderId) {
-      const pending = this.db.prepare(
-        "SELECT trade_key AS tradeKey FROM pending_orders WHERE order_id = ?"
-      ).get(orderId) as { tradeKey: string } | undefined;
-      if (pending) this.decisionRawEventIds = this.rawEventIdsForSourceKeys([pending.tradeKey]);
+      if (pendingLineage) {
+        this.decisionRawEventIds = this.rawEventIdsForSourceKeys([pendingLineage.tradeKey]);
+      }
     }
     const apply = this.db.transaction(() => {
       if (fill && fill.delta > 0) {
@@ -1634,6 +1705,21 @@ export class StateStore {
           feeUsd: appliedFee,
           reason: fill.auditReason,
           preview: fill.preview,
+          exactTerms: pendingLineage
+            ? {
+                orderId,
+                orderType: "GTC",
+                requestedPrice: pendingLineage.price,
+                requestedShares: pendingLineage.size,
+                filledShares: matchedFilledShares,
+                filledUsd: matchedFilledUsd ?? fill.delta * fill.price,
+                matchedFeeUsd: matchedFeeUsd ?? fill.feeUsd ?? 0,
+                leaderPrice: pendingLineage.leaderPrice,
+                executablePrice: pendingLineage.executablePrice,
+                slippagePct: pendingLineage.slippagePct,
+                reconciliationOnly: reconciliationOnly ?? false,
+              }
+            : undefined,
         });
       }
 
@@ -1700,6 +1786,7 @@ export class StateStore {
     preview: boolean;
     cashInitialUsd?: number;
     market?: TokenMarketEntry;
+    decisionTerms?: Record<string, unknown>;
   }): void {
     const {
       tradeKey,
@@ -1718,6 +1805,7 @@ export class StateStore {
       preview,
       cashInitialUsd,
       market,
+      decisionTerms,
     } = entry;
     const keys = tradeKeys ?? (tradeKey ? [tradeKey] : []);
     const previousDecisionRawEventIds = this.decisionRawEventIds;
@@ -1760,6 +1848,15 @@ export class StateStore {
         feeUsd: appliedFee,
         reason: auditReason,
         preview,
+        exactTerms: decisionTerms ?? {
+          requestedPrice: price,
+          requestedShares: filledShares,
+          filledShares,
+          appliedShares,
+          filledUsd,
+          feeUsd,
+          recovery: true,
+        },
       });
     });
     try {
@@ -1792,6 +1889,7 @@ export class StateStore {
     trackPendingGtc: boolean;
     market?: TokenMarketEntry;
     intentId?: string;
+    decisionTerms?: Record<string, unknown>;
   }): void {
     const {
       tradeKeys,
@@ -1812,6 +1910,7 @@ export class StateStore {
       trackPendingGtc,
       market,
       intentId,
+      decisionTerms,
     } = entry;
     const primaryKey = tradeKeys[0] ?? "";
     const now = Date.now();
@@ -1891,6 +1990,17 @@ export class StateStore {
           feeUsd: appliedFee,
           reason: auditReason,
           preview: false,
+          exactTerms: decisionTerms ?? {
+            orderId: orderId ?? null,
+            orderType: trackPendingGtc ? "GTC" : "IMMEDIATE",
+            requestedPrice: price,
+            requestedShares: orderSize,
+            filledShares,
+            appliedShares,
+            filledUsd,
+            feeUsd,
+            pendingRemaining,
+          },
         });
       }
 
@@ -1929,6 +2039,7 @@ export class StateStore {
     feeUsd?: number;
     reason?: string;
     preview: boolean;
+    exactTerms?: Record<string, unknown>;
   }): void {
     this.db
       .prepare(
@@ -1983,6 +2094,7 @@ export class StateStore {
         feeUsd: entry.feeUsd ?? 0,
         reason: entry.reason ?? null,
         preview: entry.preview,
+        ...entry.exactTerms,
       };
       for (const rawEventId of this.decisionRawEventIds) {
         this.recordDecision({ rawEventId, action: decisionAction, reasonCode, exactTerms });

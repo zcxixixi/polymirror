@@ -88,7 +88,18 @@ describe("runCopyCycle", () => {
     expect(new Set(decisions.map((decision) => decision.rawEventId)).size).toBe(1);
     expect(decisions.find((decision) => decision.action === "COPY")).toMatchObject({
       reasonCode: "copy_executed",
-      exactTerms: { side: "BUY", price: 0.5, size: 10, reason: "10% of $50.00 = $5.00" },
+      exactTerms: {
+        side: "BUY",
+        price: 0.5,
+        size: 10,
+        reason: "10% of $50.00 = $5.00",
+        orderType: "GTC",
+        requestedPrice: 0.5,
+        requestedShares: 10,
+        filledShares: 10,
+        filledUsd: 5,
+        orderStatus: "PREVIEW",
+      },
     });
     expect(decisions.find((decision) => decision.action === "SKIP")?.reasonCode)
       .toBe("already_seen");
@@ -629,6 +640,15 @@ describe("runCopyCycle", () => {
       size: 100,
       price: 0.5,
     });
+    store.startOrResumeExperiment({
+      accountId: "auto-settle",
+      candidateAddresses: config.app.leaders.map((item) => item.address!),
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "a".repeat(64),
+      trustClass: "verified",
+    });
 
     mockPollLeaders.mockResolvedValueOnce([
       { leaderId: "whale", fetched: 1, candidates: [buy] },
@@ -651,6 +671,8 @@ describe("runCopyCycle", () => {
     expect(store.getDailyRealizedPnl()).toBe(5);
     expect(store.listAuditLog({ action: "REDEEM" }).total).toBe(1);
     expect(mockFetchResolvedMarketOutcome).toHaveBeenCalledWith(slug);
+    expect(store.listRawEvents().some((event) => event.sourceId?.startsWith("auto-settle:"))).toBe(true);
+    expect(store.listDecisions().some((decision) => decision.action === "REDEEM")).toBe(true);
   });
 
   it("does not throttle auto-settlement across separate stores", async () => {

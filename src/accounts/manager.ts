@@ -24,7 +24,7 @@ import {
 import { assertLiveTradingAllowed, assertLiveTradingForAccounts } from "../engine/risk.js";
 import { migrateExistingPreviewToLiveDb } from "../engine/mode-transition.js";
 import { applyProxyFromYaml } from "../util/proxy.js";
-import { readRuntimeProvenance } from "../experiments/provenance.js";
+import { provenanceTrustClass, readRuntimeProvenance } from "../experiments/provenance.js";
 
 function startAccountExperiment(
   accountId: string,
@@ -32,6 +32,14 @@ function startAccountExperiment(
   store: StateStore
 ): void {
   const provenance = readRuntimeProvenance();
+  const activeTrust = store.getActiveExperiment(accountId)?.trustClass;
+  const requestedTrust = activeTrust === "legacy"
+    ? "legacy"
+    : activeTrust === "verified"
+      ? "verified"
+      : store.hasLegacyEvidence() && !activeTrust
+        ? "legacy"
+        : "candidate";
   store.startOrResumeExperiment({
     accountId,
     candidateAddresses: config.app.leaders
@@ -39,11 +47,7 @@ function startAccountExperiment(
       .map((leader) => leader.address!),
     config,
     ...provenance,
-    trustClass: store.getActiveExperiment(accountId)
-      ? store.getActiveExperiment(accountId)!.trustClass
-      : store.hasLegacyEvidence()
-        ? "legacy"
-        : "candidate",
+    trustClass: provenanceTrustClass(requestedTrust, provenance),
   });
 }
 
@@ -245,8 +249,29 @@ export class AccountManager {
       throw error;
     }
 
-    for (const runtime of stagedRuntimes.values()) {
-      startAccountExperiment(runtime.id, runtime.config, runtime.store);
+    const experimentStores = [...new Set([...stagedRuntimes.values()].map((runtime) => runtime.store))];
+    try {
+      for (const store of experimentStores) store.beginExperimentBatch();
+      for (const runtime of stagedRuntimes.values()) {
+        startAccountExperiment(runtime.id, runtime.config, runtime.store);
+      }
+      for (const store of experimentStores) store.commitExperimentBatch();
+    } catch (error) {
+      for (const store of experimentStores) {
+        try {
+          store.rollbackExperimentBatch();
+        } catch {
+          // Preserve the manifest staging error.
+        }
+      }
+      for (const store of replacementStores) {
+        try {
+          store.close();
+        } catch {
+          // Preserve the manifest staging error.
+        }
+      }
+      throw error;
     }
 
     const previousRuntimes = this.runtimes;

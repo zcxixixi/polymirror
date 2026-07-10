@@ -204,7 +204,7 @@ describe("AccountManager.reloadConfig", () => {
     const manager = await AccountManager.create("config.yaml");
     try {
       const first = manager.require("candidate").store.getActiveExperiment("candidate");
-      expect(first).toMatchObject({ accountId: "candidate", trustClass: "candidate" });
+      expect(first).toMatchObject({ accountId: "candidate", trustClass: "partial" });
 
       writeConfig(1_000, 8_080, { mode: "none" }, [
         account("candidate", "Changed label", { id: "leader", address: LEADER_A }),
@@ -223,6 +223,42 @@ describe("AccountManager.reloadConfig", () => {
       expect(rows[1]?.experimentId).not.toBe(first?.experimentId);
     } finally {
       manager.closeAll();
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not partially rotate manifests when a later manifest commit fails", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-account-manifest-atomic-"));
+    process.chdir(dir);
+    process.env.POLYMARKET_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.POLYMARKET_ADDRESS = TEST_WALLET;
+    process.env.POLYMIRROR_GIT_SHA = "git-atomic";
+    process.env.POLYMIRROR_IMAGE_DIGEST = "image-atomic";
+    resolveLeaderAddressesSpy.mockImplementation(async (leaders: LeaderConfig[]) => leaders);
+    writeConfig(1_000, 8_080, { mode: "none" }, [
+      account("first", "First", { id: "first-leader", address: LEADER_A }),
+      account("second", "Second", { id: "second-leader", address: LEADER_B }),
+    ]);
+    const manager = await AccountManager.create("config.yaml");
+    const first = manager.require("first");
+    const before = first.store.listExperiments();
+    const secondStore = manager.require("second").store;
+    const failure = vi.spyOn(secondStore, "startOrResumeExperiment")
+      .mockImplementation(() => { throw new Error("manifest commit failed"); });
+    try {
+      writeConfig(1_000, 8_080, { mode: "none" }, [
+        account("first", "First", { id: "first-leader", address: LEADER_A }),
+        account("second", "Second", { id: "second-leader", address: LEADER_B }),
+      ], 19);
+      await expect(manager.reloadConfig()).rejects.toThrow("manifest commit failed");
+      expect(first.store.listExperiments()).toEqual(before);
+      expect(manager.require("first").config.app.global.risk.maxOrderUsd).toBe(20);
+    } finally {
+      failure.mockRestore();
+      manager.closeAll();
+      delete process.env.POLYMIRROR_GIT_SHA;
+      delete process.env.POLYMIRROR_IMAGE_DIGEST;
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
