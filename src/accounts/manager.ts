@@ -1,6 +1,7 @@
 import { resolveLeaderAddresses } from "../leaders/resolve.js";
 import {
   loadMultiAccountConfig,
+  mapNormalizedAccounts,
   mapAccountToRuntime,
   readNormalizedConfig,
   validateAllAccounts,
@@ -126,14 +127,22 @@ export class AccountManager {
 
   toApiContext(accountId?: string | null): AccountApiContext {
     const id = this.resolveAccountId(accountId);
-    const rt = this.require(id);
+    const manager = this;
     return {
       accountId: id,
-      label: rt.label,
-      enabled: rt.enabled,
-      getConfig: () => rt.config,
-      store: rt.store,
-      dbPath: rt.dbPath,
+      get label() {
+        return manager.require(id).label;
+      },
+      get enabled() {
+        return manager.require(id).enabled;
+      },
+      getConfig: () => manager.require(id).config,
+      get store() {
+        return manager.require(id).store;
+      },
+      get dbPath() {
+        return manager.require(id).dbPath;
+      },
       configPath: this.configPath,
       reloadConfig: () => this.reloadConfig(),
     };
@@ -144,66 +153,89 @@ export class AccountManager {
   }
 
   async reloadConfig(): Promise<void> {
-    const multi = loadMultiAccountConfig(this.configFileKey);
-    const validationError = validateAllAccounts(multi.accounts);
-    if (validationError) {
-      throw new Error(validationError);
-    }
     const normalized = readNormalizedConfig(this.configFileKey);
-    assertLiveTradingForAccounts(multi.accounts);
-    applyProxyFromYaml(normalized.defaultsGlobal.proxy);
-    this.normalized = normalized;
-    this.pollIntervalMs = multi.pollIntervalMs;
-    this.healthPort = multi.healthPort;
-
-    const configIds = new Set(multi.accounts.map((a) => a.id));
-    for (const id of [...this.runtimes.keys()]) {
-      if (!configIds.has(id)) {
-        const stale = this.runtimes.get(id)!;
-        stale.store.close();
-        this.runtimes.delete(id);
-        logInfo("Account removed on config reload", { accountId: id });
-      }
+    const accounts = mapNormalizedAccounts(normalized);
+    if (accounts.length === 0) {
+      throw new Error("No valid accounts in config.yaml");
     }
+    if (!accounts.some((account) => account.enabled)) {
+      console.warn("Warning: no enabled accounts in config.yaml");
+    }
+    const validationError = validateAllAccounts(accounts);
+    if (validationError) throw new Error(validationError);
+    assertLiveTradingForAccounts(accounts);
 
-    for (const def of multi.accounts) {
-      const resolvedLeaders = await resolveLeaderAddresses(def.config.app.leaders);
-      const config: RuntimeConfig = {
-        wallet: def.config.wallet,
-        app: { ...def.config.app, leaders: resolvedLeaders },
-      };
+    const stagedRuntimes = new Map<string, AccountRuntime>();
+    const replacementStores: StateStore[] = [];
+    try {
+      for (const def of accounts) {
+        const resolvedLeaders = await resolveLeaderAddresses(def.config.app.leaders);
+        const config: RuntimeConfig = {
+          wallet: def.config.wallet,
+          app: { ...def.config.app, leaders: resolvedLeaders },
+        };
+        const previewMode = config.app.global.previewMode;
+        const dbPath = resolveAccountDbPath(def.id, previewMode);
+        if (!previewMode) {
+          migrateExistingPreviewToLiveDb(def.id);
+        }
 
-      let rt = this.runtimes.get(def.id);
-      const previewMode = config.app.global.previewMode;
-      const dbPath = resolveAccountDbPath(def.id, previewMode);
-      if (!previewMode) {
-        migrateExistingPreviewToLiveDb(def.id);
-      }
+        const current = this.runtimes.get(def.id);
+        const store =
+          current?.dbPath === dbPath
+            ? current.store
+            : (() => {
+                const replacement = new StateStore(dbPath);
+                replacementStores.push(replacement);
+                return replacement;
+              })();
+        const health = current
+          ? {
+              ...current.health,
+              previewMode,
+              enabledLeaders: config.app.leaders
+                .filter((leader) => leader.enabled)
+                .map((leader) => leader.id),
+              walletDrifts: [...current.health.walletDrifts],
+            }
+          : newAccountHealth(config);
 
-      if (!rt) {
-        rt = {
+        stagedRuntimes.set(def.id, {
           id: def.id,
           label: def.label,
           enabled: def.enabled,
           walletEnv: def.walletEnv,
           config,
-          store: new StateStore(dbPath),
+          store,
           dbPath,
-          health: newAccountHealth(config),
-        };
-        this.runtimes.set(def.id, rt);
-      } else {
-        if (rt.dbPath !== dbPath) {
-          rt.store.close();
-          rt.store = new StateStore(dbPath);
-          rt.dbPath = dbPath;
+          health,
+        });
+      }
+    } catch (error) {
+      for (const store of replacementStores) {
+        try {
+          store.close();
+        } catch {
+          // Preserve the staging error.
         }
-        rt.label = def.label;
-        rt.enabled = def.enabled;
-        rt.walletEnv = def.walletEnv;
-        rt.config = config;
-        rt.health.previewMode = previewMode;
-        rt.health.enabledLeaders = config.app.leaders.filter((l) => l.enabled).map((l) => l.id);
+      }
+      throw error;
+    }
+
+    const previousRuntimes = this.runtimes;
+    applyProxyFromYaml(normalized.defaultsGlobal.proxy);
+    this.runtimes = stagedRuntimes;
+    this.normalized = normalized;
+    this.pollIntervalMs = Math.min(
+      ...accounts.map((account) => account.config.app.global.pollIntervalMs)
+    );
+    this.healthPort = accounts[0]!.config.app.global.healthPort;
+
+    const retainedStores = new Set([...stagedRuntimes.values()].map((runtime) => runtime.store));
+    for (const [id, runtime] of previousRuntimes) {
+      if (!retainedStores.has(runtime.store)) runtime.store.close();
+      if (!stagedRuntimes.has(id)) {
+        logInfo("Account removed on config reload", { accountId: id });
       }
     }
 

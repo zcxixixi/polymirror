@@ -30,6 +30,7 @@ import {
   migratePreviewToLiveDb,
 } from "../engine/mode-transition.js";
 import type { GlobalSettingsPatch } from "../config/settings-schema.js";
+import { resolveAccountDbPath } from "../state/db-path.js";
 
 function maskAddress(addr: string): string {
   if (addr.length < 12) return addr;
@@ -84,16 +85,21 @@ function validateSettingsCandidate(
   if (!candidate) throw new Error(`Account not found: ${actx.accountId}`);
 
   const currentPreviewMode = actx.getConfig().app.global.previewMode;
-  const dbPath =
-    candidate.config.app.global.previewMode === currentPreviewMode ? actx.dbPath : candidate.dbPath;
-  const compatibility = StateStore.getCopyPriceModeCompatibilityForPath(
-    dbPath,
-    candidate.config.app.global.copyPriceMode
-  );
-  if (compatibility.status === "mismatch") {
-    throw new Error(
-      `copy price mode mismatch: database=${compatibility.mode} config=${candidate.config.app.global.copyPriceMode}`
+  const candidatePreviewMode = candidate.config.app.global.previewMode;
+  const dbPaths =
+    currentPreviewMode && !candidatePreviewMode
+      ? [actx.dbPath, candidate.dbPath]
+      : [candidatePreviewMode === currentPreviewMode ? actx.dbPath : candidate.dbPath];
+  for (const dbPath of new Set(dbPaths)) {
+    const compatibility = StateStore.getCopyPriceModeCompatibilityForPath(
+      dbPath,
+      candidate.config.app.global.copyPriceMode
     );
+    if (compatibility.status === "mismatch") {
+      throw new Error(
+        `copy price mode mismatch: database=${compatibility.mode} config=${candidate.config.app.global.copyPriceMode}`
+      );
+    }
   }
 }
 
@@ -403,10 +409,18 @@ export async function stopCopyTrading(
   try {
     const config = actx.getConfig();
     const normalized = readNormalizedConfigDocument(root.configPath);
-    const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, {
+    const patch: GlobalSettingsPatch = {
       previewMode: true,
       risk: { enableCopyTrading: false },
-    });
+    };
+    const destinationMode = StateStore.getCopyPriceModeCompatibilityForPath(
+      resolveAccountDbPath(actx.accountId, true),
+      config.app.global.copyPriceMode
+    );
+    if (destinationMode.status !== "unbound") {
+      patch.copyPriceMode = destinationMode.mode;
+    }
+    const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
     validateSettingsCandidate(next, actx);
 
     const flush = await flushLivePendingBeforePreview(config, actx.store);

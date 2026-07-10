@@ -9,6 +9,8 @@ import type { ApiContext } from "../src/api/routes.js";
 import type { AccountApiContext } from "../src/accounts/manager.js";
 import { previewRuntimeConfig } from "./helpers/fixtures.js";
 import { StateStore } from "../src/state/store.js";
+import { AccountManager } from "../src/accounts/manager.js";
+import { readNormalizedConfigDocument } from "../src/config/write.js";
 
 const { migratePreviewToLiveDbSpy } = vi.hoisted(() => ({
   migratePreviewToLiveDbSpy: vi.fn(),
@@ -336,6 +338,55 @@ describe("patchGlobalSettings guarded runtime validation", () => {
     }
   });
 
+  it("rejects a preview-to-live mode change that conflicts with the preview source database", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-settings-preview-source-mode-"));
+    const previousCwd = process.cwd();
+    process.chdir(dir);
+    const configPath = writeSettingsConfig(dir);
+    const before = readFileSync(configPath);
+    const previewStore = new StateStore(join("data", "preview.db"));
+    const liveStore = new StateStore(join("data", "polymirror.db"));
+    previewStore.ensureCopyPriceMode("leader_limit");
+    liveStore.ensureCopyPriceMode("executable_guarded");
+    liveStore.close();
+    const config = previewRuntimeConfig();
+    config.wallet.signatureType = 1;
+    let reloads = 0;
+    const root = {
+      configPath,
+      reloadConfig: async () => {
+        reloads += 1;
+      },
+      manager: { buildAccountsSummary: () => [], list: () => [] },
+    } as unknown as ApiContext;
+    const actx = {
+      accountId: "default",
+      dbPath: join("data", "preview.db"),
+      getConfig: () => config,
+      store: previewStore,
+    } as AccountApiContext;
+
+    try {
+      const result = await withLiveConfirm(() =>
+        withTestWallet(() =>
+          patchGlobalSettings(root, actx, {
+            previewMode: false,
+            copyPriceMode: "executable_guarded",
+            execution: { orderType: "FOK" },
+          })
+        )
+      );
+      expect(result.status).toBe(400);
+      expect(String((result.body as { error?: string }).error)).toMatch(/copy price mode mismatch/);
+      expect(readFileSync(configPath)).toEqual(before);
+      expect(reloads).toBe(0);
+    } finally {
+      previewStore.close();
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("leaves preview-to-live migration to the rollback-protected reload", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pm-settings-reload-migration-"));
     const configPath = writeSettingsConfig(dir);
@@ -453,6 +504,64 @@ describe("mode settings writes", () => {
       expect(result.status).toBe(400);
       expect(pendingReads).toBe(0);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops into a preview database bound to a different historical copy-price mode", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-stop-copy-destination-mode-"));
+    const previousCwd = process.cwd();
+    const previousDbPath = process.env.POLYMIRROR_DB_PATH;
+    process.chdir(dir);
+    delete process.env.POLYMIRROR_DB_PATH;
+    const configPath = join(dir, "config.yaml");
+    writeFileSync(
+      configPath,
+      stringifyYaml({
+        global: {
+          preview_mode: false,
+          copy_price_mode: "executable_guarded",
+          risk: { enable_copy_trading: true, slippage_tolerance: 0.03 },
+          execution: { order_type: "FOK" },
+          conflict: {},
+        },
+        leaders: [],
+      }),
+      "utf8"
+    );
+
+    try {
+      await withRuntimeWallet(async () => {
+        const manager = await AccountManager.create("config.yaml");
+        try {
+          manager.require("default").store.ensureCopyPriceMode("executable_guarded");
+          const previewStore = new StateStore(join("data", "preview.db"));
+          previewStore.ensureCopyPriceMode("leader_limit");
+          previewStore.close();
+
+          const actx = manager.toApiContext("default");
+          const root = {
+            configPath,
+            reloadConfig: () => manager.reloadConfig(),
+            manager,
+          } as unknown as ApiContext;
+
+          const result = await stopCopyTrading(root, actx);
+          expect((result.body as { error?: string }).error).toBeUndefined();
+          expect(result).toMatchObject({ status: 200 });
+          const saved = readNormalizedConfigDocument(configPath);
+          expect(saved.defaultsGlobal.preview_mode).toBe(true);
+          expect(saved.defaultsGlobal.risk.enable_copy_trading).toBe(false);
+          expect(saved.defaultsGlobal.copy_price_mode).toBe("leader_limit");
+          expect(manager.require("default").config.app.global.copyPriceMode).toBe("leader_limit");
+        } finally {
+          manager.closeAll();
+        }
+      });
+    } finally {
+      process.chdir(previousCwd);
+      if (previousDbPath === undefined) delete process.env.POLYMIRROR_DB_PATH;
+      else process.env.POLYMIRROR_DB_PATH = previousDbPath;
       rmSync(dir, { recursive: true, force: true });
     }
   });
