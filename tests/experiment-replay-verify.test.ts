@@ -13,7 +13,7 @@ beforeEach(() => { dir = realpathSync(mkdtempSync(join(tmpdir(), "pm-replay-veri
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe("sealed deterministic replay", () => {
-  it("fails closed for a legacy experiment without explicit observation links", async () => {
+  it("fails closed for a schema-v7 experiment without observation-context decision identities", async () => {
     const dbPath = join(dir, "legacy-links.db");
     const store = new StateStore(dbPath);
     const config = previewRuntimeConfig();
@@ -22,24 +22,24 @@ describe("sealed deterministic replay", () => {
     store.close();
     const db = new Database(dbPath);
     db.exec("DROP TRIGGER experiments_immutable_core");
-    db.prepare("UPDATE experiments SET schema_version=6 WHERE experiment_id=?").run(exp.experimentId);
+    db.prepare("UPDATE experiments SET schema_version=7 WHERE experiment_id=?").run(exp.experimentId);
     db.close();
     await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
-      archiveDir: join(dir, "legacy-links-archive") })).rejects.toThrow(/legacy|explicit decision observation links/i);
+      archiveDir: join(dir, "legacy-links-archive") })).rejects.toThrow(/legacy|observation-context decision identities/i);
   });
 
   it("replays the exact production TOKEN_SETTLEMENT payload without leaderId", async () => {
     const dbPath = join(dir, "token-settlement.db"); const store = new StateStore(dbPath);
     const config = previewRuntimeConfig(); config.app.global.risk.startingCapitalUsd = 10;
-    store.applyCopyFill("whale", "winner", "BUY", 2, 0.5); store.adjustCash(-1, 10);
+    store.applyCopyFill("whale", "winner", "BUY", 3, 0.333333); store.adjustCash(-1, 10);
     const exp = store.startOrResumeExperiment({ accountId: "token-settlement", candidateAddresses: [], config,
       gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
     const raw = store.recordRawEvent({ sourceId: "token-settlement-observation:winner",
-      payload: { type: "TOKEN_SETTLEMENT", tokenId: "winner", settlement: { settled: true, payoutPerShare: 1, conditionId: "condition" } },
+      payload: { type: "TOKEN_SETTLEMENT", tokenId: "winner", settlement: { settled: true, payoutPerShare: 0.333333, conditionId: "condition" } },
       sourceTimestamp: 1, observedTimestamp: 1 });
     store.setDecisionRawEventIds([raw.rawEventId]);
-    store.audit({ action: "DETECT", tokenId: "winner", side: "REDEEM", price: 1, reason: "token settlement detected", preview: true });
-    store.recordTokenSettlement("winner", 1, true, 10, { settlementSource: "token_resolution", conditionId: "condition" });
+    store.audit({ action: "DETECT", tokenId: "winner", side: "REDEEM", price: 0.333333, reason: "token settlement detected", preview: true });
+    store.recordTokenSettlement("winner", 0.333333, true, 10, { settlementSource: "token_resolution", conditionId: "condition" });
     store.setDecisionRawEventIds([]); store.close();
     const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "token-settlement-archive") });
     expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath }).match).toBe(true);
@@ -485,6 +485,9 @@ describe("sealed deterministic replay", () => {
       matchedFilledUsd: 0.9936, fill: { leaderId: "whale", tokenId: "token-a", side: "BUY",
         delta: 0.93, price: 0.52, leaderPrice: 0.5, executablePrice: 0.52, slippagePct: 4,
         auditReason: "Fixed $1.00; pending fill", preview: false }, remove: true });
+    expect(store.listDecisions().at(-1)?.exactTerms).toMatchObject({
+      requestedPrice: 0.52, price: 0.52, executablePrice: 0.52, slippagePct: 4,
+    });
     store.close();
 
     const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
@@ -507,10 +510,77 @@ describe("sealed deterministic replay", () => {
       exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY", requestedShares: 2, requestedPrice: 0.5, filledShares: 2, filledUsd: 1, feeUsd: 0, reason: "Fixed $1.00", preview: true }, decidedAt: 2 });
     // Deliberately omit the corresponding cash/position outcome writes.
     store.close();
-    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "diverged-archive") });
-    const result = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
-    expect(result.match).toBe(false);
-    expect(result.mismatches).toEqual(expect.arrayContaining(["cashUsd", "positions"]));
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "diverged-archive") })).rejects.toThrow(/replay diverges/i);
+    const db = new Database(dbPath, { readonly: true });
+    const row = db.prepare("SELECT sealed_at AS sealedAt, archive_status AS archiveStatus FROM experiments WHERE experiment_id=?")
+      .get(exp.experimentId) as { sealedAt: number | null; archiveStatus: string };
+    db.close();
+    expect(row).toEqual({ sealedAt: null, archiveStatus: "FAILED" });
+  });
+
+  it("rejects a correctly classified dynamic SKIP without replayable policy inputs", async () => {
+    const dbPath = join(dir, "fabricated-policy-skip.db"); const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-policy-skip", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "policy-skip", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token", price: 0.5, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(raw.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token", side: "BUY",
+      size: 10, price: 0.5, preview: true });
+    store.audit({ leaderId: "whale", action: "SKIP", tokenId: "token", side: "BUY",
+      size: 10, price: 0.5, reason: "global max daily volume", reasonCode: "policy_skip", preview: true });
+    store.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "fabricated-policy-skip-archive") })).rejects.toThrow(/cannot prove production SKIP/i);
+  });
+
+  it("rejects a pre-seal decision identity rewrite even when its link is remapped", async () => {
+    const dbPath = join(dir, "decision-id-tamper.db"); const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-id-tamper", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "incomplete", payload: { leaderId: "whale", type: "TRADE",
+      timestamp: 1, candidate: true }, sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(raw.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", preview: true });
+    store.audit({ leaderId: "whale", action: "SKIP", reason: "unsupported or incomplete activity", preview: true });
+    store.close();
+    const db = new Database(dbPath); db.exec(`PRAGMA foreign_keys=OFF;
+      DROP TRIGGER decisions_no_update; DROP TRIGGER decision_observation_links_no_update;
+      UPDATE decision_observation_links SET decision_id='${"0".repeat(64)}' WHERE link_id=(SELECT MAX(link_id) FROM decision_observation_links);
+      UPDATE decisions SET decision_id='${"0".repeat(64)}' WHERE decision_order=(SELECT MAX(decision_order) FROM decisions);`); db.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "decision-id-tamper-archive") })).rejects.toThrow(/identity hash/i);
+  });
+
+  it("replays a partial fill followed by stale GTC remainder cancellation", async () => {
+    const dbPath = join(dir, "partial-stale-cancel.db"); const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig(); config.app.global.previewMode = false;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1.5 };
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-stale-cancel", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "stale-cancel", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token", price: 0.5, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(raw.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token", side: "BUY",
+      size: 10, price: 0.5, preview: false });
+    store.recordLiveOrderAccepted({ tradeKeys: ["stale-cancel"], leaderId: "whale", tokenId: "token", side: "BUY",
+      price: 0.5, orderSize: 3, filledShares: 0, filledUsd: 0, auditReason: "Fixed $1.50",
+      orderId: "stale-order", pendingRemaining: 3, trackPendingGtc: true });
+    store.setDecisionRawEventIds([]);
+    store.commitPendingOrderProgress({ orderId: "stale-order", matchedFilledShares: 1, matchedFilledUsd: 0.5,
+      fill: { leaderId: "whale", tokenId: "token", side: "BUY", delta: 1, price: 0.5,
+        auditReason: "Fixed $1.50; pending fill", preview: false }, remove: false,
+      reconciliationOnly: true, staleSkipAudit: { leaderId: "whale", tokenId: "token", side: "BUY",
+        size: 2, price: 0.5, preview: false } });
+    store.close();
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "partial-stale-cancel-archive") });
+    expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath }).match).toBe(true);
   });
 
   it("uses stored market outcomes so REDEEM closes only its condition", async () => {

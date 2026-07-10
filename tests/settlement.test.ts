@@ -204,6 +204,29 @@ describe("processSettlements", () => {
       archiveDir: join(dir, `tampered-${index}`) })).rejects.toThrow(/decision|order|identity|settlement/i);
   });
 
+  it("replays one failed on-chain redemption linked to two token observations", async () => {
+    seedPosition("token-a"); seedPosition("token-b"); startExperiment(false);
+    vi.doMock("../src/monitor/data-api.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/monitor/data-api.js")>()), getActivity: vi.fn(async () => []),
+    }));
+    vi.doMock("../src/executor/redeem.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/executor/redeem.js")>()),
+      listRedeemablePositions: vi.fn(async () => [
+        { conditionId: "0xcondition", tokenId: "token-a", size: 10, payoutPerShare: 1 },
+        { conditionId: "0xcondition", tokenId: "token-b", size: 10, payoutPerShare: 0 },
+      ]),
+      redeemConditionOnChain: vi.fn(async () => ({ ok: false, error: "relayer rejected" })),
+    }));
+    const { processSettlements, resetSettlementCache } = await import("../src/engine/settlement.js");
+    resetSettlementCache();
+    await processSettlements(new LeaderRegistry([leader]), { ...globalBase, previewMode: false }, store, false, { wallet });
+    expect(store.listDecisions().map((decision) => decision.action).slice(0, 3)).toEqual(["DETECT", "DETECT", "SKIP"]);
+    const experimentId = store.getActiveExperiment()!.experimentId;
+    const archived = await archiveExperimentEvidence({ dbPath: join(dir, "test.db"), experimentId,
+      archiveDir: join(dir, "failed-condition-archive") });
+    expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: join(dir, "test.db") }).match).toBe(true);
+  });
+
   it("settles a preview leader REDEEM into local cash and REDEEM audit", async () => {
     seedPosition();
     startExperiment(true);

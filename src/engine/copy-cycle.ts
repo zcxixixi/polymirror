@@ -106,6 +106,7 @@ function skip(
     slippagePct: number | null;
     orderPrice?: number;
     orderShares?: number;
+    decisionTerms?: Record<string, unknown>;
   }
 ): void {
   store.audit({
@@ -120,6 +121,7 @@ function skip(
     slippagePct: execution?.slippagePct,
     reason,
     preview,
+    exactTerms: execution?.decisionTerms,
   });
 }
 
@@ -674,6 +676,7 @@ export async function runCopyCycle(
           slippagePct: number | null;
           orderPrice: number;
           orderShares: number;
+          decisionTerms?: Record<string, unknown>;
         }
       | undefined;
 
@@ -722,6 +725,15 @@ export async function runCopyCycle(
         feeRate: snapshot.feeRate,
         feeExponent: snapshot.feeExponent,
       } : null;
+      const guardedDecisionTerms = {
+        requestedPrice: terms.orderPrice,
+        requestedShares: terms.orderShares,
+        quoteBestPrice: quote?.averagePrice ?? quote?.bestPrice ?? null,
+        guardedTickSize: snapshot?.tickSize ?? null,
+        guardedFeeRate: snapshot?.feeRate ?? 0,
+        guardedFeeExponent: snapshot?.feeExponent ?? 0,
+        quoteEvidence: guardedQuoteEvidence,
+      };
       observedExecutablePrice = quote?.fullyFillable
         ? quote.averagePrice
         : (quote?.bestPrice ?? null);
@@ -750,6 +762,7 @@ export async function runCopyCycle(
             slippagePct: observedSlippagePct,
             orderPrice: terms.orderPrice,
             orderShares: terms.orderShares,
+            decisionTerms: guardedDecisionTerms,
           }
         );
         continue;
@@ -771,6 +784,7 @@ export async function runCopyCycle(
             slippagePct: observedSlippagePct,
             orderPrice: terms.orderPrice,
             orderShares: terms.orderShares,
+            decisionTerms: guardedDecisionTerms,
           }
         );
         continue;
@@ -790,6 +804,7 @@ export async function runCopyCycle(
             slippagePct: observedSlippagePct,
             orderPrice: terms.orderPrice,
             orderShares: terms.orderShares,
+            decisionTerms: guardedDecisionTerms,
           }
         );
         continue;
@@ -806,6 +821,7 @@ export async function runCopyCycle(
         slippagePct: observedSlippagePct,
         orderPrice,
         orderShares,
+        decisionTerms: guardedDecisionTerms,
       };
       const maxOrderUsd = Math.min(
         config.app.global.risk.maxOrderUsd,

@@ -27,6 +27,7 @@ interface RawObservationEvidence { rawEventId: string; payloadHash: string; payl
 interface RawEvidence { rawEventId: string; sourceId: string | null; payloadHash: string; payloadJson: string; observedTimestamp: number; observationCount: number; rawOrder: number; observations: RawObservationEvidence[] }
 
 function round(value: number): number { return Math.round((value + Number.EPSILON) * 1e8) / 1e8; }
+function roundSettlementUsd(value: number): number { return Math.round(value * 100) / 100; }
 function requiredNumber(terms: Record<string, unknown>, key: string): number {
   const value = terms[key];
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`Invalid accounting evidence: ${key} is required and finite`);
@@ -361,7 +362,7 @@ function legacyReplayEvidence(dbPath: string, experimentId: string): ReplayEvide
       start_state_json AS startStateJson, schema_version AS schemaVersion FROM experiments WHERE experiment_id=?`).get(experimentId) as
       { configJson: string; sealedAt: number | null; startStateJson: string; schemaVersion: number } | undefined;
     if (!experiment || experiment.sealedAt === null) throw new Error("Deterministic replay requires sealed experiment evidence");
-    if (experiment.schemaVersion < 7) throw new Error("Legacy experiment lacks explicit decision observation links");
+    if (experiment.schemaVersion < 8) throw new Error("Legacy experiment lacks observation-context decision identities");
     const config = JSON.parse(experiment.configJson) as RuntimeConfig;
     const start = JSON.parse(experiment.startStateJson) as ExperimentStateSnapshot;
     const cash = { value: start.cashUsd }; const realized = { value: start.realizedPnlUsd };
@@ -639,7 +640,9 @@ interface ReplayDecisionGroup {
   copied: boolean;
 }
 
-function decisionOccurrences(rows: StoredDecision[]): DecisionOccurrence[] {
+function decisionOccurrences(
+  rows: StoredDecision[], experimentId: string, observationById: Map<number, RawObservationEvidence>
+): DecisionOccurrence[] {
   const byId = new Map<string, DecisionOccurrence>();
   for (const row of rows) {
     const existing = byId.get(row.decisionId);
@@ -664,6 +667,25 @@ function decisionOccurrences(rows: StoredDecision[]): DecisionOccurrence[] {
   }
   return [...byId.values()]
     .map((decision) => ({ ...decision, observationIds: [...decision.observationIds].sort((a, b) => a - b) }))
+    .map((decision) => {
+      const observations = decision.observationIds.map((observationId) => observationById.get(observationId));
+      if (observations.some((observation) => !observation)) {
+        throw new Error("Replay decision identity lacks its linked observation");
+      }
+      const linked = observations as RawObservationEvidence[];
+      if (!linked.some((observation) => observation.rawEventId === decision.rawEventId)) {
+        throw new Error("Replay decision primary raw event is outside its observation context");
+      }
+      const observationContext = linked
+        .sort((a, b) => a.observationId - b.observationId || a.rawEventId.localeCompare(b.rawEventId))
+        .map((observation) => `${observation.rawEventId}:${observation.observationId}`)
+        .join("\n");
+      const expectedId = createHash("sha256").update([
+        experimentId, observationContext, decision.action, decision.reasonCode, decision.exactTermsJson,
+      ].join("\n")).digest("hex");
+      if (decision.decisionId !== expectedId) throw new Error("Replay decision identity hash differs");
+      return decision;
+    })
     .sort((a, b) => a.firstLinkOrder - b.firstLinkOrder);
 }
 
@@ -791,23 +813,40 @@ function validateDetect(
   throw new Error(`Re-execution decision set mismatch: unsupported raw type ${type}`);
 }
 
-function validateSkip(decision: DecisionOccurrence, group: ReplayDecisionGroup, config: RuntimeConfig): void {
+function validateSkip(
+  decision: DecisionOccurrence,
+  group: ReplayDecisionGroup,
+  config: RuntimeConfig,
+  positions: Map<string, ReplayPosition>,
+  cash: number,
+  seenRawEventIds: Set<string>
+): { marksSeen: boolean } {
   const terms = decisionTerms(decision);
   const reason = typeof terms.reason === "string" ? terms.reason : "";
   if (!reason) throw new Error("Re-execution SKIP requires an immutable reason");
+  const payloads = group.observations.map((observation) => JSON.parse(observation.payloadJson) as
+    Activity & { leaderId?: string; candidate?: boolean; rejectionReasonCode?: string | null; tokenId?: string; conditionId?: string });
+  if (payloads.length > 1 && payloads.every((payload) => String(payload.type) === "ONCHAIN_REDEEMABLE")) {
+    const conditions = new Set(payloads.map((payload) => payload.conditionId));
+    if (conditions.size !== 1 || reason !== "on-chain redeem failed" || decision.reasonCode !== "onchain_redeem_failed" ||
+      terms.tokenId !== payloads[0]!.conditionId) {
+      throw new Error("Re-execution on-chain condition failure differs");
+    }
+    return { marksSeen: false };
+  }
   const activity = group.activity ?? activityForObservations(group.observations, config);
   if (activity.candidate === false) {
     const expected = activity.rejectionReasonCode ?? "poll_rejected_activity";
     if (decision.reasonCode !== expected || (reason !== expected && reason !== "poll rejected activity")) {
       throw new Error("Re-execution poll rejection differs");
     }
-    return;
+    return { marksSeen: false };
   }
   if (group.filterReason !== undefined) {
     if (reason !== group.filterReason || decision.reasonCode !== stableSkipReasonCode(reason)) {
       throw new Error("Re-execution static filter SKIP differs");
     }
-    return;
+    return { marksSeen: false };
   }
   const type = String(activity.type ?? "");
   if (type === "AUTO_SETTLEMENT") {
@@ -816,7 +855,7 @@ function validateSkip(decision: DecisionOccurrence, group: ReplayDecisionGroup, 
     if (decision.reasonCode !== expected.reasonCode || reason !== expected.reason) {
       throw new Error("Re-execution AUTO_SETTLEMENT SKIP differs");
     }
-    return;
+    return { marksSeen: false };
   }
   if (type === "TOKEN_SETTLEMENT") {
     const settlement = (activity as unknown as { settlement?: { settled?: boolean } | null }).settlement;
@@ -826,12 +865,82 @@ function validateSkip(decision: DecisionOccurrence, group: ReplayDecisionGroup, 
     if (!expected || decision.reasonCode !== expected.reasonCode || reason !== expected.reason) {
       throw new Error("Re-execution TOKEN_SETTLEMENT SKIP differs");
     }
-    return;
+    return { marksSeen: false };
   }
-  if (decision.reasonCode !== stableSkipReasonCode(reason) &&
-    !["untracked_token", "settlement_evidence_unavailable", "market_unresolved", "winner_set_unavailable"].includes(decision.reasonCode)) {
-    throw new Error("Re-execution production SKIP reason code differs");
+  if (activity.type === "TRADE") {
+    if (!activity.asset || (activity.side !== "BUY" && activity.side !== "SELL")) {
+      if (reason === "unsupported or incomplete activity" && decision.reasonCode === "unsupported_or_incomplete_activity") {
+        return { marksSeen: false };
+      }
+      throw new Error("Re-execution incomplete TRADE SKIP differs");
+    }
+    if (reason === "already seen") {
+      const wasSeen = group.copied || group.observations.some((observation) => seenRawEventIds.has(observation.rawEventId));
+      if (!wasSeen || decision.reasonCode !== "already_seen") throw new Error("Re-execution fabricated already-seen SKIP");
+      return { marksSeen: false };
+    }
+    if (group.sizing?.belowMinimum && reason === group.sizing.reasoning &&
+      decision.reasonCode === stableSkipReasonCode(reason)) {
+      return { marksSeen: true };
+    }
+    if (reason === "stale GTC cancelled on CLOB" && group.copied && decision.reasonCode === "stale_activity") {
+      return { marksSeen: true };
+    }
+    if ((reason.startsWith("GTC pending (") || reason === "order submitted — no fill") &&
+      decision.reasonCode === stableSkipReasonCode(reason)) {
+      return { marksSeen: true };
+    }
+    const quoteEvidence = terms.quoteEvidence;
+    if (quoteEvidence && typeof quoteEvidence === "object" && config.app.global.copyPriceMode === "executable_guarded") {
+      const leader = config.app.leaders.find((candidate) => candidate.id === activity.leaderId);
+      if (!leader || !group.sizing) throw new Error("Guarded SKIP lacks production sizing context");
+      const quoteTerms = quoteEvidence as Record<string, unknown>;
+      if (!Array.isArray(quoteTerms.levels)) throw new Error("Guarded SKIP quote levels are required");
+      const tickSize = requiredNumber(quoteTerms, "tickSize");
+      const minOrderShares = requiredNumber(quoteTerms, "minOrderShares");
+      const leaderPrice = activity.price ?? NaN;
+      const prepared = prepareGuardedOrderTerms({ side: activity.side, leaderPrice,
+        targetUsd: group.sizing.finalUsd, targetShares: group.sizing.finalShares,
+        minOrderUsd: config.app.global.risk.minOrderUsd,
+        absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+      if (!prepared.allow || prepared.orderPrice === null) throw new Error("Guarded SKIP has invalid immutable order terms");
+      const quote = quoteExecutableOrderBook(quoteTerms.levels as OrderBookLevelLike[], activity.side,
+        prepared.orderShares, prepared.orderPrice, minOrderShares,
+        activity.side === "BUY" ? Math.round(prepared.orderUsd * 100) / 100 : undefined);
+      const guarded = prepareExecutableGuardedOrder({ side: activity.side, leaderPrice,
+        executablePrice: quote.fullyFillable ? quote.averagePrice : quote.bestPrice,
+        targetUsd: group.sizing.finalUsd, targetShares: group.sizing.finalShares,
+        minOrderUsd: config.app.global.risk.minOrderUsd,
+        absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+      const expected = new Set<string>();
+      if (!guarded.allow || guarded.orderPrice === null) expected.add(guarded.reason ?? "guarded execution rejected");
+      if (!quote.fullyFillable) expected.add(activity.side === "BUY"
+        ? `executable depth $${Number(quote.availableUsd.toFixed(4))} < $${Number((Math.round(prepared.orderUsd * 100) / 100).toFixed(2))}`
+        : `executable depth ${Number(quote.availableShares.toFixed(4))} < ${prepared.orderShares} shares`);
+      if (!quote.meetsMinOrderSize) expected.add(`market min order ${Number(quote.minOrderShares.toFixed(4))} > ${Number(quote.filledShares.toFixed(4))} shares`);
+      if (guarded.allow && guarded.orderPrice !== null) {
+        const maxOrderUsd = Math.min(config.app.global.risk.maxOrderUsd, leader.limits?.maxOrderUsd ?? Infinity);
+        if (guarded.orderUsd > maxOrderUsd + 1e-9) expected.add(`guarded max order $${guarded.orderUsd.toFixed(4)} > $${maxOrderUsd}`);
+        if (activity.side === "BUY" && leader.limits?.maxPositionUsd !== undefined) {
+          const position = positions.get(stateKey(leader.id, activity.asset));
+          const heldUsd = config.app.global.risk.positionCapBasis === "cost"
+            ? (position ? position.shares * position.avgEntryPrice : 0)
+            : (position?.shares ?? 0) * guarded.orderPrice;
+          const projectedUsd = heldUsd + guarded.orderUsd;
+          if (projectedUsd > leader.limits.maxPositionUsd + 1e-9) {
+            expected.add(`guarded position cap $${projectedUsd.toFixed(2)} > $${leader.limits.maxPositionUsd}`);
+          }
+        }
+        if (config.app.global.previewMode && activity.side === "BUY" && guarded.orderUsd > cash + 1e-9) {
+          expected.add(`preview cash $${cash.toFixed(2)} < order $${guarded.orderUsd.toFixed(2)}`);
+        }
+      }
+      if (expected.has(reason) && decision.reasonCode === stableSkipReasonCode(reason)) {
+        return { marksSeen: false };
+      }
+    }
   }
+  throw new Error(`Re-execution cannot prove production SKIP: ${reason}`);
 }
 
 function validateAndApplyFill(
@@ -981,6 +1090,8 @@ function validateAndApplyRedeem(
       closedPositions++;
       positions.delete(key);
     }
+    actualCost = roundSettlementUsd(actualCost);
+    actualPayout = roundSettlementUsd(actualPayout);
     if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
       throw new Error("Outcome evidence accounting differs");
     }
@@ -1001,8 +1112,8 @@ function validateAndApplyRedeem(
     const key = stateKey(leaderId, tokenId);
     const position = positions.get(key);
     if (!position) throw new Error("Settlement attempts to close a missing position");
-    const actualCost = position.shares * position.avgEntryPrice;
-    const actualPayout = position.shares * payoutPerShare;
+    const actualCost = roundSettlementUsd(position.shares * position.avgEntryPrice);
+    const actualPayout = roundSettlementUsd(position.shares * payoutPerShare);
     if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
       throw new Error("Settlement accounting evidence differs");
     }
@@ -1030,7 +1141,7 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
       start_state_json AS startStateJson, schema_version AS schemaVersion FROM experiments WHERE experiment_id=?`).get(experimentId) as
       { configJson: string; sealedAt: number | null; startStateJson: string; schemaVersion: number } | undefined;
     if (!experiment || experiment.sealedAt === null) throw new Error("Deterministic replay requires sealed experiment evidence");
-    if (experiment.schemaVersion < 7) throw new Error("Legacy experiment lacks explicit decision observation links");
+    if (experiment.schemaVersion < 8) throw new Error("Legacy experiment lacks observation-context decision identities");
     const config = JSON.parse(experiment.configJson) as RuntimeConfig;
     const start = JSON.parse(experiment.startStateJson) as ExperimentStateSnapshot;
     const cash = { value: start.cashUsd };
@@ -1039,7 +1150,7 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
     const evidence = loadEvidence(db, experimentId);
     const observations = evidence.raw.flatMap((raw) => raw.observations);
     const observationById = new Map(observations.map((observation) => [observation.observationId, observation]));
-    const occurrences = decisionOccurrences(evidence.decisions);
+    const occurrences = decisionOccurrences(evidence.decisions, experimentId, observationById);
     const groups = new Map<string, ReplayDecisionGroup>();
     for (const decision of occurrences) {
       const key = observationContextKey(decision.observationIds);
@@ -1060,7 +1171,8 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
       const hasEconomicTerminal = actions.some((action) => ["COPY", "SELL", "REDEEM"].includes(action));
       const isTransientOrderSkip = (decision: DecisionOccurrence): boolean => {
         const reason = decisionTerms(decision).reason;
-        return typeof reason === "string" && (reason.startsWith("GTC pending (") || reason === "order submitted — no fill");
+        return typeof reason === "string" && (reason.startsWith("GTC pending (") ||
+          reason === "order submitted — no fill" || reason === "stale GTC cancelled on CLOB");
       };
       if (hasEconomicTerminal && skipDecisions.some((decision) =>
         decision.reasonCode !== "already_seen" && !isTransientOrderSkip(decision))) {
@@ -1069,6 +1181,7 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
     }
     const markets = new Map((db.prepare("SELECT token_id AS tokenId, condition_id AS conditionId FROM token_markets").all() as
       Array<{ tokenId: string; conditionId: string }>).map((market) => [market.tokenId, market.conditionId]));
+    const seenRawEventIds = new Set<string>();
     let detectedBuy = 0, detectedSell = 0, copiedBuy = 0, copiedSell = 0;
     for (const decision of occurrences) {
       const group = groups.get(observationContextKey(decision.observationIds))!;
@@ -1078,13 +1191,16 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
         detectedBuy += detected.detectedBuy;
         detectedSell += detected.detectedSell;
       } else if (decision.action === "SKIP") {
-        validateSkip(decision, group, config);
+        const skipped = validateSkip(decision, group, config, positions, cash.value, seenRawEventIds);
+        if (skipped.marksSeen) group.observations.forEach((observation) => seenRawEventIds.add(observation.rawEventId));
       } else if (decision.action === "COPY" || decision.action === "SELL") {
         const copied = validateAndApplyFill(decision, group, config, positions, cash, realized);
         copiedBuy += copied.copiedBuy;
         copiedSell += copied.copiedSell;
+        group.observations.forEach((observation) => seenRawEventIds.add(observation.rawEventId));
       } else if (decision.action === "REDEEM") {
         validateAndApplyRedeem(decision, group, config, positions, cash, realized, markets);
+        group.observations.forEach((observation) => seenRawEventIds.add(observation.rawEventId));
       } else {
         throw new Error(`Unsupported replay decision action: ${decision.action}`);
       }
@@ -1110,7 +1226,15 @@ export function captureStoredEvidenceBaseline(dbPath: string, experimentId: stri
       .get(experimentId) as { endStateJson: string | null };
     if (!row.endStateJson) throw new Error("Sealed experiment is missing scoped end baseline");
     const end = JSON.parse(row.endStateJson) as ExperimentStateSnapshot;
-    return { ...derived, cashUsd: round(end.cashUsd), positions: end.positions, realizedPnlUsd: round(end.realizedPnlUsd) };
+    const endPositions = end.positions.map((position) => ({ ...position, shares: round(position.shares),
+      avgEntryPrice: round(position.avgEntryPrice) }))
+      .sort((a, b) => stateKey(a.leaderId, a.tokenId).localeCompare(stateKey(b.leaderId, b.tokenId)));
+    if (Math.abs(derived.cashUsd - round(end.cashUsd)) > 1e-6 ||
+      Math.abs(derived.realizedPnlUsd - round(end.realizedPnlUsd)) > 1e-6 ||
+      !replayPositionsMatch(derived.positions, endPositions)) {
+      throw new Error("Deterministic replay diverges from the experiment end state");
+    }
+    return derived;
   } finally { db.close(); }
 }
 

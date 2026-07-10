@@ -23,7 +23,7 @@ import {
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 7;
+export const STATE_SCHEMA_VERSION = 8;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 export interface DecisionObservationRef { rawEventId: string; observationId: number }
@@ -2186,9 +2186,13 @@ export class StateStore {
                 filledShares: matchedFilledShares,
                 filledUsd: matchedFilledUsd ?? fill.delta * fill.price,
                 matchedFeeUsd: matchedFeeUsd ?? fill.feeUsd ?? 0,
-                leaderPrice: pendingLineage.leaderPrice,
-                executablePrice: pendingLineage.executablePrice,
-                slippagePct: pendingLineage.slippagePct,
+                leaderPrice: fill.leaderPrice ?? pendingLineage.leaderPrice,
+                executablePrice: fill.executablePrice !== undefined
+                  ? fill.executablePrice
+                  : pendingLineage.executablePrice,
+                slippagePct: fill.slippagePct !== undefined
+                  ? fill.slippagePct
+                  : pendingLineage.slippagePct,
                 reconciliationOnly: reconciliationOnly ?? false,
               }
             : undefined,
