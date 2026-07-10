@@ -345,7 +345,14 @@ export async function runCopyCycle(
       const rawEvent = store.getActiveExperiment()
         ? store.recordRawEvent({
             sourceId: sourceKey,
-            payload: activity,
+            payload: {
+              ...activity,
+              leaderId: result.leaderId,
+              candidate: observation.candidate,
+              rejectionReasonCode: "rejectionReasonCode" in observation
+                ? observation.rejectionReasonCode ?? null
+                : null,
+            },
             sourceTimestamp: activity.timestamp,
             observedTimestamp: Date.now(),
           })
@@ -642,6 +649,7 @@ export async function runCopyCycle(
     let guardedTickSize: number | undefined;
     let guardedFeeRate = 0;
     let guardedFeeExponent = 0;
+    let guardedQuoteEvidence: Record<string, unknown> | null = null;
     let executionAudit:
       | {
           leaderPrice: number;
@@ -690,6 +698,13 @@ export async function runCopyCycle(
             : undefined
         )
         : null;
+      guardedQuoteEvidence = snapshot ? {
+        levels: snapshot.levels,
+        tickSize: snapshot.tickSize,
+        minOrderShares: snapshot.minOrderShares,
+        feeRate: snapshot.feeRate,
+        feeExponent: snapshot.feeExponent,
+      } : null;
       observedExecutablePrice = quote?.fullyFillable
         ? quote.averagePrice
         : (quote?.bestPrice ?? null);
@@ -1097,6 +1112,7 @@ export async function runCopyCycle(
           guardedTickSize: guardedTickSize ?? null,
           guardedFeeRate,
           guardedFeeExponent,
+          quoteEvidence: guardedQuoteEvidence,
         },
       });
     } else {
@@ -1157,6 +1173,7 @@ export async function runCopyCycle(
           guardedTickSize: guardedTickSize ?? null,
           guardedFeeRate,
           guardedFeeExponent,
+          quoteEvidence: guardedQuoteEvidence,
         },
       });
       healthSnapshot.pendingOrders = store.countPendingOrders();

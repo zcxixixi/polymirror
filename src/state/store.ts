@@ -9,6 +9,7 @@ import {
   newExperimentId,
   type ExperimentManifestInput,
   type ExperimentManifestRow,
+  type ExperimentStateSnapshot,
 } from "../experiments/manifest.js";
 import {
   normalizedPayloadJson,
@@ -22,7 +23,7 @@ import {
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 4;
+export const STATE_SCHEMA_VERSION = 5;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 
@@ -365,6 +366,7 @@ export class StateStore {
         fee_usd REAL NOT NULL DEFAULT 0,
         reason TEXT,
         preview INTEGER NOT NULL DEFAULT 1
+        ,experiment_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
       CREATE INDEX IF NOT EXISTS idx_audit_log_action_reason ON audit_log(action, reason);
@@ -466,6 +468,10 @@ export class StateStore {
         trust_class TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'ACTIVE',
         previous_experiment_id TEXT
+        ,start_state_json TEXT NOT NULL DEFAULT '{"cashUsd":0,"positions":[],"realizedPnlUsd":0}'
+        ,end_state_json TEXT
+        ,archive_status TEXT NOT NULL DEFAULT 'NONE'
+        ,archive_error TEXT
       );
       CREATE TRIGGER IF NOT EXISTS experiments_no_delete
         BEFORE DELETE ON experiments BEGIN SELECT RAISE(ABORT, 'experiments are append-only'); END;
@@ -482,6 +488,7 @@ export class StateStore {
           OR NEW.schema_version <> OLD.schema_version
           OR NEW.started_at <> OLD.started_at
           OR NEW.trust_class <> OLD.trust_class
+          OR NEW.start_state_json <> OLD.start_state_json
         BEGIN SELECT RAISE(ABORT, 'experiment manifest is immutable'); END;
       CREATE TABLE IF NOT EXISTS raw_events (
         raw_event_id TEXT PRIMARY KEY,
@@ -529,7 +536,10 @@ export class StateStore {
         experiment_id TEXT PRIMARY KEY REFERENCES experiments(experiment_id),
         snapshot_sha256 TEXT NOT NULL,
         manifest_sha256 TEXT NOT NULL,
-        archived_at INTEGER NOT NULL
+        archived_at INTEGER NOT NULL,
+        archive_path TEXT,
+        verified_at INTEGER,
+        verification_status TEXT NOT NULL DEFAULT 'VERIFIED'
       );
       CREATE TRIGGER IF NOT EXISTS experiment_archives_no_update
         BEFORE UPDATE ON experiment_archives BEGIN SELECT RAISE(ABORT, 'experiment archive records are immutable'); END;
@@ -543,11 +553,45 @@ export class StateStore {
         BEFORE UPDATE ON experiments WHEN OLD.sealed_at IS NOT NULL
         BEGIN SELECT RAISE(ABORT, 'sealed experiment is immutable'); END;
       CREATE TRIGGER IF NOT EXISTS raw_events_sealed_no_insert
-        BEFORE INSERT ON raw_events WHEN (SELECT sealed_at FROM experiments WHERE experiment_id=NEW.experiment_id) IS NOT NULL
+        BEFORE INSERT ON raw_events WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING' FROM experiments WHERE experiment_id=NEW.experiment_id)
         BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
       CREATE TRIGGER IF NOT EXISTS decisions_sealed_no_insert
-        BEFORE INSERT ON decisions WHEN (SELECT sealed_at FROM experiments WHERE experiment_id=NEW.experiment_id) IS NOT NULL
+        BEFORE INSERT ON decisions WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING' FROM experiments WHERE experiment_id=NEW.experiment_id)
         BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS audit_log_archive_guard
+        BEFORE INSERT ON audit_log WHEN NEW.experiment_id IS NOT NULL AND
+          (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING' FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS positions_archive_guard_insert BEFORE INSERT ON positions
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS positions_archive_guard_update BEFORE UPDATE ON positions
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS cash_archive_guard_insert BEFORE INSERT ON cash_ledger
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS cash_archive_guard_update BEFORE UPDATE ON cash_ledger
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS stats_archive_guard_insert BEFORE INSERT ON daily_stats
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS stats_archive_guard_update BEFORE UPDATE ON daily_stats
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS seen_archive_guard_insert BEFORE INSERT ON seen_trades
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS dedup_archive_guard_insert BEFORE INSERT ON buy_dedup
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS markets_archive_guard_insert BEFORE INSERT ON token_markets
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
+      CREATE TRIGGER IF NOT EXISTS markets_archive_guard_update BEFORE UPDATE ON token_markets
+        WHEN EXISTS(SELECT 1 FROM experiments WHERE state='ACTIVE' AND archive_status='PREPARING')
+        BEGIN SELECT RAISE(ABORT, 'experiment archive is finalizing'); END;
       CREATE TRIGGER IF NOT EXISTS raw_event_observations_sealed_no_insert
         BEFORE INSERT ON raw_event_observations
         WHEN (SELECT e.sealed_at FROM raw_events r JOIN experiments e ON e.experiment_id=r.experiment_id WHERE r.raw_event_id=NEW.raw_event_id) IS NOT NULL
@@ -556,6 +600,29 @@ export class StateStore {
     this.db.transaction(() => {
       this.migrate();
       this.db.exec(`
+        DROP TRIGGER IF EXISTS experiments_immutable_core;
+        CREATE TRIGGER experiments_immutable_core BEFORE UPDATE ON experiments
+        WHEN NEW.experiment_id <> OLD.experiment_id OR NEW.account_id <> OLD.account_id
+          OR NEW.candidate_addresses_json <> OLD.candidate_addresses_json
+          OR NEW.canonical_config_json <> OLD.canonical_config_json OR NEW.config_hash <> OLD.config_hash
+          OR NEW.git_sha <> OLD.git_sha OR NEW.image_digest <> OLD.image_digest
+          OR NEW.lockfile_hash <> OLD.lockfile_hash OR NEW.schema_version <> OLD.schema_version
+          OR NEW.started_at <> OLD.started_at OR NEW.trust_class <> OLD.trust_class
+          OR NEW.start_state_json <> OLD.start_state_json
+        BEGIN SELECT RAISE(ABORT, 'experiment manifest is immutable'); END;
+        DROP TRIGGER IF EXISTS raw_events_sealed_no_insert;
+        CREATE TRIGGER raw_events_sealed_no_insert BEFORE INSERT ON raw_events
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING' FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+        DROP TRIGGER IF EXISTS decisions_sealed_no_insert;
+        CREATE TRIGGER decisions_sealed_no_insert BEFORE INSERT ON decisions
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING' FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+        DROP TRIGGER IF EXISTS raw_event_observations_sealed_no_insert;
+        CREATE TRIGGER raw_event_observations_sealed_no_insert BEFORE INSERT ON raw_event_observations
+        WHEN (SELECT e.sealed_at IS NOT NULL OR e.archive_status='PREPARING' FROM raw_events r
+          JOIN experiments e ON e.experiment_id=r.experiment_id WHERE r.raw_event_id=NEW.raw_event_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
         DROP INDEX IF EXISTS idx_experiments_active_account;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
           ON experiments(account_id) WHERE state = 'ACTIVE' AND ended_at IS NULL;
@@ -571,6 +638,7 @@ export class StateStore {
   }
 
   private reconcileOrphanPreparedExperiments(now = Date.now()): void {
+    this.db.prepare("UPDATE experiments SET archive_status='FAILED', archive_error='interrupted archive preparation', end_state_json=NULL WHERE archive_status='PREPARING' AND sealed_at IS NULL").run();
     const rows = this.db.prepare(
       "SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId FROM experiments WHERE state = 'PREPARED'"
     ).all() as { experimentId: string; previousExperimentId: string | null }[];
@@ -605,12 +673,13 @@ export class StateStore {
           .run(active.experimentId);
       }
       const experimentId = newExperimentId(input.accountId, hash);
+      const startState = this.captureExperimentState(input.config.app.global.risk.startingCapitalUsd);
       this.db.prepare(
         `INSERT INTO experiments
          (experiment_id, account_id, candidate_addresses_json, canonical_config_json,
           config_hash, git_sha, image_digest, lockfile_hash, schema_version,
-          started_at, trust_class, state, previous_experiment_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          started_at, trust_class, state, previous_experiment_id, start_state_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         experimentId,
         input.accountId,
@@ -624,7 +693,8 @@ export class StateStore {
         now,
         input.trustClass,
         preparing ? "PREPARED" : "ACTIVE",
-        active?.experimentId ?? null
+        active?.experimentId ?? null,
+        normalizedPayloadJson(startState)
       );
       return this.getExperiment(experimentId)!;
     })();
@@ -639,11 +709,15 @@ export class StateStore {
               schema_version AS schemaVersion, started_at AS startedAt, ended_at AS endedAt,
               sealed_at AS sealedAt, trust_class AS trustClass
               , state, previous_experiment_id AS previousExperimentId
+              , start_state_json AS startStateJson, end_state_json AS endStateJson,
+              archive_status AS archiveStatus, archive_error AS archiveError
        FROM experiments WHERE experiment_id = ?`
-    ).get(experimentId) as (Omit<ExperimentManifestRow, "candidateAddresses"> & { candidateAddressesJson: string }) | undefined;
+    ).get(experimentId) as (Omit<ExperimentManifestRow, "candidateAddresses" | "startState" | "endState"> & { candidateAddressesJson: string; startStateJson: string; endStateJson: string | null }) | undefined;
     if (!row) return undefined;
-    const { candidateAddressesJson, ...rest } = row;
-    return { ...rest, candidateAddresses: JSON.parse(candidateAddressesJson) as string[] };
+    const { candidateAddressesJson, startStateJson, endStateJson, ...rest } = row;
+    return { ...rest, candidateAddresses: JSON.parse(candidateAddressesJson) as string[],
+      startState: JSON.parse(startStateJson) as ExperimentStateSnapshot,
+      endState: endStateJson ? JSON.parse(endStateJson) as ExperimentStateSnapshot : null };
   }
 
   getActiveExperiment(accountId?: string): ExperimentManifestRow | undefined {
@@ -652,6 +726,14 @@ export class StateStore {
        WHERE state = 'ACTIVE' AND ended_at IS NULL AND (? IS NULL OR account_id = ?) ORDER BY started_at DESC LIMIT 1`
     ).get(accountId ?? null, accountId ?? null) as { experimentId: string } | undefined;
     return row ? this.getExperiment(row.experimentId) : undefined;
+  }
+
+  captureExperimentState(initialCashUsd: number): ExperimentStateSnapshot {
+    const cash = this.db.prepare("SELECT cash_usd AS cashUsd FROM cash_ledger WHERE scope='preview'").get() as { cashUsd: number } | undefined;
+    const positions = this.db.prepare(`SELECT leader_id AS leaderId, token_id AS tokenId, shares,
+      avg_entry_price AS avgEntryPrice FROM positions WHERE ABS(shares)>1e-12 ORDER BY leader_id, token_id`).all() as ExperimentStateSnapshot["positions"];
+    const pnl = this.db.prepare("SELECT COALESCE(SUM(realized_pnl), 0) AS realizedPnlUsd FROM daily_stats").get() as { realizedPnlUsd: number };
+    return { cashUsd: cash?.cashUsd ?? initialCashUsd, positions, realizedPnlUsd: pnl.realizedPnlUsd };
   }
 
   listExperiments(): ExperimentManifestRow[] {
@@ -857,6 +939,16 @@ export class StateStore {
     if (!experimentCols.some((column) => column.name === "previous_experiment_id")) {
       this.db.exec("ALTER TABLE experiments ADD COLUMN previous_experiment_id TEXT");
     }
+    if (!experimentCols.some((column) => column.name === "start_state_json")) this.db.exec(`ALTER TABLE experiments ADD COLUMN start_state_json TEXT NOT NULL DEFAULT '{"cashUsd":0,"positions":[],"realizedPnlUsd":0}'`);
+    if (!experimentCols.some((column) => column.name === "end_state_json")) this.db.exec("ALTER TABLE experiments ADD COLUMN end_state_json TEXT");
+    if (!experimentCols.some((column) => column.name === "archive_status")) this.db.exec("ALTER TABLE experiments ADD COLUMN archive_status TEXT NOT NULL DEFAULT 'NONE'");
+    if (!experimentCols.some((column) => column.name === "archive_error")) this.db.exec("ALTER TABLE experiments ADD COLUMN archive_error TEXT");
+    const auditExperimentCols = this.db.prepare("PRAGMA table_info(audit_log)").all() as { name: string }[];
+    if (!auditExperimentCols.some((column) => column.name === "experiment_id")) this.db.exec("ALTER TABLE audit_log ADD COLUMN experiment_id TEXT");
+    const archiveCols = this.db.prepare("PRAGMA table_info(experiment_archives)").all() as { name: string }[];
+    if (!archiveCols.some((column) => column.name === "archive_path")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN archive_path TEXT");
+    if (!archiveCols.some((column) => column.name === "verified_at")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verified_at INTEGER");
+    if (!archiveCols.some((column) => column.name === "verification_status")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'VERIFIED'");
     const observationCols = this.db.prepare("PRAGMA table_info(raw_event_observations)").all() as { name: string }[];
     if (!observationCols.some((column) => column.name === "observation_key")) {
       this.db.exec("ALTER TABLE raw_event_observations ADD COLUMN observation_key TEXT");
@@ -2194,12 +2286,13 @@ export class StateStore {
     reasonCode?: DecisionReasonCode;
   }): void {
     this.db.transaction(() => {
+    const experimentId = this.getActiveExperiment()?.experimentId ?? null;
     this.db
       .prepare(
         `INSERT INTO audit_log
          (ts, leader_id, action, token_id, side, size, price, leader_price,
-          executable_price, slippage_pct, fee_usd, reason, preview)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          executable_price, slippage_pct, fee_usd, reason, preview, experiment_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         Date.now(),
@@ -2214,7 +2307,8 @@ export class StateStore {
         entry.slippagePct ?? null,
         entry.feeUsd ?? 0,
         entry.reason ?? null,
-        entry.preview ? 1 : 0
+        entry.preview ? 1 : 0,
+        experimentId
       );
     const decisionAction: DecisionAction | null = entry.action === "ERROR"
       ? null

@@ -2,6 +2,8 @@ import type { CopyStrategyType, LeaderConfig, GlobalConfig } from "../config/typ
 import type { Activity } from "../monitor/data-api.js";
 import type { StateStore } from "../state/store.js";
 
+export type PositionReadModel = Pick<StateStore, "getPosition" | "getPositionCostUsd">;
+
 export interface OrderSizeResult {
   finalUsd: number;
   finalShares: number;
@@ -63,7 +65,7 @@ export function calculateOrderSize(
   leader: LeaderConfig,
   global: GlobalConfig,
   activity: Activity,
-  store?: StateStore
+  store?: PositionReadModel
 ): OrderSizeResult {
   const rawPrice = activity.price;
   const price = rawPrice ?? 0;

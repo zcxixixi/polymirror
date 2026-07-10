@@ -17,6 +17,24 @@ afterEach(() => {
 });
 
 describe("experiment manifest", () => {
+  it("captures an independent start state when a rotated experiment activates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-experiment-start-")); dirs.push(dir);
+    const store = new StateStore(join(dir, "state.db"));
+    const config = previewRuntimeConfig(); config.app.global.risk.startingCapitalUsd = 10;
+    const first = store.startOrResumeExperiment({ accountId: "candidate-a", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" }, 100);
+    store.adjustCash(-2, 10); store.applyCopyFill("whale", "token-a", "BUY", 4, 0.5);
+    const changed = structuredClone(config); changed.app.global.risk.maxOrderUsd -= 1;
+    const second = store.startOrResumeExperiment({ accountId: "candidate-a", candidateAddresses: [], config: changed,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" }, 200);
+    expect(first.startState).toMatchObject({ cashUsd: 10, positions: [], realizedPnlUsd: 0 });
+    expect(second.startState).toMatchObject({
+      cashUsd: 8,
+      positions: [{ leaderId: "whale", tokenId: "token-a", shares: 4, avgEntryPrice: 0.5 }],
+      realizedPnlUsd: 0,
+    });
+    store.close();
+  });
   it("captures checkout and lockfile provenance when build metadata is not injected", () => {
     const previousGitSha = process.env.POLYMIRROR_GIT_SHA;
     const previousImageDigest = process.env.POLYMIRROR_IMAGE_DIGEST;

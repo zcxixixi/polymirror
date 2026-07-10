@@ -106,4 +106,21 @@ export interface ExperimentManifestRow {
   trustClass: ExperimentTrustClass;
   state: "PREPARED" | "ACTIVE" | "ENDED" | "ABORTED";
   previousExperimentId: string | null;
+  startState: ExperimentStateSnapshot;
+  endState: ExperimentStateSnapshot | null;
+  archiveStatus: "NONE" | "PREPARING" | "SEALED" | "FAILED";
+  archiveError: string | null;
+}
+
+export interface ExperimentStatePosition {
+  leaderId: string;
+  tokenId: string;
+  shares: number;
+  avgEntryPrice: number;
+}
+
+export interface ExperimentStateSnapshot {
+  cashUsd: number;
+  positions: ExperimentStatePosition[];
+  realizedPnlUsd: number;
 }
