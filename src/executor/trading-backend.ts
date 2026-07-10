@@ -37,6 +37,8 @@ export interface CompletedOrderFill {
   shares: number;
   usd: number;
   feeUsd?: number;
+  /** Signed wallet cash movement: BUY is negative all-in cost, SELL is positive net proceeds. */
+  cashDeltaUsd?: number;
   matchedAt: number;
 }
 

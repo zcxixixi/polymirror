@@ -25,6 +25,7 @@ export interface PendingOrderRow {
   reasoning: string;
   createdAt: number;
   updatedAt: number;
+  reconciliationOnly: boolean;
 }
 
 export interface LiveOrderIntentRow {
@@ -42,6 +43,7 @@ export interface LiveOrderIntentRow {
   market?: TokenMarketEntry;
   createdAt: number;
   updatedAt: number;
+  reconciliationOnly: boolean;
 }
 
 export interface AuditLogRow {
@@ -366,7 +368,8 @@ export class StateStore {
         trade_key TEXT NOT NULL,
         reasoning TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        reconciliation_only INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_pending_orders_leader ON pending_orders(leader_id);
       CREATE TABLE IF NOT EXISTS live_order_intents (
@@ -383,7 +386,8 @@ export class StateStore {
         reasoning TEXT NOT NULL DEFAULT '',
         market_json TEXT,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        reconciliation_only INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_live_order_intents_created ON live_order_intents(created_at);
       CREATE TABLE IF NOT EXISTS cash_ledger (
@@ -439,6 +443,9 @@ export class StateStore {
     if (!intentCols.some((c) => c.name === "slippage_pct")) {
       this.db.exec("ALTER TABLE live_order_intents ADD COLUMN slippage_pct REAL");
     }
+    if (!intentCols.some((c) => c.name === "reconciliation_only")) {
+      this.db.exec("ALTER TABLE live_order_intents ADD COLUMN reconciliation_only INTEGER NOT NULL DEFAULT 0");
+    }
     const pendingCols = this.db.prepare("PRAGMA table_info(pending_orders)").all() as { name: string }[];
     if (!pendingCols.some((c) => c.name === "filled_usd")) {
       this.db.exec("ALTER TABLE pending_orders ADD COLUMN filled_usd REAL NOT NULL DEFAULT 0");
@@ -455,6 +462,9 @@ export class StateStore {
     }
     if (!pendingCols.some((c) => c.name === "slippage_pct")) {
       this.db.exec("ALTER TABLE pending_orders ADD COLUMN slippage_pct REAL");
+    }
+    if (!pendingCols.some((c) => c.name === "reconciliation_only")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN reconciliation_only INTEGER NOT NULL DEFAULT 0");
     }
   }
 
@@ -971,7 +981,7 @@ export class StateStore {
       );
   }
 
-  listPendingOrders(): PendingOrderRow[] {
+  listPendingOrders(options?: { includeReconciliation?: boolean }): PendingOrderRow[] {
     const rows = this.db
       .prepare(
         `SELECT order_id AS orderId, leader_id AS leaderId, token_id AS tokenId, side,
@@ -979,18 +989,22 @@ export class StateStore {
                 fee_usd AS feeUsd,
                 leader_price AS leaderPrice, executable_price AS executablePrice,
                 slippage_pct AS slippagePct, trade_key AS tradeKey,
-                reasoning, created_at AS createdAt, updated_at AS updatedAt
-         FROM pending_orders ORDER BY created_at ASC`
+                reasoning, created_at AS createdAt, updated_at AS updatedAt,
+                reconciliation_only AS reconciliationOnly
+         FROM pending_orders
+         WHERE reconciliation_only = 0 OR ? = 1
+         ORDER BY created_at ASC`
       )
-      .all() as PendingOrderRow[];
+      .all(options?.includeReconciliation ? 1 : 0) as PendingOrderRow[];
     return rows.map((r) => ({
       ...r,
       side: r.side as "BUY" | "SELL",
+      reconciliationOnly: Boolean(r.reconciliationOnly),
     }));
   }
 
   countPendingOrders(): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS c FROM pending_orders").get() as { c: number };
+    const row = this.db.prepare("SELECT COUNT(*) AS c FROM pending_orders WHERE reconciliation_only = 0").get() as { c: number };
     return row.c;
   }
 
@@ -1009,7 +1023,7 @@ export class StateStore {
   removeStalePendingOrders(maxAgeMs: number): number {
     const cutoff = Date.now() - maxAgeMs;
     const result = this.db
-      .prepare("DELETE FROM pending_orders WHERE created_at < ?")
+      .prepare("DELETE FROM pending_orders WHERE created_at < ? AND reconciliation_only = 0")
       .run(cutoff);
     return result.changes;
   }
@@ -1069,16 +1083,19 @@ export class StateStore {
     return intentId;
   }
 
-  listLiveOrderIntents(): LiveOrderIntentRow[] {
+  listLiveOrderIntents(options?: { includeReconciliation?: boolean }): LiveOrderIntentRow[] {
     const rows = this.db
       .prepare(
         `SELECT intent_id AS intentId, leader_id AS leaderId, token_id AS tokenId,
                 side, price, leader_price AS leaderPrice, executable_price AS executablePrice,
                 slippage_pct AS slippagePct, size, trade_keys AS tradeKeys, reasoning, market_json AS marketJson,
-                created_at AS createdAt, updated_at AS updatedAt
-         FROM live_order_intents ORDER BY created_at ASC`
+                created_at AS createdAt, updated_at AS updatedAt,
+                reconciliation_only AS reconciliationOnly
+         FROM live_order_intents
+         WHERE reconciliation_only = 0 OR ? = 1
+         ORDER BY created_at ASC`
       )
-      .all() as Array<
+      .all(options?.includeReconciliation ? 1 : 0) as Array<
       Omit<LiveOrderIntentRow, "tradeKeys" | "market" | "side"> & {
         side: string;
         tradeKeys: string;
@@ -1108,6 +1125,7 @@ export class StateStore {
         market: parseMarketJson(r.marketJson),
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
+        reconciliationOnly: Boolean(r.reconciliationOnly),
       };
     });
   }
@@ -1124,7 +1142,7 @@ export class StateStore {
     this.db.prepare("DELETE FROM live_order_intents WHERE intent_id = ?").run(intentId);
   }
 
-  expireLiveOrderIntentAsUncertain(intent: LiveOrderIntentRow, reason: string): void {
+  quarantineLiveOrderIntentAsUncertain(intent: LiveOrderIntentRow, reason: string): void {
     this.db.transaction(() => {
       for (const key of intent.tradeKeys) {
         this.markSeen(key, intent.leaderId);
@@ -1142,7 +1160,9 @@ export class StateStore {
         reason,
         preview: false,
       });
-      this.deleteLiveOrderIntent(intent.intentId);
+      this.db
+        .prepare("UPDATE live_order_intents SET reconciliation_only = 1, updated_at = ? WHERE intent_id = ?")
+        .run(Date.now(), intent.intentId);
     })();
   }
 
@@ -1190,6 +1210,7 @@ export class StateStore {
       market?: TokenMarketEntry;
     };
     remove: boolean;
+    reconciliationOnly?: boolean;
     skipPendingRowUpdate?: boolean;
     staleSkipAudit?: {
       leaderId: string;
@@ -1207,6 +1228,7 @@ export class StateStore {
       matchedFeeUsd,
       fill,
       remove,
+      reconciliationOnly,
       skipPendingRowUpdate,
       staleSkipAudit,
     } = entry;
@@ -1290,13 +1312,15 @@ export class StateStore {
           .prepare(
             `UPDATE pending_orders
              SET filled_shares = ?, filled_usd = COALESCE(?, filled_usd),
-                 fee_usd = COALESCE(?, fee_usd), updated_at = ?
+                 fee_usd = COALESCE(?, fee_usd),
+                 reconciliation_only = COALESCE(?, reconciliation_only), updated_at = ?
              WHERE order_id = ?`
           )
           .run(
             matchedFilledShares,
             matchedFilledUsd ?? null,
             matchedFeeUsd ?? null,
+            reconciliationOnly === undefined ? null : reconciliationOnly ? 1 : 0,
             Date.now(),
             orderId
           );

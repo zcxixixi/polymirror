@@ -342,6 +342,83 @@ describe("runCopyCycle pending reconciliation", () => {
     expect(result.errors.some((error) => error.includes("confirmation unavailable"))).toBe(true);
   });
 
+  it("moves cancelled GTC orders to reconciliation without losing delayed confirmed fills", async () => {
+    store.upsertPendingOrder({
+      orderId: "ord-live-cancelled-late-fill",
+      leaderId: "whale",
+      tokenId: "tok-cancelled-late-fill",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 0,
+      filledUsd: 0,
+      tradeKey: "k-cancelled-late-fill",
+      reasoning: "fixed",
+    });
+    mockGetOrderStatus
+      .mockResolvedValueOnce({
+        kind: "ok",
+        status: {
+          sizeMatched: 0,
+          originalSize: 10,
+          status: "CANCELLED",
+          terminal: true,
+        },
+      })
+      .mockResolvedValueOnce({
+        kind: "ok",
+        status: {
+          sizeMatched: 4,
+          originalSize: 0,
+          status: "CONFIRMED_CLOSED",
+          terminal: false,
+          filledUsd: 1.96,
+          averagePrice: 0.49,
+          feeUsd: 0.04,
+        },
+      });
+
+    await runCopyCycle(liveConfig(false), store);
+    expect(store.countPendingOrders()).toBe(0);
+    expect(store.listPendingOrders({ includeReconciliation: true })).toHaveLength(1);
+
+    await runCopyCycle(liveConfig(false), store);
+    expect(store.getPosition("whale", "tok-cancelled-late-fill")).toBe(4);
+    expect(store.listAuditLog({ action: "COPY" }).items).toHaveLength(1);
+  });
+
+  it("keeps a stale-cancelled GTC reconciliation tombstone", async () => {
+    store.upsertPendingOrder({
+      orderId: "ord-live-stale-cancel",
+      leaderId: "whale",
+      tokenId: "tok-stale-cancel",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 0,
+      filledUsd: 0,
+      tradeKey: "k-stale-cancel",
+      reasoning: "fixed",
+    });
+    store.setPendingOrderTimestamps("ord-live-stale-cancel", Date.now() - 48 * 3600_000);
+    mockGetOrderStatus.mockResolvedValue({
+      kind: "ok",
+      status: {
+        sizeMatched: 0,
+        originalSize: 10,
+        status: "LIVE",
+        terminal: false,
+      },
+    });
+    mockCancelOrder.mockResolvedValue({ ok: true });
+
+    await runCopyCycle(liveConfig(false), store);
+
+    expect(mockCancelOrder).toHaveBeenCalledWith("ord-live-stale-cancel");
+    expect(store.countPendingOrders()).toBe(0);
+    expect(store.listPendingOrders({ includeReconciliation: true })).toHaveLength(1);
+  });
+
   it("resolves a closed order only when its exact requested size is confirmed", async () => {
     store.upsertPendingOrder({
       orderId: "ord-live-closed-full",

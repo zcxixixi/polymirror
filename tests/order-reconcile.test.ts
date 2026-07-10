@@ -186,7 +186,8 @@ describe("adoptUntrackedOpenOrders", () => {
           averagePrice: 0.54,
           shares: 4,
           usd: 2.16,
-          feeUsd: 0.02,
+          feeUsd: 999,
+          cashDeltaUsd: -2.18,
           matchedAt: createdAt + 1_000,
         },
       ],
@@ -294,9 +295,10 @@ describe("adoptUntrackedOpenOrders", () => {
     const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
 
     expect(adopted).toBe(0);
-    expect(warnings.some((w) => w.includes("expired uncertain live order intent"))).toBe(true);
+    expect(warnings.some((w) => w.includes("quarantined uncertain live order intent"))).toBe(true);
     expect(store.getPosition("whale", "tok-abc")).toBe(0);
     expect(store.listLiveOrderIntents()).toHaveLength(0);
+    expect(store.listLiveOrderIntents({ includeReconciliation: true })).toHaveLength(1);
   });
 
   it("does not match a low-price BUY fill that exceeds intended shares", async () => {
@@ -384,7 +386,7 @@ describe("adoptUntrackedOpenOrders", () => {
     expect(store.listLiveOrderIntents().map((r) => r.intentId)).toEqual([intentId]);
   });
 
-  it("expires stale live order intents as uncertain without retrying the source trade", async () => {
+  it("quarantines stale intents while retaining delayed confirmed-fill recovery", async () => {
     const intentId = store.recordLiveOrderIntent({
       tradeKeys: ["source-a", "source-b"],
       leaderId: "whale",
@@ -396,18 +398,40 @@ describe("adoptUntrackedOpenOrders", () => {
     });
     store.setLiveOrderIntentTimestamps(intentId, Date.now() - 10 * 60_000);
     mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills
+      .mockResolvedValueOnce({ kind: "ok", fills: [] })
+      .mockResolvedValueOnce({
+        kind: "ok",
+        fills: [{
+          orderId: "late-confirmed-order",
+          tokenId: "tok-abc",
+          side: "BUY",
+          averagePrice: 0.5,
+          shares: 20,
+          usd: 10,
+          feeUsd: 0.1,
+          cashDeltaUsd: -10.1,
+          matchedAt: Date.now(),
+        }],
+      });
 
     const executor = new ClobExecutor({} as never, {} as never);
     const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
 
     expect(adopted).toBe(0);
-    expect(warnings.some((w) => w.includes("expired uncertain live order intent"))).toBe(true);
+    expect(warnings.some((w) => w.includes("quarantined uncertain live order intent"))).toBe(true);
     expect(store.hasSeen("source-a")).toBe(true);
     expect(store.hasSeen("source-b")).toBe(true);
     expect(store.listLiveOrderIntents()).toHaveLength(0);
+    expect(store.listLiveOrderIntents({ includeReconciliation: true })).toHaveLength(1);
     expect(store.countPendingOrders()).toBe(0);
     const audit = store.listAuditLog({ action: "ERROR" }).items[0];
-    expect(audit?.reason).toContain("uncertain live order intent expired");
+    expect(audit?.reason).toContain("uncertain live order intent quarantined");
+
+    const recovered = await adoptUntrackedOpenOrders(executor, store);
+    expect(recovered.adopted).toBe(1);
+    expect(store.getPosition("whale", "tok-abc")).toBe(20);
+    expect(store.listLiveOrderIntents({ includeReconciliation: true })).toHaveLength(0);
   });
 
   it("skips orders already tracked", async () => {

@@ -1,7 +1,7 @@
 import { OrderSide, OrderType as SdkOrderType } from "@polymarket/client";
 import type { WalletConfig } from "../config/types.js";
 import type { OrderStatusResult } from "./clob.js";
-import { formatPriceForTick } from "./orderbook.js";
+import { fetchOrderBookMeta, formatPriceForTick } from "./orderbook.js";
 import { getSecureClient } from "./secure-client.js";
 import type {
   CompletedOrderFill,
@@ -10,7 +10,7 @@ import type {
   SubmitOrderResponse,
   TradingBackend,
 } from "./trading-backend.js";
-import { calculateFeeFromBps } from "./fees.js";
+import { calculatePlatformFeeUsd } from "./fees.js";
 
 function isTerminalStatus(status: string): boolean {
   const s = status.toLowerCase();
@@ -39,12 +39,6 @@ function parseMatchedAt(value: string): number {
 
 function roundFillValue(value: number): number {
   return Math.round(value * 100_000_000) / 100_000_000;
-}
-
-function parseNonNegativeNumber(value: unknown): number {
-  if (value === null || value === undefined || value === "") return 0;
-  const parsed = parseFloat(String(value));
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 const CONFIRMED_FILL_STATUSES = new Set(["CONFIRMED"]);
@@ -193,6 +187,12 @@ export class SecureTradingBackend implements TradingBackend {
     let shares = 0;
     let usd = 0;
     let feeUsd = 0;
+    const feeMeta = await fetchOrderBookMeta(
+      this.wallet.clobUrl,
+      this.wallet.chainId,
+      tokenId
+    );
+    if (!feeMeta) throw new Error(`market fee metadata unavailable for ${tokenId}`);
     for await (const page of client.listAccountTrades({ tokenId })) {
       for (const trade of page.items) {
         if (!acceptedStatuses.has(String(trade.status ?? "").toUpperCase())) continue;
@@ -203,9 +203,11 @@ export class SecureTradingBackend implements TradingBackend {
             const notional = matchedShares * price;
             shares += matchedShares;
             usd += notional;
-            feeUsd += calculateFeeFromBps(
-              notional,
-              parseFloat(String(trade.feeRateBps ?? "0"))
+            feeUsd += calculatePlatformFeeUsd(
+              matchedShares,
+              price,
+              feeMeta.feeRate,
+              feeMeta.feeExponent
             );
           }
         }
@@ -217,9 +219,11 @@ export class SecureTradingBackend implements TradingBackend {
               const notional = matchedShares * price;
               shares += matchedShares;
               usd += notional;
-              feeUsd += calculateFeeFromBps(
-                notional,
-                parseFloat(String(maker.feeRateBps ?? "0"))
+              feeUsd += calculatePlatformFeeUsd(
+                matchedShares,
+                price,
+                feeMeta.feeRate,
+                feeMeta.feeExponent
               );
             }
           }
@@ -244,15 +248,15 @@ export class SecureTradingBackend implements TradingBackend {
     const after = String(Math.floor(sinceMs / 1000));
     const ownMakerAddress = this.wallet.proxyAddress?.toLowerCase();
 
-    const addFill = (input: {
+    const feeMetaByToken = new Map<string, Awaited<ReturnType<typeof fetchOrderBookMeta>>>();
+    const addFill = async (input: {
       orderId: string;
       tokenId: string;
       sideValue: string;
       price: number;
       shares: number;
-      feeRateBps: number;
       matchedAt: number;
-    }): void => {
+    }): Promise<void> => {
       const side = input.sideValue === "BUY" || input.sideValue === "SELL"
         ? input.sideValue
         : undefined;
@@ -271,7 +275,22 @@ export class SecureTradingBackend implements TradingBackend {
       }
 
       const usd = input.price * input.shares;
-      const feeUsd = calculateFeeFromBps(usd, input.feeRateBps);
+      let feeMeta = feeMetaByToken.get(input.tokenId);
+      if (feeMeta === undefined) {
+        feeMeta = await fetchOrderBookMeta(
+          this.wallet.clobUrl,
+          this.wallet.chainId,
+          input.tokenId
+        );
+        feeMetaByToken.set(input.tokenId, feeMeta);
+      }
+      if (!feeMeta) throw new Error(`market fee metadata unavailable for ${input.tokenId}`);
+      const feeUsd = calculatePlatformFeeUsd(
+        input.shares,
+        input.price,
+        feeMeta.feeRate,
+        feeMeta.feeExponent
+      );
       const existing = groups.get(input.orderId);
       if (!existing) {
         groups.set(input.orderId, {
@@ -303,13 +322,12 @@ export class SecureTradingBackend implements TradingBackend {
         const matchedAt = parseMatchedAt(String(trade.matchedAt ?? ""));
         const traderSide = String(trade.traderSide ?? "").toUpperCase();
         if (traderSide === "TAKER") {
-          addFill({
+          await addFill({
             orderId: String(trade.takerOrderId ?? "").trim(),
             tokenId: String(trade.tokenId ?? "").trim(),
             sideValue: String(trade.side ?? "").toUpperCase(),
             price: parseFloat(String(trade.price ?? "0")),
             shares: parseFloat(String(trade.size ?? "0")),
-            feeRateBps: parseNonNegativeNumber(trade.feeRateBps),
             matchedAt,
           });
         }
@@ -322,13 +340,12 @@ export class SecureTradingBackend implements TradingBackend {
             ) {
               continue;
             }
-            addFill({
+            await addFill({
               orderId: String(maker.orderId ?? "").trim(),
               tokenId: String(maker.tokenId ?? "").trim(),
               sideValue: String(maker.side ?? "").toUpperCase(),
               price: parseFloat(String(maker.price ?? "0")),
               shares: parseFloat(String(maker.matchedAmount ?? "0")),
-              feeRateBps: parseNonNegativeNumber(maker.feeRateBps),
               matchedAt,
             });
           }
@@ -338,13 +355,18 @@ export class SecureTradingBackend implements TradingBackend {
 
     return [...groups.values()]
       .filter((fill) => !fill.invalid && fill.shares > 0 && fill.usd > 0)
-      .map(({ invalid: _invalid, ...fill }) => ({
-        ...fill,
-        averagePrice: roundFillValue(fill.usd / fill.shares),
-        shares: roundFillValue(fill.shares),
-        usd: roundFillValue(fill.usd),
-        feeUsd: roundFillValue(fill.feeUsd ?? 0),
-      }))
+      .map(({ invalid: _invalid, ...fill }) => {
+        const feeUsd = roundFillValue(fill.feeUsd ?? 0);
+        const usd = roundFillValue(fill.usd);
+        return {
+          ...fill,
+          averagePrice: roundFillValue(fill.usd / fill.shares),
+          shares: roundFillValue(fill.shares),
+          usd,
+          feeUsd,
+          cashDeltaUsd: roundFillValue(fill.side === "BUY" ? -(usd + feeUsd) : usd - feeUsd),
+        };
+      })
       .sort((a, b) => a.matchedAt - b.matchedAt || a.orderId.localeCompare(b.orderId));
   }
 

@@ -35,11 +35,23 @@ function roundUsd(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function completedFillFeeUsd(fill: CompletedOrderFill): number {
+  let feeUsd: number;
+  if (fill.cashDeltaUsd !== undefined && Number.isFinite(fill.cashDeltaUsd)) {
+    feeUsd = fill.side === "BUY"
+      ? Math.max(0, -fill.cashDeltaUsd - fill.usd)
+      : Math.max(0, fill.usd - fill.cashDeltaUsd);
+  } else {
+    feeUsd = fill.feeUsd ?? 0;
+  }
+  return Math.round(feeUsd * 100_000_000) / 100_000_000;
+}
+
 function matchesCompletedFill(
   intent: LiveOrderIntentRow,
   fill: CompletedOrderFill
 ): boolean {
-  const feeUsd = fill.feeUsd ?? 0;
+  const feeUsd = completedFillFeeUsd(fill);
   if (intent.tokenId !== fill.tokenId || intent.side !== fill.side) return false;
   if (
     !Number.isFinite(fill.averagePrice) ||
@@ -55,7 +67,6 @@ function matchesCompletedFill(
     return false;
   }
   if (fill.matchedAt < intent.createdAt - COMPLETED_FILL_CLOCK_SKEW_MS) return false;
-  if (fill.matchedAt > intent.createdAt + LIVE_ORDER_INTENT_RECOVERY_MS) return false;
   const shareTolerance = Math.max(INTENT_SIZE_TOLERANCE, intent.size * 0.05);
   if (fill.shares > intent.size + shareTolerance) return false;
 
@@ -69,7 +80,7 @@ function matchesCompletedFill(
   return true;
 }
 
-function expireStaleIntents(
+function quarantineStaleIntents(
   store: StateStore,
   intents: LiveOrderIntentRow[],
   retainedIntentIds: Set<string>,
@@ -80,11 +91,12 @@ function expireStaleIntents(
     if (retainedIntentIds.has(intent.intentId)) continue;
     if (now - intent.createdAt < LIVE_ORDER_INTENT_RECOVERY_MS) continue;
 
+    if (intent.reconciliationOnly) continue;
     const reason =
-      "uncertain live order intent expired without matching open order or completed fill";
-    store.expireLiveOrderIntentAsUncertain(intent, reason);
+      "uncertain live order intent quarantined without matching open order or completed fill";
+    store.quarantineLiveOrderIntentAsUncertain(intent, reason);
     warnings.push(
-      `expired uncertain live order intent ${intent.intentId.slice(0, 12)} for ${intent.leaderId}`
+      `quarantined uncertain live order intent ${intent.intentId.slice(0, 12)} for ${intent.leaderId}`
     );
   }
   return warnings;
@@ -104,8 +116,10 @@ export async function adoptUntrackedOpenOrders(
     warnings.push(`open order recovery lookup failed (${message}); live intents retained`);
     return { adopted: 0, warnings };
   }
-  const pendingIds = new Set(store.listPendingOrders().map((r) => r.orderId));
-  const intents = store.listLiveOrderIntents();
+  const pendingIds = new Set(
+    store.listPendingOrders({ includeReconciliation: true }).map((r) => r.orderId)
+  );
+  const intents = store.listLiveOrderIntents({ includeReconciliation: true });
   const claimedIntentIds = new Set<string>();
   const reservedOrderIds = new Set<string>([
     ...pendingIds,
@@ -261,7 +275,7 @@ export async function adoptUntrackedOpenOrders(
       orderSize: fill.shares,
       filledShares: fill.shares,
       filledUsd: fill.usd,
-      feeUsd: fill.feeUsd ?? 0,
+      feeUsd: completedFillFeeUsd(fill),
       auditReason: `${intent.reasoning}; recovered completed immediate fill after restart`,
       orderId: fill.orderId,
       pendingRemaining: 0,
@@ -285,7 +299,7 @@ export async function adoptUntrackedOpenOrders(
     ...claimedIntentIds,
     ...ambiguousIntentIds,
   ]);
-  warnings.push(...expireStaleIntents(store, intents, retainedIntentIds, Date.now()));
+  warnings.push(...quarantineStaleIntents(store, intents, retainedIntentIds, Date.now()));
   return { adopted, warnings };
 }
 

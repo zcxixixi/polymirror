@@ -142,13 +142,15 @@ async function processPendingOrderRow(
     const filled = fill ? 1 : 0;
 
     if (terminal) {
+      const confirmedComplete = matched >= row.size - 1e-8;
       store.commitPendingOrderProgress({
         orderId: row.orderId,
         matchedFilledShares: matched,
         matchedFilledUsd,
         matchedFeeUsd,
         fill,
-        remove: true,
+        remove: confirmedComplete,
+        reconciliationOnly: !confirmedComplete,
       });
       if (fill) {
         logInfo("Pending order fill applied", {
@@ -178,7 +180,8 @@ async function processPendingOrderRow(
           matchedFilledUsd,
           matchedFeeUsd,
           fill,
-          remove: true,
+          remove: false,
+          reconciliationOnly: true,
           staleSkipAudit: {
             leaderId: row.leaderId,
             tokenId: row.tokenId,
@@ -273,7 +276,9 @@ export async function processPendingOrders(
 ): Promise<PendingOrderResult> {
   const maxAgeMs = config.app.global.execution.pendingOrderMaxAgeHours * 3600 * 1000;
   const now = Date.now();
-  const pending = store.listPendingOrders().filter((r) => !isPreviewOrderId(r.orderId));
+  const pending = store
+    .listPendingOrders({ includeReconciliation: true })
+    .filter((r) => !isPreviewOrderId(r.orderId));
   if (pending.length === 0) {
     return { resolved: 0, filled: 0, errors: [], cancelledStale: 0 };
   }

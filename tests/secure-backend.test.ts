@@ -8,6 +8,14 @@ vi.mock("../src/executor/secure-client.js", () => ({
   getSecureClient: vi.fn(),
 }));
 
+const { mockFetchOrderBookMeta } = vi.hoisted(() => ({
+  mockFetchOrderBookMeta: vi.fn(),
+}));
+vi.mock("../src/executor/orderbook.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/executor/orderbook.js")>()),
+  fetchOrderBookMeta: mockFetchOrderBookMeta,
+}));
+
 const wallet = { proxyAddress: `0x${"2".repeat(40)}` } as WalletConfig;
 const mockGetSecureClient = vi.mocked(getSecureClient);
 const placeMarketOrder = vi.fn();
@@ -27,7 +35,18 @@ describe("SecureTradingBackend", () => {
     listAccountTrades.mockReset();
     fetchOrder.mockReset();
     mockGetSecureClient.mockReset();
-    mockGetSecureClient.mockResolvedValue({ placeMarketOrder, listAccountTrades, fetchOrder } as never);
+    mockFetchOrderBookMeta.mockReset();
+    mockFetchOrderBookMeta.mockResolvedValue({
+      tickSize: "0.01",
+      negRisk: false,
+      feeRate: 0.25,
+      feeExponent: 2,
+    });
+    mockGetSecureClient.mockResolvedValue({
+      placeMarketOrder,
+      listAccountTrades,
+      fetchOrder,
+    } as never);
   });
 
   it.each([
@@ -107,10 +126,37 @@ describe("SecureTradingBackend", () => {
         averagePrice: 0.56,
         shares: 10,
         usd: 5.6,
-        feeUsd: 0.056,
+        feeUsd: 0.1489,
+        cashDeltaUsd: -5.7489,
         matchedAt: Date.parse("2026-07-10T00:00:02.000Z"),
       },
     ]);
+  });
+
+  it("uses market fee rate and exponent at actual execution prices", async () => {
+    const since = Date.parse("2026-07-10T00:00:00.000Z");
+    listAccountTrades.mockReturnValue((async function* () {
+      yield { items: [{
+        tokenId: "token-1",
+        side: "SELL",
+        price: "0.40",
+        size: "10",
+        feeRateBps: "9999",
+        status: "CONFIRMED",
+        takerOrderId: "order-fee",
+        traderSide: "TAKER",
+        matchedAt: "2026-07-10T00:00:01.000Z",
+        makerOrders: [],
+      }] };
+    })());
+
+    const fills = await new SecureTradingBackend(wallet).listRecentCompletedFills(since);
+
+    expect(fills[0]).toMatchObject({
+      usd: 4,
+      feeUsd: 0.144,
+      cashDeltaUsd: 3.856,
+    });
   });
 
   it("recovers confirmed maker fills by maker order id", async () => {
@@ -165,13 +211,14 @@ describe("SecureTradingBackend", () => {
         averagePrice: 0.45,
         shares: 3.5,
         usd: 1.575,
-        feeUsd: 0,
+        feeUsd: 0.05359922,
+        cashDeltaUsd: -1.62859922,
         matchedAt: Date.parse("2026-07-10T00:00:01.000Z"),
       },
     ]);
   });
 
-  it("treats a nullable maker fee rate as zero in order status", async () => {
+  it("uses market fee semantics even when maker trade bps is null", async () => {
     fetchOrder.mockResolvedValue({
       sizeMatched: "3.5",
       originalSize: "10",
@@ -216,7 +263,7 @@ describe("SecureTradingBackend", () => {
         terminal: false,
         filledUsd: 1.575,
         averagePrice: 0.45,
-        feeUsd: 0,
+        feeUsd: 0.05359922,
       },
     });
   });
@@ -269,7 +316,7 @@ describe("SecureTradingBackend", () => {
         terminal: false,
         filledUsd: 5.2,
         averagePrice: 0.52,
-        feeUsd: 0,
+        feeUsd: 0.144,
       },
     });
   });
@@ -324,7 +371,7 @@ describe("SecureTradingBackend", () => {
         terminal: false,
         filledUsd: 1.6,
         averagePrice: 0.4,
-        feeUsd: 0.016,
+        feeUsd: 0.0576,
       },
     });
   });
@@ -366,7 +413,7 @@ describe("SecureTradingBackend", () => {
         terminal: false,
         filledUsd: 2,
         averagePrice: 0.5,
-        feeUsd: 0,
+        feeUsd: 0.0625,
       },
     });
   });
