@@ -37,6 +37,7 @@ interface TokenSettlement {
 
 const settlementCache = new Map<string, { at: number; value: TokenSettlement | null }>();
 const redeemedConditionsThisCycle = new Map<string, boolean>();
+const redeemedTxHashesThisCycle = new Map<string, string>();
 
 function activityMs(a: Activity): number {
   return a.timestamp > 1e12 ? a.timestamp : a.timestamp * 1000;
@@ -171,6 +172,7 @@ async function redeemConditionOnce(
   const result = await redeemConditionOnChain(wallet, conditionId);
   const ok = result.ok || result.benignFailure === true;
   redeemedConditionsThisCycle.set(conditionId, ok);
+  if (result.txHash) redeemedTxHashesThisCycle.set(conditionId, result.txHash);
   if (!ok) errors.push(`redeem ${conditionId.slice(0, 12)}: ${result.error ?? "failed"}`);
   return ok;
 }
@@ -211,7 +213,8 @@ function settleTrackedTokenPayouts(
   store: StateStore,
   tokenPayouts: Map<string, number>,
   preview: boolean,
-  cashInitialUsd: number
+  cashInitialUsd: number,
+  settlementTerms?: Record<string, unknown>
 ): number {
   let settled = 0;
   for (const [tokenId, payoutPerShare] of tokenPayouts) {
@@ -221,6 +224,7 @@ function settleTrackedTokenPayouts(
       payoutPerShare,
       preview,
       preview ? cashInitialUsd : undefined
+      , settlementTerms
     );
   }
   return settled;
@@ -234,7 +238,6 @@ async function processOnChainRedeemableScan(
   errors: string[]
 ): Promise<number> {
   const tracked = new Set(store.listOpenTokenIds());
-  if (tracked.size === 0) return 0;
 
   let redeemable: RedeemablePositionRow[] = [];
   try {
@@ -246,29 +249,42 @@ async function processOnChainRedeemableScan(
   }
 
   const byCondition = new Map<string, RedeemablePositionRow[]>();
+  const rawIdsByCondition = new Map<string, string[]>();
   for (const row of redeemable) {
-    if (!tracked.has(row.tokenId)) continue;
-    const bucket = byCondition.get(row.conditionId) ?? [];
-    bucket.push(row);
-    byCondition.set(row.conditionId, bucket);
-  }
-
-  let onChainRedeems = 0;
-  for (const [conditionId, rows] of byCondition) {
-    const scanSourceId = `onchain-redeemable:${conditionId}:${rows.map((row) => row.tokenId).sort().join(",")}`;
-    const scanRaw = store.getActiveExperiment()
+    const sourceId = `onchain-redeemable:${row.conditionId}:${row.tokenId}:${row.size}:${row.payoutPerShare}`;
+    const raw = store.getActiveExperiment()
       ? store.recordRawEvent({
-          sourceId: scanSourceId,
-          payload: { type: "ONCHAIN_REDEEMABLE", conditionId, rows },
+          sourceId,
+          payload: { type: "ONCHAIN_REDEEMABLE", ...row },
           sourceTimestamp: Date.now(),
           observedTimestamp: Date.now(),
         })
       : undefined;
-    store.setDecisionRawEventIds(scanRaw ? [scanRaw.rawEventId] : []);
-    store.audit({ action: "DETECT", tokenId: conditionId, side: "REDEEM", reason: "on-chain redeemable detected", preview });
+    store.setDecisionRawEventIds(raw ? [raw.rawEventId] : []);
+    store.audit({ action: "DETECT", tokenId: row.tokenId, side: "REDEEM", size: row.size, price: row.payoutPerShare, reason: "on-chain redeemable detected", preview });
+    if (!tracked.has(row.tokenId)) {
+      store.audit({ action: "SKIP", tokenId: row.tokenId, side: "REDEEM", reason: "untracked token", reasonCode: "untracked_token", preview });
+      store.setDecisionRawEventIds([]);
+      continue;
+    }
+    const bucket = byCondition.get(row.conditionId) ?? [];
+    bucket.push(row);
+    byCondition.set(row.conditionId, bucket);
+    if (raw) {
+      const ids = rawIdsByCondition.get(row.conditionId) ?? [];
+      ids.push(raw.rawEventId);
+      rawIdsByCondition.set(row.conditionId, ids);
+    }
+    store.setDecisionRawEventIds([]);
+  }
+
+  let onChainRedeems = 0;
+  for (const [conditionId, rows] of byCondition) {
+    store.setDecisionRawEventIds(rawIdsByCondition.get(conditionId) ?? []);
     const ok = await redeemConditionOnce(wallet, conditionId, errors);
     if (!ok) {
       store.audit({ action: "SKIP", tokenId: conditionId, side: "REDEEM", reason: "on-chain redeem failed", preview });
+      store.setDecisionRawEventIds([]);
       continue;
     }
 
@@ -280,7 +296,12 @@ async function processOnChainRedeemableScan(
       store,
       tokenPayouts,
       preview,
-      cashInitialUsd
+      cashInitialUsd,
+      {
+        settlementSource: "onchain_redeemable",
+        conditionId,
+        onChainTxHash: redeemedTxHashesThisCycle.get(conditionId) ?? null,
+      }
     );
     if (settled > 0) {
       logInfo("Synced local positions after on-chain redeem", {
@@ -309,6 +330,7 @@ export async function processSettlements(
   let autoSettled = 0;
   let onChainRedeems = 0;
   redeemedConditionsThisCycle.clear();
+  redeemedTxHashesThisCycle.clear();
 
   if (liveWallet) {
     onChainRedeems += await processOnChainRedeemableScan(
@@ -349,18 +371,22 @@ export async function processSettlements(
     });
     if (!tokenId) {
       store.audit({ leaderId, action: "SKIP", side: "REDEEM", reason: "missing redeem token", preview });
+      store.setDecisionRawEventIds([]);
       continue;
     }
     if (Date.now() - activityMs(activity) > global.maxTradeAgeHours * 3_600_000) {
       store.audit({ leaderId, action: "SKIP", tokenId, side: "REDEEM", reason: "stale redeem activity", preview });
+      store.setDecisionRawEventIds([]);
       continue;
     }
     if ((activity.size ?? 0) < 0.01) {
       store.audit({ leaderId, action: "SKIP", tokenId, side: "REDEEM", reason: "below redeem size", preview });
+      store.setDecisionRawEventIds([]);
       continue;
     }
     if (store.hasSeen(key)) {
       store.audit({ leaderId, action: "SKIP", tokenId, side: "REDEEM", reason: "already seen", preview });
+      store.setDecisionRawEventIds([]);
       continue;
     }
 
@@ -368,6 +394,7 @@ export async function processSettlements(
     if (ourShares <= 0.001) {
       store.markSeen(key, leaderId);
       store.audit({ leaderId, action: "SKIP", tokenId, side: "REDEEM", reason: "no local position", preview });
+      store.setDecisionRawEventIds([]);
       continue;
     }
 
@@ -381,6 +408,7 @@ export async function processSettlements(
       );
       if (!chainOk) {
         store.audit({ leaderId, action: "SKIP", tokenId, side: "REDEEM", reason: "on-chain redeem failed", preview });
+        store.setDecisionRawEventIds([]);
         continue;
       }
       onChainRedeems++;
@@ -395,6 +423,16 @@ export async function processSettlements(
       preview,
       cashInitialUsd: preview ? cashInitialUsd : undefined,
       auditReason: `leader REDEEM ${ourShares} shares -> $${payoutUsd.toFixed(2)}`,
+      exactTerms: {
+        payoutPerShare: activity.size ? (activity.usdcSize ?? 0) / activity.size : 0,
+        conditionId: activity.conditionId ?? null,
+        transactionHash: activity.transactionHash ?? null,
+        outcome: activity.outcome ?? null,
+        winnerTokenIds: [],
+        onChainTxHash: activity.conditionId
+          ? redeemedTxHashesThisCycle.get(activity.conditionId) ?? null
+          : null,
+      },
     });
     if (ok) leaderRedeems++;
     store.setDecisionRawEventIds([]);
@@ -406,13 +444,11 @@ export async function processSettlements(
       tokenId,
       Math.min(global.execution.networkRetryLimit, 1)
     );
-    if (!settlement?.settled) continue;
-
-    const autoSourceId = `token-settlement:${tokenId}:${settlement.payoutPerShare}`;
+    const autoSourceId = `token-settlement-observation:${tokenId}`;
     const autoRaw = store.getActiveExperiment()
       ? store.recordRawEvent({
           sourceId: autoSourceId,
-          payload: { type: "TOKEN_SETTLEMENT", tokenId, ...settlement },
+          payload: { type: "TOKEN_SETTLEMENT", tokenId, settlement },
           sourceTimestamp: Date.now(),
           observedTimestamp: Date.now(),
         })
@@ -422,10 +458,20 @@ export async function processSettlements(
       action: "DETECT",
       tokenId,
       side: "REDEEM",
-      price: settlement.payoutPerShare,
+      price: settlement?.payoutPerShare,
       reason: "token settlement detected",
       preview,
     });
+    if (!settlement) {
+      store.audit({ action: "SKIP", tokenId, side: "REDEEM", reason: "settlement evidence unavailable", reasonCode: "settlement_evidence_unavailable", preview });
+      store.setDecisionRawEventIds([]);
+      continue;
+    }
+    if (!settlement.settled) {
+      store.audit({ action: "SKIP", tokenId, side: "REDEEM", reason: "market unresolved", reasonCode: "market_unresolved", preview });
+      store.setDecisionRawEventIds([]);
+      continue;
+    }
 
     if (liveRedeem) {
       const chainOk = await ensureLiveRedeem(
@@ -435,7 +481,11 @@ export async function processSettlements(
         settlement.conditionId,
         errors
       );
-      if (!chainOk) continue;
+      if (!chainOk) {
+        store.audit({ action: "SKIP", tokenId, side: "REDEEM", reason: "on-chain redeem failed", preview });
+        store.setDecisionRawEventIds([]);
+        continue;
+      }
       onChainRedeems++;
     }
 
@@ -443,7 +493,14 @@ export async function processSettlements(
       tokenId,
       settlement.payoutPerShare,
       preview,
-      preview ? cashInitialUsd : undefined
+      preview ? cashInitialUsd : undefined,
+      {
+        settlementSource: "token_resolution",
+        conditionId: settlement.conditionId ?? null,
+        onChainTxHash: settlement.conditionId
+          ? redeemedTxHashesThisCycle.get(settlement.conditionId) ?? null
+          : null,
+      }
     );
     if (settled > 0) {
       autoSettled += settled;
@@ -463,4 +520,5 @@ export async function processSettlements(
 export function resetSettlementCache(): void {
   settlementCache.clear();
   redeemedConditionsThisCycle.clear();
+  redeemedTxHashesThisCycle.clear();
 }

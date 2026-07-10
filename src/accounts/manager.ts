@@ -25,12 +25,13 @@ import { assertLiveTradingAllowed, assertLiveTradingForAccounts } from "../engin
 import { migrateExistingPreviewToLiveDb } from "../engine/mode-transition.js";
 import { applyProxyFromYaml } from "../util/proxy.js";
 import { provenanceTrustClass, readRuntimeProvenance } from "../experiments/provenance.js";
+import type { ExperimentManifestRow } from "../experiments/manifest.js";
 
 function startAccountExperiment(
   accountId: string,
   config: RuntimeConfig,
   store: StateStore
-): void {
+): ExperimentManifestRow {
   const provenance = readRuntimeProvenance();
   const activeTrust = store.getActiveExperiment(accountId)?.trustClass;
   const requestedTrust = activeTrust === "legacy"
@@ -40,7 +41,7 @@ function startAccountExperiment(
       : store.hasLegacyEvidence() && !activeTrust
         ? "legacy"
         : "candidate";
-  store.startOrResumeExperiment({
+  return store.startOrResumeExperiment({
     accountId,
     candidateAddresses: config.app.leaders
       .filter((leader) => leader.enabled && leader.address)
@@ -250,16 +251,32 @@ export class AccountManager {
     }
 
     const experimentStores = [...new Set([...stagedRuntimes.values()].map((runtime) => runtime.store))];
+    const transitionIds = new Map<StateStore, string[]>();
     try {
       for (const store of experimentStores) store.beginExperimentBatch();
       for (const runtime of stagedRuntimes.values()) {
-        startAccountExperiment(runtime.id, runtime.config, runtime.store);
+        const experiment = startAccountExperiment(runtime.id, runtime.config, runtime.store);
+        if (experiment.state === "PREPARED") {
+          const ids = transitionIds.get(runtime.store) ?? [];
+          ids.push(experiment.experimentId);
+          transitionIds.set(runtime.store, ids);
+        }
       }
       for (const store of experimentStores) store.commitExperimentBatch();
+      for (const store of experimentStores) {
+        store.finalizePreparedExperiments(transitionIds.get(store) ?? []);
+      }
     } catch (error) {
       for (const store of experimentStores) {
         try {
           store.rollbackExperimentBatch();
+        } catch {
+          // Preserve the manifest staging error.
+        }
+      }
+      for (const store of experimentStores) {
+        try {
+          store.abortPreparedExperiments(transitionIds.get(store) ?? []);
         } catch {
           // Preserve the manifest staging error.
         }

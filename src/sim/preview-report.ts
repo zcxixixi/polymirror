@@ -851,7 +851,7 @@ export function readPreviewAccountReport(
                   lockfile_hash AS lockfileHash, schema_version AS schemaVersion,
                   trust_class AS trustClass
            FROM experiments
-           WHERE account_id = ? AND ended_at IS NULL
+           WHERE account_id = ? AND ended_at IS NULL${columnExists(db, "experiments", "state") ? " AND state = 'ACTIVE'" : ""}
            ORDER BY started_at DESC LIMIT 1`
         ).get(options.accountId) as PreviewExperimentProvenance | undefined
       : undefined;

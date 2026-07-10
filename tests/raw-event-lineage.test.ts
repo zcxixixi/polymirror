@@ -43,6 +43,12 @@ describe("raw event lineage", () => {
       sourceTimestamp: 999,
       observedTimestamp: 2000,
     });
+    store.recordRawEvent({
+      sourceId: "tx-1:token:BUY",
+      payload: { ...payload, price: 0.7 },
+      sourceTimestamp: 999,
+      observedTimestamp: 2000,
+    });
 
     expect(duplicate.rawEventId).toBe(first.rawEventId);
     expect(store.listRawEvents()).toEqual([
@@ -57,6 +63,12 @@ describe("raw event lineage", () => {
       expect.objectContaining({ sourceTimestamp: 123, observedTimestamp: 1000 }),
       expect.objectContaining({ sourceTimestamp: 999, observedTimestamp: 2000 }),
     ]);
+  });
+
+  it("rolls back audit when linked decision persistence fails", () => {
+    store.setDecisionRawEventIds(["missing-raw-event"]);
+    expect(() => store.audit({ action: "SKIP", reason: "already seen", preview: true })).toThrow();
+    expect(store.listAuditLog({ action: "SKIP" }).total).toBe(0);
   });
 
   it("deduplicates source-less events by the full normalized payload hash", () => {
@@ -84,7 +96,7 @@ describe("raw event lineage", () => {
     const decision = {
       rawEventId: raw.rawEventId,
       action: "COPY" as const,
-      reasonCode: "fixed_order",
+      reasonCode: "copy_executed",
       exactTerms: { side: "BUY", price: 0.5, size: 2, feeUsd: 0.01 },
       decidedAt: 1100,
     };
@@ -96,7 +108,7 @@ describe("raw event lineage", () => {
       expect.objectContaining({
         rawEventId: raw.rawEventId,
         action: "COPY",
-        reasonCode: "fixed_order",
+        reasonCode: "copy_executed",
         exactTerms: decision.exactTerms,
       }),
     ]);

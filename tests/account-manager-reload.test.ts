@@ -244,15 +244,16 @@ describe("AccountManager.reloadConfig", () => {
     const first = manager.require("first");
     const before = first.store.listExperiments();
     const secondStore = manager.require("second").store;
-    const failure = vi.spyOn(secondStore, "startOrResumeExperiment")
-      .mockImplementation(() => { throw new Error("manifest commit failed"); });
+    const failure = vi.spyOn(secondStore, "finalizePreparedExperiments")
+      .mockImplementation(() => { throw new Error("manifest finalize failed"); });
     try {
       writeConfig(1_000, 8_080, { mode: "none" }, [
         account("first", "First", { id: "first-leader", address: LEADER_A }),
         account("second", "Second", { id: "second-leader", address: LEADER_B }),
       ], 19);
-      await expect(manager.reloadConfig()).rejects.toThrow("manifest commit failed");
-      expect(first.store.listExperiments()).toEqual(before);
+      await expect(manager.reloadConfig()).rejects.toThrow("manifest finalize failed");
+      expect(first.store.getActiveExperiment("first")?.experimentId).toBe(before[0]?.experimentId);
+      expect(first.store.listExperiments().some((row) => row.state === "ABORTED")).toBe(true);
       expect(manager.require("first").config.app.global.risk.maxOrderUsd).toBe(20);
     } finally {
       failure.mockRestore();

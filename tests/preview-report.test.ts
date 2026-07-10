@@ -48,9 +48,37 @@ describe("readPreviewAccountReport", () => {
       gitSha: "git-report",
       imageDigest: "sha256:image-report",
       lockfileHash: "lock-report",
-      schemaVersion: 2,
+      schemaVersion: 3,
       trustClass: "candidate",
     });
+  });
+
+  it("does not expose a prepared experiment before batch finalization", () => {
+    const config = previewRuntimeConfig();
+    const base = store.startOrResumeExperiment({
+      accountId: "candidate-a",
+      candidateAddresses: ["0xaaa"],
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "a".repeat(64),
+      trustClass: "verified",
+    }, 1000);
+    const changed = structuredClone(config);
+    changed.app.global.risk.maxOrderUsd += 1;
+    store.beginExperimentBatch();
+    store.startOrResumeExperiment({
+      accountId: "candidate-a",
+      candidateAddresses: ["0xaaa"],
+      config: changed,
+      gitSha: "git-b",
+      imageDigest: "image-b",
+      lockfileHash: "b".repeat(64),
+      trustClass: "verified",
+    }, 2000);
+    store.commitExperimentBatch();
+    const report = readPreviewAccountReport({ accountId: "candidate-a", dbPath });
+    expect(report.provenance?.experimentId).toBe(base.experimentId);
   });
 
   it("keeps a fresh zero-sample strategy in collecting state", () => {

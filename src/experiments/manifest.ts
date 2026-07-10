@@ -63,9 +63,13 @@ export function decisionConfigProjection(config: RuntimeConfig): unknown {
   };
 }
 
+export function canonicalDecisionConfigJson(config: RuntimeConfig): string {
+  return JSON.stringify(canonicalValue(decisionConfigProjection(config)));
+}
+
 export function configSha256(config: RuntimeConfig): string {
   return createHash("sha256")
-    .update(JSON.stringify(canonicalValue(decisionConfigProjection(config))))
+    .update(canonicalDecisionConfigJson(config))
     .digest("hex");
 }
 
@@ -99,4 +103,6 @@ export interface ExperimentManifestRow {
   endedAt: number | null;
   sealedAt: number | null;
   trustClass: ExperimentTrustClass;
+  state: "PREPARED" | "ACTIVE" | "ENDED" | "ABORTED";
+  previousExperimentId: string | null;
 }

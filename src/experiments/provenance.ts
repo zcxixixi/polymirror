@@ -65,6 +65,31 @@ export function payloadSha256(payload: unknown): string {
 }
 
 export type DecisionAction = "DETECT" | "SKIP" | "COPY" | "SELL" | "REDEEM";
+export type DecisionReasonCode =
+  | "detected"
+  | "copy_executed"
+  | "sell_executed"
+  | "redeem_settled"
+  | "stale_activity"
+  | "missing_redeem_condition"
+  | "unsupported_activity_type"
+  | "missing_trade_asset"
+  | "missing_trade_side"
+  | "below_minimum_activity_size"
+  | "poll_rejected_activity"
+  | "already_seen"
+  | "unsupported_or_incomplete_activity"
+  | "no_local_position"
+  | "onchain_redeem_failed"
+  | "missing_redeem_token"
+  | "price_filter"
+  | "cash_limit"
+  | "position_limit"
+  | "policy_skip"
+  | "untracked_token"
+  | "settlement_evidence_unavailable"
+  | "market_unresolved"
+  | "winner_set_unavailable";
 
 export interface RawEventRow {
   rawEventId: string;
@@ -78,6 +103,7 @@ export interface RawEventRow {
 
 export interface RawEventObservationRow {
   observationId: number;
+  observationKey: string | null;
   rawEventId: string;
   payloadHash: string;
   payload: unknown;
@@ -90,7 +116,7 @@ export interface DecisionRow {
   experimentId: string;
   rawEventId: string;
   action: DecisionAction;
-  reasonCode: string;
+  reasonCode: DecisionReasonCode;
   exactTerms: Record<string, unknown>;
   decidedAt: number;
 }

@@ -15,6 +15,23 @@ beforeEach(() => {
 });
 
 describe("pollLeaders activity cache", () => {
+  it("returns every fetched activity with stable candidate classification", async () => {
+    const now = Date.now();
+    const stale: Activity = { type: "TRADE", timestamp: now - 2 * 3_600_000, asset: "stale", side: "BUY", size: 2 };
+    const tiny: Activity = { type: "TRADE", timestamp: now, asset: "tiny", side: "BUY", size: 0.001 };
+    const accepted: Activity = { type: "TRADE", timestamp: now, asset: "ok", side: "BUY", size: 2 };
+    mockGetActivity.mockImplementation(async (_base, params) => params.type === "TRADE" ? [stale, tiny, accepted] : []);
+    const global = previewRuntimeConfig().app.global;
+    global.maxTradeAgeHours = 1;
+    const result = await pollLeaders(new LeaderRegistry([testLeader()]), global);
+    expect(result[0]?.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ activity: stale, candidate: false, rejectionReasonCode: "stale_activity" }),
+      expect.objectContaining({ activity: tiny, candidate: false, rejectionReasonCode: "below_minimum_activity_size" }),
+      expect.objectContaining({ activity: accepted, candidate: true }),
+    ]));
+    expect(result[0]?.candidates).toEqual([accepted]);
+  });
+
   it("shares Data API fetches for the same leader address across poll calls", async () => {
     const trade: Activity = {
       type: "TRADE",

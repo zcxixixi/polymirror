@@ -142,25 +142,17 @@ async function settleResolvedPreviewPositions(
     settlementChecks.set(checkKey, now);
 
     let resolved: Awaited<ReturnType<typeof fetchResolvedMarketOutcome>> | null = null;
+    let resolutionError: string | null = null;
     try {
       resolved = await fetchResolvedMarketOutcome(condition.slug);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      resolutionError = msg;
       errors.push(`${condition.leaderId}: auto settle failed — ${msg}`);
-      store.audit({
-        leaderId: condition.leaderId,
-        action: "ERROR",
-        tokenId: condition.conditionId,
-        side: "REDEEM",
-        reason: msg,
-        preview: true,
-      });
-      continue;
+      resolved = null;
     }
 
-    if (!resolved?.closed || resolved.winnerTokenIds.length === 0) continue;
-
-    const sourceKey = `auto-settle:${condition.leaderId}:${condition.conditionId}:${resolved.winnerTokenIds.join(",")}`;
+    const sourceKey = `auto-settle-observation:${condition.leaderId}:${condition.conditionId}`;
     const raw = store.getActiveExperiment()
       ? store.recordRawEvent({
           sourceId: sourceKey,
@@ -169,7 +161,8 @@ async function settleResolvedPreviewPositions(
             leaderId: condition.leaderId,
             conditionId: condition.conditionId,
             slug: condition.slug,
-            winnerTokenIds: resolved.winnerTokenIds,
+            resolution: resolved,
+            resolutionError,
           },
           sourceTimestamp: now,
           observedTimestamp: Date.now(),
@@ -184,6 +177,21 @@ async function settleResolvedPreviewPositions(
       reason: "auto settlement detected",
       preview: true,
     });
+    if (!resolved) {
+      store.audit({ leaderId: condition.leaderId, action: "SKIP", tokenId: condition.conditionId, side: "REDEEM", reason: "settlement evidence unavailable", reasonCode: "settlement_evidence_unavailable", preview: true });
+      store.setDecisionRawEventIds([]);
+      continue;
+    }
+    if (!resolved.closed) {
+      store.audit({ leaderId: condition.leaderId, action: "SKIP", tokenId: condition.conditionId, side: "REDEEM", reason: "market unresolved", reasonCode: "market_unresolved", preview: true });
+      store.setDecisionRawEventIds([]);
+      continue;
+    }
+    if (resolved.winnerTokenIds.length === 0) {
+      store.audit({ leaderId: condition.leaderId, action: "SKIP", tokenId: condition.conditionId, side: "REDEEM", reason: "winner set unavailable", reasonCode: "winner_set_unavailable", preview: true });
+      store.setDecisionRawEventIds([]);
+      continue;
+    }
 
     const result = store.settleCondition({
       leaderId: condition.leaderId,
@@ -329,7 +337,10 @@ export async function runCopyCycle(
       errors.push(`${result.leaderId}: poll failed — ${result.error}`);
     }
     fetched += result.fetched;
-    for (const activity of result.candidates) {
+    const observations = result.observations
+      ?? result.candidates.map((activity) => ({ activity, candidate: true as const }));
+    for (const observation of observations) {
+      const activity = observation.activity;
       const sourceKey = tradeEventKey(activity);
       const rawEvent = store.getActiveExperiment()
         ? store.recordRawEvent({
@@ -340,6 +351,33 @@ export async function runCopyCycle(
           })
         : undefined;
       if (rawEvent) rawEventIdBySourceKey.set(sourceKey, rawEvent.rawEventId);
+      if (!observation.candidate) {
+        store.setDecisionRawEventIds(rawEvent ? [rawEvent.rawEventId] : []);
+        store.audit({
+          leaderId: result.leaderId,
+          action: "DETECT",
+          tokenId: activity.asset ?? activity.conditionId,
+          side: activity.side ?? activity.type,
+          size: activity.size,
+          price: activity.price,
+          reason: "raw activity detected",
+          preview,
+        });
+        store.audit({
+          leaderId: result.leaderId,
+          action: "SKIP",
+          tokenId: activity.asset ?? activity.conditionId,
+          side: activity.side ?? activity.type,
+          size: activity.size,
+          price: activity.price,
+          reason: observation.rejectionReasonCode ?? "poll rejected activity",
+          reasonCode: observation.rejectionReasonCode ?? "poll_rejected_activity",
+          preview,
+        });
+        store.setDecisionRawEventIds([]);
+        skipped++;
+        continue;
+      }
       rawQueue.push({
         leaderId: result.leaderId,
         activity,

@@ -7,7 +7,22 @@ export interface PollResult {
   leaderId: string;
   fetched: number;
   candidates: Activity[];
+  observations?: PollObservation[];
   error?: string;
+}
+
+export type PollRejectionReasonCode =
+  | "stale_activity"
+  | "missing_redeem_condition"
+  | "unsupported_activity_type"
+  | "missing_trade_asset"
+  | "missing_trade_side"
+  | "below_minimum_activity_size";
+
+export interface PollObservation {
+  activity: Activity;
+  candidate: boolean;
+  rejectionReasonCode?: PollRejectionReasonCode;
 }
 
 export type PollActivityCache = Map<string, Promise<Activity[]>>;
@@ -67,18 +82,25 @@ export async function pollLeaders(
 
       const maxAgeMs = global.maxTradeAgeHours * 3600 * 1000;
       const now = Date.now();
-      const candidates = activities.filter((a) => {
+      const observations = activities.map((a): PollObservation => {
         const ts = activityMs(a);
-        if (now - ts > maxAgeMs) return false;
-        if (a.type === "REDEEM") return Boolean(a.conditionId);
-        if (a.type !== "TRADE" || !a.asset || !a.side) return false;
-        return (a.size ?? 0) >= 0.01;
+        if (now - ts > maxAgeMs) return { activity: a, candidate: false, rejectionReasonCode: "stale_activity" };
+        if (a.type === "REDEEM") return a.conditionId
+          ? { activity: a, candidate: true }
+          : { activity: a, candidate: false, rejectionReasonCode: "missing_redeem_condition" };
+        if (a.type !== "TRADE") return { activity: a, candidate: false, rejectionReasonCode: "unsupported_activity_type" };
+        if (!a.asset) return { activity: a, candidate: false, rejectionReasonCode: "missing_trade_asset" };
+        if (!a.side) return { activity: a, candidate: false, rejectionReasonCode: "missing_trade_side" };
+        if ((a.size ?? 0) < 0.01) return { activity: a, candidate: false, rejectionReasonCode: "below_minimum_activity_size" };
+        return { activity: a, candidate: true };
       });
+      const candidates = observations.filter((row) => row.candidate).map((row) => row.activity);
 
       return {
         leaderId: leader.id,
         fetched: activities.length,
         candidates,
+        observations,
       };
     })
   );
@@ -87,6 +109,6 @@ export async function pollLeaders(
     const leaderId = leaders[i]!.id;
     if (result.status === "fulfilled") return result.value;
     const msg = result.reason instanceof Error ? result.reason.message : String(result.reason);
-    return { leaderId, fetched: 0, candidates: [], error: msg };
+    return { leaderId, fetched: 0, candidates: [], observations: [], error: msg };
   });
 }

@@ -4,7 +4,7 @@ import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CopyPriceMode } from "../config/types.js";
 import {
-  canonicalRedactedConfig,
+  canonicalDecisionConfigJson,
   configSha256,
   newExperimentId,
   type ExperimentManifestInput,
@@ -15,13 +15,14 @@ import {
   payloadSha256,
   type DecisionAction,
   type DecisionRow,
+  type DecisionReasonCode,
   type RawEventRow,
   type RawEventObservationRow,
 } from "../experiments/provenance.js";
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 2;
+export const STATE_SCHEMA_VERSION = 3;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 
@@ -139,6 +140,7 @@ export interface RecordRedeemSettlementEntry {
   preview: boolean;
   cashInitialUsd?: number;
   auditReason?: string;
+  exactTerms?: Record<string, unknown>;
 }
 
 export interface CopyFillResult {
@@ -232,6 +234,21 @@ function feeAdjustedPrice(
   if (shares <= 0 || notionalUsd <= 0) return fallback;
   const cashUsd = side === "BUY" ? notionalUsd + feeUsd : Math.max(0, notionalUsd - feeUsd);
   return cashUsd / shares;
+}
+
+function stableSkipReasonCode(reason: string | undefined): DecisionReasonCode {
+  const value = reason?.toLowerCase() ?? "";
+  if (value === "already seen") return "already_seen";
+  if (value.includes("unsupported") || value.includes("incomplete")) return "unsupported_or_incomplete_activity";
+  if (value.includes("below") && value.includes("size")) return "below_minimum_activity_size";
+  if (value.includes("stale")) return "stale_activity";
+  if (value.includes("no local")) return "no_local_position";
+  if (value.includes("on-chain redeem failed")) return "onchain_redeem_failed";
+  if (value.includes("missing") && value.includes("token")) return "missing_redeem_token";
+  if (value.includes("price")) return "price_filter";
+  if (value.includes("cash")) return "cash_limit";
+  if (value.includes("position")) return "position_limit";
+  return "policy_skip";
 }
 
 function parseMarketJson(value: string | null): TokenMarketEntry | undefined {
@@ -446,10 +463,10 @@ export class StateStore {
         started_at INTEGER NOT NULL,
         ended_at INTEGER,
         sealed_at INTEGER,
-        trust_class TEXT NOT NULL
+        trust_class TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'ACTIVE',
+        previous_experiment_id TEXT
       );
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
-        ON experiments(account_id) WHERE ended_at IS NULL;
       CREATE TRIGGER IF NOT EXISTS experiments_no_delete
         BEFORE DELETE ON experiments BEGIN SELECT RAISE(ABORT, 'experiments are append-only'); END;
       CREATE TRIGGER IF NOT EXISTS experiments_immutable_core
@@ -485,6 +502,7 @@ export class StateStore {
         BEFORE DELETE ON raw_events BEGIN SELECT RAISE(ABORT, 'raw events are append-only'); END;
       CREATE TABLE IF NOT EXISTS raw_event_observations (
         observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_key TEXT,
         raw_event_id TEXT NOT NULL REFERENCES raw_events(raw_event_id),
         payload_hash TEXT NOT NULL,
         normalized_payload_json TEXT NOT NULL,
@@ -517,10 +535,18 @@ export class StateStore {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`
     ).run(String(STATE_SCHEMA_VERSION));
     this.migrate();
+    this.db.exec(`
+      DROP INDEX IF EXISTS idx_experiments_active_account;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
+        ON experiments(account_id) WHERE state = 'ACTIVE' AND ended_at IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_event_observations_identity
+        ON raw_event_observations(observation_key) WHERE observation_key IS NOT NULL;
+    `);
   }
 
   startOrResumeExperiment(input: ExperimentManifestInput, now = Date.now()): ExperimentManifestRow {
     const hash = configSha256(input.config);
+    const preparing = this.db.inTransaction;
     return this.db.transaction(() => {
       const active = this.getActiveExperiment(input.accountId);
       const candidates = [...input.candidateAddresses].sort();
@@ -532,29 +558,33 @@ export class StateStore {
         && active.schemaVersion === STATE_SCHEMA_VERSION
         && active.trustClass === input.trustClass;
       if (sameIdentity) return active!;
-      if (active) {
+      if (active && !preparing) {
         this.db.prepare("UPDATE experiments SET ended_at = ? WHERE experiment_id = ?")
           .run(now, active.experimentId);
+        this.db.prepare("UPDATE experiments SET state = 'ENDED' WHERE experiment_id = ?")
+          .run(active.experimentId);
       }
       const experimentId = newExperimentId(input.accountId, hash);
       this.db.prepare(
         `INSERT INTO experiments
          (experiment_id, account_id, candidate_addresses_json, canonical_config_json,
           config_hash, git_sha, image_digest, lockfile_hash, schema_version,
-          started_at, trust_class)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          started_at, trust_class, state, previous_experiment_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         experimentId,
         input.accountId,
         JSON.stringify(candidates),
-        canonicalRedactedConfig(input.config),
+        canonicalDecisionConfigJson(input.config),
         hash,
         input.gitSha,
         input.imageDigest,
         input.lockfileHash,
         STATE_SCHEMA_VERSION,
         now,
-        input.trustClass
+        input.trustClass,
+        preparing ? "PREPARED" : "ACTIVE",
+        active?.experimentId ?? null
       );
       return this.getExperiment(experimentId)!;
     })();
@@ -568,6 +598,7 @@ export class StateStore {
               git_sha AS gitSha, image_digest AS imageDigest, lockfile_hash AS lockfileHash,
               schema_version AS schemaVersion, started_at AS startedAt, ended_at AS endedAt,
               sealed_at AS sealedAt, trust_class AS trustClass
+              , state, previous_experiment_id AS previousExperimentId
        FROM experiments WHERE experiment_id = ?`
     ).get(experimentId) as (Omit<ExperimentManifestRow, "candidateAddresses"> & { candidateAddressesJson: string }) | undefined;
     if (!row) return undefined;
@@ -578,7 +609,7 @@ export class StateStore {
   getActiveExperiment(accountId?: string): ExperimentManifestRow | undefined {
     const row = this.db.prepare(
       `SELECT experiment_id AS experimentId FROM experiments
-       WHERE ended_at IS NULL AND (? IS NULL OR account_id = ?) ORDER BY started_at DESC LIMIT 1`
+       WHERE state = 'ACTIVE' AND ended_at IS NULL AND (? IS NULL OR account_id = ?) ORDER BY started_at DESC LIMIT 1`
     ).get(accountId ?? null, accountId ?? null) as { experimentId: string } | undefined;
     return row ? this.getExperiment(row.experimentId) : undefined;
   }
@@ -590,6 +621,41 @@ export class StateStore {
     return ids.map((row) => this.getExperiment(row.experimentId)!);
   }
 
+  finalizePreparedExperiments(experimentIds: string[], now = Date.now()): void {
+    if (experimentIds.length === 0) return;
+    this.db.transaction(() => {
+      for (const experimentId of experimentIds) {
+        const row = this.db.prepare(
+          "SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId FROM experiments WHERE experiment_id = ? AND state = 'PREPARED'"
+        ).get(experimentId) as { experimentId: string; previousExperimentId: string | null } | undefined;
+        if (!row) continue;
+        if (row.previousExperimentId) {
+          this.db.prepare("UPDATE experiments SET state = 'ENDED', ended_at = ? WHERE experiment_id = ? AND state = 'ACTIVE'")
+            .run(now, row.previousExperimentId);
+        }
+        this.db.prepare("UPDATE experiments SET state = 'ACTIVE' WHERE experiment_id = ? AND state = 'PREPARED'")
+          .run(row.experimentId);
+      }
+    })();
+  }
+
+  abortPreparedExperiments(experimentIds: string[], now = Date.now()): void {
+    if (experimentIds.length === 0) return;
+    this.db.transaction(() => {
+      for (const experimentId of experimentIds) {
+        const row = this.db.prepare(
+          `SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId
+           FROM experiments WHERE experiment_id = ? AND state IN ('PREPARED', 'ACTIVE') AND previous_experiment_id IS NOT NULL`
+        ).get(experimentId) as { experimentId: string; previousExperimentId: string } | undefined;
+        if (!row) continue;
+        this.db.prepare("UPDATE experiments SET state = 'ABORTED', ended_at = ? WHERE experiment_id = ?")
+          .run(now, row.experimentId);
+        this.db.prepare("UPDATE experiments SET state = 'ACTIVE', ended_at = NULL WHERE experiment_id = ?")
+          .run(row.previousExperimentId);
+      }
+    })();
+  }
+
   recordRawEvent(input: {
     sourceId?: string;
     payload: unknown;
@@ -597,6 +663,7 @@ export class StateStore {
     observedTimestamp?: number;
     experimentId?: string;
   }): RawEventRow {
+    return this.db.transaction(() => {
     const experiment = input.experimentId
       ? this.getExperiment(input.experimentId)
       : this.getActiveExperiment();
@@ -627,11 +694,15 @@ export class StateStore {
       : this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND payload_hash = ?")
           .get(experiment.experimentId, payloadHash) as { rawEventId: string };
     const observedTimestamp = input.observedTimestamp ?? Date.now();
+    const observationKey = createHash("sha256")
+      .update([row.rawEventId, payloadHash, input.sourceTimestamp, observedTimestamp].join("\n"))
+      .digest("hex");
     this.db.prepare(
-      `INSERT INTO raw_event_observations
-       (raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT OR IGNORE INTO raw_event_observations
+       (observation_key, raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
+       VALUES (?, ?, ?, ?, ?, ?)`
     ).run(
+      observationKey,
       row.rawEventId,
       payloadHash,
       normalizedPayloadJson(input.payload),
@@ -639,6 +710,7 @@ export class StateStore {
       observedTimestamp
     );
     return this.getRawEvent(row.rawEventId)!;
+    })();
   }
 
   private getRawEvent(rawEventId: string): RawEventRow | undefined {
@@ -662,7 +734,8 @@ export class StateStore {
 
   listRawEventObservations(rawEventId: string): RawEventObservationRow[] {
     const rows = this.db.prepare(
-      `SELECT observation_id AS observationId, raw_event_id AS rawEventId,
+      `SELECT observation_id AS observationId, observation_key AS observationKey,
+              raw_event_id AS rawEventId,
               payload_hash AS payloadHash, normalized_payload_json AS payloadJson,
               source_timestamp AS sourceTimestamp, observed_timestamp AS observedTimestamp
        FROM raw_event_observations WHERE raw_event_id = ? ORDER BY observation_id`
@@ -676,7 +749,7 @@ export class StateStore {
   recordDecision(input: {
     rawEventId: string;
     action: DecisionAction;
-    reasonCode: string;
+    reasonCode: DecisionReasonCode;
     exactTerms: Record<string, unknown>;
     decidedAt?: number;
   }): DecisionRow {
@@ -737,6 +810,17 @@ export class StateStore {
   }
 
   private migrate(): void {
+    const experimentCols = this.db.prepare("PRAGMA table_info(experiments)").all() as { name: string }[];
+    if (!experimentCols.some((column) => column.name === "state")) {
+      this.db.exec("ALTER TABLE experiments ADD COLUMN state TEXT NOT NULL DEFAULT 'ACTIVE'");
+    }
+    if (!experimentCols.some((column) => column.name === "previous_experiment_id")) {
+      this.db.exec("ALTER TABLE experiments ADD COLUMN previous_experiment_id TEXT");
+    }
+    const observationCols = this.db.prepare("PRAGMA table_info(raw_event_observations)").all() as { name: string }[];
+    if (!observationCols.some((column) => column.name === "observation_key")) {
+      this.db.exec("ALTER TABLE raw_event_observations ADD COLUMN observation_key TEXT");
+    }
     const cols = this.db.prepare("PRAGMA table_info(positions)").all() as { name: string }[];
     if (!cols.some((c) => c.name === "avg_entry_price")) {
       this.db.exec("ALTER TABLE positions ADD COLUMN avg_entry_price REAL NOT NULL DEFAULT 0");
@@ -1174,6 +1258,15 @@ export class StateStore {
           price: closedPositions,
           reason: `settled ${closedPositions} position(s); pnl $${realizedPnl.toFixed(2)}`,
           preview: entry.preview,
+          exactTerms: {
+            settlementSource: "condition_resolution",
+            sourceIds: entry.sourceKeys ?? [],
+            winnerTokenIds: [...winners].sort(),
+            costBasisUsd: costUsd,
+            grossPayoutUsd: payoutUsd,
+            realizedPnlUsd: realizedPnl,
+            conditionId: entry.conditionId,
+          },
         });
       }
 
@@ -1229,6 +1322,14 @@ export class StateStore {
           entry.auditReason ??
           `settled ${row.shares} shares; pnl $${realizedPnl.toFixed(2)}`,
         preview: entry.preview,
+        exactTerms: {
+          settlementSource: "leader_redeem",
+          sourceId: entry.tradeKey,
+          costBasisUsd: costUsd,
+          grossPayoutUsd: payoutUsd,
+          realizedPnlUsd: realizedPnl,
+          ...entry.exactTerms,
+        },
       });
       return true;
     })();
@@ -1238,7 +1339,8 @@ export class StateStore {
     tokenId: string,
     payoutPerShare: number,
     preview: boolean,
-    cashInitialUsd?: number
+    cashInitialUsd?: number,
+    settlementTerms?: Record<string, unknown>
   ): number {
     return this.db.transaction(() => {
       const rows = this.db
@@ -1278,6 +1380,15 @@ export class StateStore {
           price: row.shares,
           reason: `token settlement payout ${payoutPerShare}; pnl $${realizedPnl.toFixed(2)}`,
           preview,
+          exactTerms: {
+            settlementSource: "token_settlement",
+            payoutPerShare,
+            winnerTokenIds: payoutPerShare > 0 ? [tokenId] : [],
+            costBasisUsd: costUsd,
+            grossPayoutUsd: payoutUsd,
+            realizedPnlUsd: realizedPnl,
+            ...settlementTerms,
+          },
         });
         settled++;
       }
@@ -2040,7 +2151,9 @@ export class StateStore {
     reason?: string;
     preview: boolean;
     exactTerms?: Record<string, unknown>;
+    reasonCode?: DecisionReasonCode;
   }): void {
+    this.db.transaction(() => {
     this.db
       .prepare(
         `INSERT INTO audit_log
@@ -2069,7 +2182,7 @@ export class StateStore {
         ? "SELL"
         : entry.action;
     if (decisionAction) {
-      const reasonCode = decisionAction === "DETECT"
+      const reasonCode = entry.reasonCode ?? (decisionAction === "DETECT"
         ? "detected"
         : decisionAction === "COPY"
           ? "copy_executed"
@@ -2077,11 +2190,7 @@ export class StateStore {
             ? "sell_executed"
             : decisionAction === "REDEEM"
               ? "redeem_settled"
-              : (entry.reason ?? "unspecified")
-                  .trim()
-                  .toLowerCase()
-                  .replace(/[^a-z0-9]+/g, "_")
-                  .replace(/^_+|_+$/g, "") || "unspecified";
+              : stableSkipReasonCode(entry.reason));
       const exactTerms: Record<string, unknown> = {
         leaderId: entry.leaderId ?? null,
         tokenId: entry.tokenId ?? null,
@@ -2100,6 +2209,7 @@ export class StateStore {
         this.recordDecision({ rawEventId, action: decisionAction, reasonCode, exactTerms });
       }
     }
+    })();
   }
 
   getDailyVolumeUsd(): number {

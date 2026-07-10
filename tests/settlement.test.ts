@@ -133,7 +133,38 @@ describe("processSettlements", () => {
     await processSettlements(new LeaderRegistry([leader]), globalBase, store, true);
     expect(store.listRawEvents()).toHaveLength(1);
     expect(store.listDecisions()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "SKIP", reasonCode: "below_redeem_size" }),
+      expect.objectContaining({ action: "SKIP", reasonCode: "below_minimum_activity_size" }),
+    ]));
+    const decisionCount = store.listDecisions().length;
+    store.audit({ action: "SKIP", reason: "unrelated audit", preview: true });
+    expect(store.listDecisions()).toHaveLength(decisionCount);
+  });
+
+  it("persists untracked on-chain redeemable observations before filtering", async () => {
+    seedPosition("tracked-token");
+    startExperiment(false);
+    vi.doMock("../src/monitor/data-api.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/monitor/data-api.js")>()),
+      getActivity: vi.fn(async () => []),
+    }));
+    vi.doMock("../src/executor/redeem.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/executor/redeem.js")>()),
+      listRedeemablePositions: vi.fn(async () => [{
+        conditionId: "untracked-condition",
+        tokenId: "untracked-token",
+        size: 1,
+        payoutPerShare: 1,
+      }]),
+      redeemConditionOnChain: vi.fn(),
+    }));
+    const { processSettlements, resetSettlementCache } = await import("../src/engine/settlement.js");
+    resetSettlementCache();
+    await processSettlements(new LeaderRegistry([leader]), { ...globalBase, previewMode: false }, store, false, { wallet });
+    expect(store.listRawEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: expect.stringContaining("onchain-redeemable") }),
+    ]));
+    expect(store.listDecisions()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "SKIP", reasonCode: "untracked_token" }),
     ]));
   });
 
@@ -181,6 +212,15 @@ describe("processSettlements", () => {
         expect.objectContaining({ action: "REDEEM", reasonCode: "redeem_settled" }),
       ])
     );
+    expect(store.listDecisions().find((decision) => decision.action === "REDEEM")?.exactTerms)
+      .toMatchObject({
+        settlementSource: "leader_redeem",
+        sourceId: "0xredeem:token-a:REDEEM",
+        payoutPerShare: 1,
+        costBasisUsd: 5,
+        grossPayoutUsd: 10,
+        realizedPnlUsd: 5,
+      });
   });
 
   it("keeps live local positions open when on-chain redeem fails", async () => {
@@ -283,5 +323,7 @@ describe("processSettlements", () => {
     expect(store.hasSeen("0xredeem-ok:token-a:REDEEM")).toBe(true);
     expect(store.listRawEvents().length).toBeGreaterThanOrEqual(1);
     expect(store.listDecisions().some((decision) => decision.action === "REDEEM")).toBe(true);
+    expect(store.listDecisions().find((decision) => decision.action === "REDEEM")?.exactTerms)
+      .toMatchObject({ onChainTxHash: "0xtx", conditionId: "0xcondition" });
   });
 });

@@ -671,7 +671,7 @@ describe("runCopyCycle", () => {
     expect(store.getDailyRealizedPnl()).toBe(5);
     expect(store.listAuditLog({ action: "REDEEM" }).total).toBe(1);
     expect(mockFetchResolvedMarketOutcome).toHaveBeenCalledWith(slug);
-    expect(store.listRawEvents().some((event) => event.sourceId?.startsWith("auto-settle:"))).toBe(true);
+    expect(store.listRawEvents().some((event) => event.sourceId?.startsWith("auto-settle"))).toBe(true);
     expect(store.listDecisions().some((decision) => decision.action === "REDEEM")).toBe(true);
   });
 

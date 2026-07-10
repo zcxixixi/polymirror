@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { canonicalRedactedConfig, configSha256 } from "../src/experiments/manifest.js";
 import { provenanceTrustClass, readRuntimeProvenance } from "../src/experiments/provenance.js";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { StateStore } from "../src/state/store.js";
 import { previewRuntimeConfig } from "./helpers/fixtures.js";
 
@@ -100,6 +101,8 @@ describe("experiment manifest", () => {
     };
 
     const first = store.startOrResumeExperiment(metadata, 1000);
+    expect(createHash("sha256").update(first.canonicalConfigJson).digest("hex")).toBe(first.configHash);
+    expect(first.canonicalConfigJson).not.toContain("privateKey");
     const resumed = store.startOrResumeExperiment(metadata, 2000);
     expect(resumed.experimentId).toBe(first.experimentId);
     expect(store.listExperiments()).toHaveLength(1);
@@ -113,6 +116,28 @@ describe("experiment manifest", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ startedAt: 1000, endedAt: 3000 });
     expect(rows[1]).toMatchObject({ startedAt: 3000, endedAt: null });
+    store.close();
+  });
+
+  it("persists only allowlisted decision fields", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-experiment-allowlist-"));
+    dirs.push(dir);
+    const store = new StateStore(join(dir, "preview.db"));
+    const config = previewRuntimeConfig() as unknown as Record<string, any>;
+    config.wallet.mnemonic = "alpha beta secret";
+    config.wallet.seedPhrase = "seed secret";
+    config.wallet.signingMaterial = { blob: "signing secret" };
+    config.app.global.futureOperationalSecret = "unknown secret";
+    const row = store.startOrResumeExperiment({
+      accountId: "allowlist",
+      candidateAddresses: [],
+      config: config as never,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "a".repeat(64),
+      trustClass: "verified",
+    });
+    expect(row.canonicalConfigJson).not.toMatch(/mnemonic|seedPhrase|signingMaterial|futureOperationalSecret|secret/i);
     store.close();
   });
 
