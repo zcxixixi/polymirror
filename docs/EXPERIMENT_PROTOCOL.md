@@ -51,8 +51,10 @@ Validate the generated file through the normal config loader and built container
 
 Candidate cohorts must be built and started from a clean checkout with immutable
 runtime provenance. The deployment helper computes the checked-out Git SHA,
-builds the current source and dashboard from both lockfiles, inspects the built
-image ID, validates Compose interpolation, and starts the already-built image:
+exports that exact commit with `git archive` into a private temporary directory,
+builds the source and dashboard from both lockfiles, inspects the built image ID,
+rechecks the checkout, validates Compose interpolation, and starts the exact
+already-built tag with `--no-build`:
 
 ```bash
 ./scripts/deploy-candidate-preview.sh

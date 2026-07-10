@@ -5,6 +5,9 @@ import {
   type NormalizedConfigDocument,
 } from "../config/document.js";
 import { z } from "zod";
+import { Ajv2020, type AnySchema, type ErrorObject } from "ajv/dist/2020.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 export const candidateArmNames = ["conservative", "standard", "aggressive"] as const;
 export type CandidateArmName = (typeof candidateArmNames)[number];
@@ -20,11 +23,29 @@ const candidateArmSchema = z.object({
   minPrice: z.number().min(0).max(1).optional(),
   maxPrice: z.number().min(0).max(1).optional(),
 }).strict().superRefine((arm, context) => {
-  if (arm.minPrice !== undefined && arm.maxPrice !== undefined && arm.minPrice > arm.maxPrice) {
+  if (arm.minPrice !== undefined && arm.maxPrice !== undefined && arm.minPrice >= arm.maxPrice) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "minPrice must be less than or equal to maxPrice",
+      message: "minPrice must be less than maxPrice",
       path: ["minPrice"],
+    });
+  }
+  if (arm.fixedUsd !== undefined
+    && arm.maxPositionUsd !== undefined
+    && arm.fixedUsd > arm.maxPositionUsd) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "fixedUsd must be less than or equal to maxPositionUsd",
+      path: ["fixedUsd"],
+    });
+  }
+  if (arm.fixedUsd !== undefined
+    && arm.maxDailyVolumeUsd !== undefined
+    && arm.fixedUsd > arm.maxDailyVolumeUsd) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "fixedUsd must be less than or equal to maxDailyVolumeUsd",
+      path: ["fixedUsd"],
     });
   }
 });
@@ -69,6 +90,102 @@ export const candidateCohortSchema = z.object({
 
 export type CandidateArmInput = z.infer<typeof candidateArmSchema>;
 export type CandidateCohortInput = z.infer<typeof candidateCohortSchema>;
+
+interface CandidateArmRuleInput {
+  fixedUsd?: number;
+  maxPositionUsd?: number;
+  maxDailyVolumeUsd?: number;
+  minPrice?: number;
+  maxPrice?: number;
+}
+
+interface CandidateRuleInput {
+  candidates?: Array<{ id?: string; address?: string }>;
+}
+
+const candidateSchemaPath = fileURLToPath(
+  new URL("../../config/candidate-cohort.schema.json", import.meta.url)
+);
+const publishedCandidateSchema = JSON.parse(
+  readFileSync(candidateSchemaPath, "utf8")
+) as AnySchema;
+const candidateSchemaValidator = (() => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  ajv.addKeyword({
+    keyword: "x-candidateArmRules",
+    schemaType: "array",
+    errors: false,
+    validate: (_rules: string[], value: unknown) => {
+      if (!value || typeof value !== "object") return true;
+      const arm = value as CandidateArmRuleInput;
+      return !(arm.minPrice !== undefined && arm.maxPrice !== undefined && arm.minPrice >= arm.maxPrice)
+      && !(arm.fixedUsd !== undefined
+        && arm.maxPositionUsd !== undefined
+        && arm.fixedUsd > arm.maxPositionUsd)
+      && !(arm.fixedUsd !== undefined
+        && arm.maxDailyVolumeUsd !== undefined
+        && arm.fixedUsd > arm.maxDailyVolumeUsd);
+    },
+  });
+  ajv.addKeyword({
+    keyword: "x-candidateCohortRules",
+    schemaType: "array",
+    errors: false,
+    validate: (_rules: string[], value: unknown) => {
+      if (!value || typeof value !== "object") return true;
+      const cohort = value as CandidateRuleInput;
+      if (!Array.isArray(cohort.candidates)) return true;
+      const ids = new Set<string>();
+      const addresses = new Set<string>();
+      for (const candidate of cohort.candidates) {
+        if (typeof candidate.id === "string") {
+          if (ids.has(candidate.id)) return false;
+          ids.add(candidate.id);
+        }
+        if (typeof candidate.address === "string") {
+          const address = candidate.address.toLowerCase();
+          if (addresses.has(address)) return false;
+          addresses.add(address);
+        }
+      }
+      return true;
+    },
+  });
+  return ajv.compile(publishedCandidateSchema);
+})();
+
+export function validateCandidateCohortJson(input: unknown): unknown {
+  if (!candidateSchemaValidator(input)) {
+    throw new Error(`Candidate cohort JSON Schema validation failed: ${
+      candidateSchemaValidator.errors
+        ?.map((error: ErrorObject) => {
+          if (error.keyword === "additionalProperties") {
+            const key = (error.params as { additionalProperty?: string }).additionalProperty;
+            return `${error.instancePath || "/"} unrecognized key: ${key ?? "unknown"}`;
+          }
+          if (error.keyword === "x-candidateCohortRules") {
+            const candidates = (input as CandidateRuleInput).candidates ?? [];
+            const ids = new Set<string>();
+            const addresses = new Set<string>();
+            for (const candidate of candidates) {
+              if (candidate.id && ids.has(candidate.id)) {
+                return `duplicate candidate id: ${candidate.id}`;
+              }
+              if (candidate.id) ids.add(candidate.id);
+              const address = candidate.address?.toLowerCase();
+              if (address && addresses.has(address)) {
+                return `duplicate candidate address: ${address}`;
+              }
+              if (address) addresses.add(address);
+            }
+          }
+          return `${error.instancePath || "/"} ${error.message ?? "is invalid"}`;
+        })
+        .join("; ")
+    }`);
+  }
+  return input;
+}
 
 interface ResolvedArm {
   fixedUsd: number;
@@ -151,6 +268,7 @@ export function buildCandidateExperimentConfig(
   defaults: GlobalYaml,
   candidateInput: unknown
 ): NormalizedConfigDocument {
+  validateCandidateCohortJson(candidateInput);
   const input = candidateCohortSchema.parse(candidateInput);
   assertId("cohortId", input.cohortId);
   if (input.candidates.length === 0) throw new Error("at least one candidate is required");

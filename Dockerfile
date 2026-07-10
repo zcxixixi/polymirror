@@ -34,6 +34,7 @@ ENV NODE_ENV=production
 
 COPY package.json package-lock.json ./
 COPY scripts ./scripts
+COPY config/candidate-cohort.schema.json ./config/candidate-cohort.schema.json
 RUN npm ci --omit=dev \
   && npm cache clean --force
 

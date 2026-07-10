@@ -73,9 +73,15 @@ describe("Candidate deployment provenance", () => {
 
     const deploy = readFileSync("scripts/deploy-candidate-preview.sh", "utf8");
     expect(deploy).toContain("git rev-parse HEAD");
-    expect(deploy).toMatch(/docker compose build/);
+    expect(deploy).toMatch(/mktemp -d/);
+    expect(deploy).toMatch(/trap .*EXIT/);
+    expect(deploy).toMatch(/git archive/);
+    expect(deploy).toMatch(/docker build/);
+    expect(deploy).not.toMatch(/docker compose build/);
+    expect(deploy).toMatch(/git status --porcelain/);
+    expect(deploy).toMatch(/git rev-parse HEAD/);
     expect(deploy).toMatch(/docker image inspect/);
     expect(deploy).toMatch(/docker compose config/);
-    expect(deploy).toMatch(/docker compose up/);
+    expect(deploy).toMatch(/docker compose up -d --no-build/);
   });
 });

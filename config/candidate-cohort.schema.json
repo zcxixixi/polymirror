@@ -4,6 +4,7 @@
   "title": "PolyMirror preview Candidate cohort",
   "type": "object",
   "additionalProperties": false,
+  "x-candidateCohortRules": ["unique candidate IDs", "unique candidate addresses case-insensitively"],
   "required": ["cohortId", "candidates"],
   "properties": {
     "cohortId": {
@@ -52,7 +53,11 @@
     "arm": {
       "type": "object",
       "additionalProperties": false,
-      "x-crossFieldConstraints": ["minPrice <= maxPrice"],
+      "x-candidateArmRules": [
+        "minPrice < maxPrice",
+        "fixedUsd <= maxPositionUsd",
+        "fixedUsd <= maxDailyVolumeUsd"
+      ],
       "properties": {
         "fixedUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 },
         "maxPositionUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 50 },

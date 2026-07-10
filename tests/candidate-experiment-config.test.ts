@@ -4,6 +4,7 @@ import { globalYamlSchema } from "../src/config/document.js";
 import {
   buildCandidateExperimentConfig,
   candidateCohortSchema,
+  validateCandidateCohortJson,
   type CandidateCohortInput,
 } from "../src/experiments/candidate-cohort.js";
 
@@ -92,7 +93,7 @@ describe("buildCandidateExperimentConfig", () => {
           },
         })
       )
-    ).toThrow(/less than or equal to 10/i);
+    ).toThrow(/<= 10/i);
   });
 
   it("keeps incomplete candidates disabled instead of silently running them", () => {
@@ -142,7 +143,8 @@ describe("buildCandidateExperimentConfig", () => {
       readFileSync("config/candidate-cohort.schema.json", "utf8")
     ) as {
       properties: Record<string, unknown>;
-      $defs: { arm: { properties: Record<string, unknown>; "x-crossFieldConstraints": string[] } };
+      "x-candidateCohortRules": string[];
+      $defs: { arm: { properties: Record<string, unknown>; "x-candidateArmRules": string[] } };
     };
     expect(Object.keys(published.properties).sort()).toEqual(["arms", "candidates", "cohortId"]);
     expect(Object.keys(published.$defs.arm.properties).sort()).toEqual([
@@ -155,6 +157,27 @@ describe("buildCandidateExperimentConfig", () => {
       "minPrice",
       "slippageTolerance",
     ]);
-    expect(published.$defs.arm["x-crossFieldConstraints"]).toContain("minPrice <= maxPrice");
+    expect(published["x-candidateCohortRules"]).toContain("unique candidate IDs");
+    expect(published.$defs.arm["x-candidateArmRules"]).toContain("minPrice < maxPrice");
+  });
+
+  it.each([
+    ["equal prices", { arms: { standard: { minPrice: 0.5, maxPrice: 0.5 } } }],
+    ["inverted prices", { arms: { standard: { minPrice: 0.8, maxPrice: 0.2 } } }],
+    ["fixed above position", { arms: { standard: { fixedUsd: 5, maxPositionUsd: 4 } } }],
+    ["fixed above daily volume", { arms: { standard: { fixedUsd: 5, maxDailyVolumeUsd: 4 } } }],
+    ["duplicate IDs", { candidates: [
+      { id: "same", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119" },
+      { id: "same", address: "0x66f3b58702fa50aff254b4f84de82fe63a13787c" },
+    ] }],
+    ["duplicate addresses", { candidates: [
+      { id: "one", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119" },
+      { id: "two", address: "0xEC47CB4E0A4F4E375D9787DEBF7C874214F21119" },
+    ] }],
+    ["typo", { arms: { standard: { fixedUSD: 2 } } }],
+  ])("rejects the invalid corpus identically through JSON Schema and Zod: %s", (_name, patch) => {
+    const input = { ...cohort(), ...patch };
+    expect(() => validateCandidateCohortJson(input)).toThrow();
+    expect(() => candidateCohortSchema.parse(input)).toThrow();
   });
 });
