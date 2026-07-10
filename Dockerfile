@@ -10,12 +10,12 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 COPY dashboard/package.json dashboard/package-lock.json ./dashboard/
+COPY scripts ./scripts
 RUN npm ci \
   && npm ci --prefix dashboard
 
 COPY tsconfig.json ./
 COPY src ./src
-COPY scripts ./scripts
 COPY dashboard ./dashboard
 RUN npm run build
 

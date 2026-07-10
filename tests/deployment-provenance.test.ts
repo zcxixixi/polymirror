@@ -65,6 +65,19 @@ describe("Candidate deployment provenance", () => {
     expect(dockerfile).toContain("org.opencontainers.image.revision=$POLYMIRROR_GIT_SHA");
   });
 
+  it("copies the root postinstall patch before every root npm ci", () => {
+    const dockerfile = readFileSync("Dockerfile", "utf8");
+    const stages = dockerfile.split(/(?=^FROM )/m).filter((stage) => stage.startsWith("FROM "));
+    expect(stages).toHaveLength(2);
+    for (const stage of stages) {
+      const rootInstall = stage.search(/^RUN npm ci(?:\s|\\)/m);
+      expect(rootInstall).toBeGreaterThan(-1);
+      const patchCopy = stage.indexOf("COPY scripts ./scripts");
+      expect(patchCopy).toBeGreaterThan(-1);
+      expect(patchCopy).toBeLessThan(rootInstall);
+    }
+  });
+
   it("requires Candidate provenance in Compose and provides a fail-closed deployment script", () => {
     const compose = readFileSync("docker-compose.yml", "utf8");
     expect(compose).toContain("POLYMIRROR_GIT_SHA: ${POLYMIRROR_GIT_SHA:?POLYMIRROR_GIT_SHA is required}");
