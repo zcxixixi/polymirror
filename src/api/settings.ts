@@ -1,5 +1,6 @@
 import type { ApiContext } from "./routes.js";
 import type { AccountApiContext } from "../accounts/manager.js";
+import { readFileSync, writeFileSync } from "node:fs";
 import { z } from "zod";
 import { healthSnapshot, syncAggregateHealth } from "../notify/health.js";
 import {
@@ -12,6 +13,7 @@ import {
 import { readNormalizedConfigDocument, writeNormalizedConfigDocument } from "../config/write.js";
 import { applyEnvToProcess, upsertEnvFile } from "../config/env-file.js";
 import { accountMergedGlobal } from "../config/document.js";
+import { mapNormalizedAccounts, validateAllAccounts } from "../config/load.js";
 import { assertLiveTradingAllowed } from "../engine/risk.js";
 import { logInfo } from "../notify/logger.js";
 import {
@@ -47,6 +49,27 @@ type LegacyCtx = {
   store: import("../state/store.js").StateStore;
   accountId: string;
 };
+
+async function writeConfigAndReload(
+  root: ApiContext,
+  next: ReturnType<typeof readNormalizedConfigDocument>
+): Promise<void> {
+  const previous = readFileSync(root.configPath);
+  try {
+    writeNormalizedConfigDocument(root.configPath, next);
+    await root.reloadConfig();
+  } catch (error) {
+    try {
+      writeFileSync(root.configPath, previous);
+      await root.reloadConfig();
+    } catch (rollbackError) {
+      const primary = error instanceof Error ? error.message : String(error);
+      const rollback = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      throw new Error(`${primary}; config rollback failed: ${rollback}`);
+    }
+    throw error;
+  }
+}
 
 export function buildRiskSnapshot(ctx: LegacyCtx) {
   const config = ctx.getConfig();
@@ -164,20 +187,26 @@ export async function patchGlobalSettings(
     const patch = globalSettingsPatchSchema.parse(body);
     if (patch.previewMode === false) {
       assertLiveTradingAllowed(false);
-      if (actx.getConfig().app.global.previewMode) {
-        migratePreviewToLiveDb(actx.accountId, actx.store);
-      }
       patch.risk = { ...patch.risk, enableCopyTrading: patch.risk?.enableCopyTrading ?? true };
-    } else if (patch.previewMode === true && !actx.getConfig().app.global.previewMode) {
-      await flushLivePendingBeforePreview(actx.getConfig(), actx.store);
     }
+    const currentConfig = actx.getConfig();
     const normalized = readNormalizedConfigDocument(root.configPath);
     if (patch.proxy) {
       validateProxyPatch(patch.proxy, normalized.defaultsGlobal as Record<string, unknown>);
     }
     const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
-    writeNormalizedConfigDocument(root.configPath, next);
-    await root.reloadConfig();
+    const validationError = validateAllAccounts(mapNormalizedAccounts(next));
+    if (validationError) {
+      throw new Error(validationError);
+    }
+
+    if (patch.previewMode === false && currentConfig.app.global.previewMode) {
+      migratePreviewToLiveDb(actx.accountId, actx.store);
+    } else if (patch.previewMode === true && !currentConfig.app.global.previewMode) {
+      await flushLivePendingBeforePreview(currentConfig, actx.store);
+    }
+
+    await writeConfigAndReload(root, next);
     syncAggregateHealth(root.manager.list());
     logInfo("Global settings updated via dashboard", { accountId: actx.accountId });
     return {

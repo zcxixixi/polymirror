@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ClobExecutor, isDefiniteOrderRejection } from "../src/executor/clob.js";
+import { fetchOrderBookMeta } from "../src/executor/orderbook.js";
 import type { GlobalConfig, WalletConfig } from "../src/config/types.js";
 
 const mockSubmitOrder = vi.fn();
@@ -7,10 +8,10 @@ const mockGetOrderStatus = vi.fn();
 const mockListOpenOrders = vi.fn(async () => []);
 
 vi.mock("../src/executor/orderbook.js", () => ({
-  fetchOrderBookMeta: vi.fn(async () => ({ tickSize: "0.01", negRisk: false })),
+  fetchOrderBookMeta: vi.fn(),
   roundToTick: (value: number, tickSize: number) =>
     parseFloat((Math.round(value / tickSize) * tickSize).toFixed(2)),
-  toOrderType: vi.fn(() => "GTC"),
+  toOrderType: vi.fn((type: string) => type),
 }));
 
 vi.mock("../src/executor/trading-backend.js", () => ({
@@ -70,12 +71,16 @@ const global: GlobalConfig = {
   },
 };
 
+const mockFetchOrderBookMeta = vi.mocked(fetchOrderBookMeta);
+
 describe("ClobExecutor", () => {
   beforeEach(() => {
     mockSubmitOrder.mockReset();
     mockGetOrderStatus.mockReset();
     mockListOpenOrders.mockReset();
     mockListOpenOrders.mockResolvedValue([]);
+    mockFetchOrderBookMeta.mockReset();
+    mockFetchOrderBookMeta.mockResolvedValue({ tickSize: "0.01", negRisk: false });
   });
 
   it("returns the tick-rounded execution price when CLOB rejects the order", async () => {
@@ -150,5 +155,47 @@ describe("ClobExecutor", () => {
     expect(mockSubmitOrder).toHaveBeenCalledTimes(1);
     expect(result.orderId).toBe("ord-recovered");
     expect(result.pendingRemaining).toBe(1.5);
+  });
+
+  it("rejects a guarded request if the market tick changed after quoting", async () => {
+    const result = await new ClobExecutor(wallet, global).placeLimitOrder({
+      tokenId: "token-abc",
+      side: "BUY",
+      price: 0.525,
+      size: 1.91,
+      expectedTickSize: 0.001,
+    });
+
+    expect(result.error).toMatch(/tick changed/);
+    expect(mockSubmitOrder).not.toHaveBeenCalled();
+  });
+
+  it("returns the actual FOK average fill price instead of the limit", async () => {
+    mockSubmitOrder.mockResolvedValueOnce({
+      raw: { ok: true },
+      orderId: "ord-fok",
+      takingAmount: "2",
+      makingAmount: "1",
+      status: "matched",
+    });
+    const fokGlobal: GlobalConfig = {
+      ...global,
+      execution: { ...global.execution, orderType: "FOK" },
+    };
+
+    const result = await new ClobExecutor(wallet, fokGlobal).placeLimitOrder({
+      tokenId: "token-abc",
+      side: "BUY",
+      price: 0.52,
+      size: 1.93,
+      expectedTickSize: 0.01,
+    });
+
+    expect(result).toMatchObject({
+      executionPrice: 0.5,
+      filledShares: 2,
+      filledUsd: 1,
+      pendingRemaining: 0,
+    });
   });
 });

@@ -67,6 +67,7 @@ function report(): PreviewAccountReport {
   return {
     accountId: "goal-pass",
     dbPath: "/tmp/goal-pass.db",
+    copyPriceMode: "executable_guarded",
     exists: true,
     cashUsd: 180,
     openCostUsd: 0,
@@ -201,5 +202,21 @@ describe("assessStabilityGoal", () => {
         "top3_contribution",
       ])
     );
+  });
+
+  it("does not qualify legacy leader-price accounting", () => {
+    const input = report();
+    input.copyPriceMode = "leader_limit";
+    input.redeemCount = 0;
+    input.goalMetrics!.observationDays = 0;
+    input.goalMetrics!.slippage.observationDays = 0;
+    input.goalMetrics!.settledMarketCount = 0;
+    input.goalMetrics!.recent20.marketCount = 0;
+
+    const result = assessStabilityGoal(input);
+
+    expect(result.passed).toBe(false);
+    expect(result.status).toBe("not_qualified");
+    expect(result.failedChecks).toContain("execution_mode");
   });
 });

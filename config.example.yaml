@@ -24,6 +24,9 @@ global:
   poll_interval_ms: 5000
   activity_limit: 100
   preview_mode: true
+  # leader_limit = 兼容旧账户；executable_guarded = 按当前盘口和滑点上限保守成交。
+  # 新模拟实验应使用 executable_guarded，且必须配置正数 slippage_tolerance 与 FOK。
+  copy_price_mode: leader_limit
   copy_trades_only: true
   max_trade_age_hours: 1
   buy_dedup_window_ms: 60000
@@ -50,6 +53,7 @@ global:
     sync_wallet_balance: true
 
   execution:
+    # executable_guarded 必须使用 FOK，避免盘口变化后留下 GTC 挂单。
     order_type: GTC
     retry_limit: 3
     network_retry_limit: 3

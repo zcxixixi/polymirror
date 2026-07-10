@@ -385,6 +385,7 @@ function handlePreviewQuality(
           ...readPreviewAccountReport({
             accountId: rt.id,
             dbPath: rt.dbPath,
+            copyPriceMode: rt.config.app.global.copyPriceMode,
             startingCapitalUsd: rt.config.app.global.risk.startingCapitalUsd,
             recentWindowMs: recentWindowMinutes * 60_000,
             limit,

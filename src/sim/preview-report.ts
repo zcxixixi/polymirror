@@ -14,6 +14,7 @@ import {
   assessStabilityGoal,
   type StabilityGoalAssessment,
 } from "./stability-goal.js";
+import type { CopyPriceMode } from "../config/types.js";
 
 const STABILITY_GOAL_COPY_PATH_WINDOW_MS = 14 * 24 * 60 * 60_000;
 const STABILITY_GOAL_ERROR_WINDOW_MS = 6 * 60 * 60_000;
@@ -152,6 +153,7 @@ export interface PreviewGoalMetrics {
 export interface PreviewAccountReport {
   accountId: string;
   dbPath: string;
+  copyPriceMode: CopyPriceMode;
   exists: boolean;
   cashUsd: number;
   openCostUsd: number;
@@ -188,6 +190,7 @@ export interface PreviewAccountReport {
 export interface ReadPreviewAccountReportOptions {
   accountId: string;
   dbPath: string;
+  copyPriceMode?: CopyPriceMode;
   startingCapitalUsd?: number;
   limit?: number;
   recentWindowMs?: number;
@@ -299,6 +302,7 @@ function emptyReport(options: ReadPreviewAccountReportOptions): PreviewAccountRe
   const report: PreviewAccountReport = {
     accountId: options.accountId,
     dbPath: options.dbPath,
+    copyPriceMode: options.copyPriceMode ?? "leader_limit",
     exists: false,
     cashUsd: options.startingCapitalUsd ?? 0,
     openCostUsd: 0,
@@ -345,6 +349,28 @@ function tableExists(db: Database.Database, table: string): boolean {
 function columnExists(db: Database.Database, table: string, column: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   return columns.some((entry) => entry.name === column);
+}
+
+function readCopyPriceMode(
+  db: Database.Database,
+  hasAuditLog: boolean,
+  requested: CopyPriceMode | undefined
+): CopyPriceMode {
+  if (tableExists(db, "runtime_metadata")) {
+    const row = db
+      .prepare("SELECT value FROM runtime_metadata WHERE key = 'copy_price_mode'")
+      .get() as { value: string } | undefined;
+    if (row?.value === "leader_limit" || row?.value === "executable_guarded") {
+      return row.value;
+    }
+  }
+  if (hasAuditLog) {
+    const history = db
+      .prepare("SELECT 1 FROM audit_log WHERE action IN ('COPY', 'REDEEM') LIMIT 1")
+      .get();
+    if (history) return "leader_limit";
+  }
+  return requested ?? "leader_limit";
 }
 
 function skipCountMatching(
@@ -802,6 +828,7 @@ export function readPreviewAccountReport(
   try {
     const hasCashLedger = tableExists(db, "cash_ledger");
     const hasAuditLog = tableExists(db, "audit_log");
+    const copyPriceMode = readCopyPriceMode(db, hasAuditLog, options.copyPriceMode);
     const hasDailyStats = tableExists(db, "daily_stats");
     const hasTokenMarkets = tableExists(db, "token_markets");
     const hasPendingOrders = tableExists(db, "pending_orders");
@@ -1008,6 +1035,7 @@ export function readPreviewAccountReport(
     const report: PreviewAccountReport = {
       accountId: options.accountId,
       dbPath: options.dbPath,
+      copyPriceMode,
       exists: true,
       cashUsd,
       openCostUsd,

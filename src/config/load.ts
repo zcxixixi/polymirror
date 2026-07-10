@@ -179,6 +179,7 @@ function mapGlobal(raw: GlobalYaml) {
     pollIntervalMs: raw.poll_interval_ms,
     activityLimit: raw.activity_limit,
     previewMode: raw.preview_mode,
+    copyPriceMode: raw.copy_price_mode,
     copyTradesOnly: raw.copy_trades_only,
     maxTradeAgeHours: raw.max_trade_age_hours,
     buyDedupWindowMs: raw.buy_dedup_window_ms,
@@ -288,6 +289,24 @@ export function mapAccountToRuntime(
   };
 }
 
+export function mapNormalizedAccounts(
+  normalized: NormalizedConfigDocument
+): AccountDefinition[] {
+  const accounts: AccountDefinition[] = [];
+  for (const account of normalized.accounts) {
+    try {
+      accounts.push(mapAccountToRuntime(normalized, account.id));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (account.enabled) {
+        throw new Error(`Account "${account.id}": ${msg}`);
+      }
+      console.warn(`Warning: disabled account "${account.id}" skipped — ${msg}`);
+    }
+  }
+  return accounts;
+}
+
 export function readNormalizedConfig(configPath: string): NormalizedConfigDocument {
   const resolved = resolve(process.cwd(), configPath);
   if (!existsSync(resolved)) {
@@ -370,18 +389,7 @@ export function loadMultiAccountConfig(configPath = "config.yaml"): MultiAccount
   const normalized = readNormalizedConfig(configPath);
   applyProxyFromYaml(normalized.defaultsGlobal.proxy);
 
-  const accounts: AccountDefinition[] = [];
-  for (const account of normalized.accounts) {
-    try {
-      accounts.push(mapAccountToRuntime(normalized, account.id));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (account.enabled) {
-        throw new Error(`Account "${account.id}": ${msg}`);
-      }
-      console.warn(`Warning: disabled account "${account.id}" skipped — ${msg}`);
-    }
-  }
+  const accounts = mapNormalizedAccounts(normalized);
 
   if (accounts.length === 0) {
     throw new Error("No valid accounts in config.yaml");
@@ -431,6 +439,18 @@ export function validateRuntime(config: RuntimeConfig): string | null {
       "Warning: slippage_tolerance is 0 in LIVE mode — orders use the leader's (possibly stale) price " +
         "with no reference-price check. Set a positive slippage_tolerance to guard against price drift."
     );
+  }
+  if (
+    app.global.copyPriceMode === "executable_guarded" &&
+    app.global.risk.slippageTolerance <= 0
+  ) {
+    return "copy_price_mode executable_guarded requires a positive slippage_tolerance";
+  }
+  if (
+    app.global.copyPriceMode === "executable_guarded" &&
+    app.global.execution.orderType !== "FOK"
+  ) {
+    return "copy_price_mode executable_guarded requires execution.order_type=FOK";
   }
   if (!app.global.risk.enableCopyTrading && !app.global.previewMode) {
     return "Copy trading disabled and preview_mode is false — nothing will run";

@@ -5,6 +5,7 @@ export const copyStrategy = z.enum(["PERCENTAGE", "FIXED", "ADAPTIVE"]);
 export const orderType = z.enum(["GTC", "FAK", "FOK"]);
 export const conflictMode = z.enum(["skip_both", "net", "priority_leader"]);
 export const proxyMode = z.enum(["none", "static", "dynamic", "fixed"]);
+export const copyPriceMode = z.enum(["leader_limit", "executable_guarded"]);
 
 export const proxyYamlSchema = z
   .object({
@@ -19,6 +20,7 @@ export const globalYamlSchema = z.object({
   poll_interval_ms: z.number().int().min(1000).default(5000),
   activity_limit: z.number().int().min(10).max(500).default(100),
   preview_mode: z.boolean().default(true),
+  copy_price_mode: copyPriceMode.default("leader_limit"),
   copy_trades_only: z.boolean().default(true),
   max_trade_age_hours: z.number().positive().default(1),
   buy_dedup_window_ms: z.number().int().nonnegative().default(60000),

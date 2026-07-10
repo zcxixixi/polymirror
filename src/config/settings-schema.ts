@@ -11,6 +11,7 @@ import { isValidProxyUrl, maskProxyUrl } from "../util/proxy.js";
 const orderType = z.enum(["GTC", "FAK", "FOK"]);
 const conflictMode = z.enum(["skip_both", "net", "priority_leader"]);
 const proxyModeDto = z.enum(["none", "static", "dynamic"]);
+const copyPriceModeDto = z.enum(["leader_limit", "executable_guarded"]);
 
 export const proxySettingsPatchSchema = z.object({
   mode: proxyModeDto,
@@ -23,6 +24,7 @@ export const globalSettingsPatchSchema = z.object({
   pollIntervalMs: z.number().int().min(1000).optional(),
   activityLimit: z.number().int().min(10).max(500).optional(),
   previewMode: z.boolean().optional(),
+  copyPriceMode: copyPriceModeDto.optional(),
   copyTradesOnly: z.boolean().optional(),
   maxTradeAgeHours: z.number().positive().optional(),
   buyDedupWindowMs: z.number().int().nonnegative().optional(),
@@ -139,6 +141,7 @@ export function globalConfigToDto(global: Record<string, unknown>) {
     poll_interval_ms?: number;
     activity_limit?: number;
     preview_mode?: boolean;
+    copy_price_mode?: "leader_limit" | "executable_guarded";
     copy_trades_only?: boolean;
     max_trade_age_hours?: number;
     buy_dedup_window_ms?: number;
@@ -157,6 +160,7 @@ export function globalConfigToDto(global: Record<string, unknown>) {
     pollIntervalMs: g.poll_interval_ms ?? 5000,
     activityLimit: g.activity_limit ?? 100,
     previewMode: g.preview_mode ?? true,
+    copyPriceMode: g.copy_price_mode ?? "leader_limit",
     copyTradesOnly: g.copy_trades_only ?? true,
     maxTradeAgeHours: g.max_trade_age_hours ?? 1,
     buyDedupWindowMs: g.buy_dedup_window_ms ?? 60000,
@@ -217,6 +221,7 @@ function applyGlobalPatchToRecord(g: Record<string, unknown>, patch: GlobalSetti
   if (patch.pollIntervalMs !== undefined) g.poll_interval_ms = patch.pollIntervalMs;
   if (patch.activityLimit !== undefined) g.activity_limit = patch.activityLimit;
   if (patch.previewMode !== undefined) g.preview_mode = patch.previewMode;
+  if (patch.copyPriceMode !== undefined) g.copy_price_mode = patch.copyPriceMode;
   if (patch.copyTradesOnly !== undefined) g.copy_trades_only = patch.copyTradesOnly;
   if (patch.maxTradeAgeHours !== undefined) g.max_trade_age_hours = patch.maxTradeAgeHours;
   if (patch.buyDedupWindowMs !== undefined) g.buy_dedup_window_ms = patch.buyDedupWindowMs;

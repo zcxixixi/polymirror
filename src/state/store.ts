@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import type { CopyPriceMode } from "../config/types.js";
 
 const DEFAULT_DB = "data/polymirror.db";
 
@@ -126,6 +127,11 @@ export interface DailyStatsRow {
 export interface LeaderDailyStatsRow {
   leaderId: string;
   volumeUsd: number;
+}
+
+export interface EnsureCopyPriceModeResult {
+  mode: CopyPriceMode;
+  status: "bound" | "matched" | "mismatch";
 }
 
 function todayKey(): string {
@@ -287,6 +293,10 @@ export class StateStore {
         outcome TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_token_markets_condition ON token_markets(condition_id);
+      CREATE TABLE IF NOT EXISTS runtime_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     this.migrate();
   }
@@ -310,6 +320,51 @@ export class StateStore {
     if (!auditCols.some((c) => c.name === "slippage_pct")) {
       this.db.exec("ALTER TABLE audit_log ADD COLUMN slippage_pct REAL");
     }
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO runtime_metadata (key, value)
+         SELECT 'copy_price_mode', 'leader_limit'
+         WHERE EXISTS (
+           SELECT 1 FROM audit_log WHERE action IN ('COPY', 'REDEEM')
+         ) OR EXISTS (
+           SELECT 1 FROM pending_orders
+         ) OR EXISTS (
+           SELECT 1 FROM live_order_intents
+         )`
+      )
+      .run();
+  }
+
+  ensureCopyPriceMode(requested: CopyPriceMode): EnsureCopyPriceModeResult {
+    return this.db.transaction((): EnsureCopyPriceModeResult => {
+      const existing = this.db
+        .prepare("SELECT value FROM runtime_metadata WHERE key = 'copy_price_mode'")
+        .get() as { value: CopyPriceMode } | undefined;
+      if (existing) {
+        return {
+          mode: existing.value,
+          status: existing.value === requested ? "matched" : "mismatch",
+        };
+      }
+
+      const hasExecutionHistory = this.db
+        .prepare(
+          `SELECT 1
+           WHERE EXISTS (
+             SELECT 1 FROM audit_log WHERE action IN ('COPY', 'REDEEM')
+           ) OR EXISTS (
+             SELECT 1 FROM pending_orders
+           ) OR EXISTS (
+             SELECT 1 FROM live_order_intents
+           )`
+        )
+        .get();
+      const mode: CopyPriceMode = hasExecutionHistory ? "leader_limit" : requested;
+      this.db
+        .prepare("INSERT INTO runtime_metadata (key, value) VALUES ('copy_price_mode', ?)")
+        .run(mode);
+      return { mode, status: mode === requested ? "bound" : "mismatch" };
+    })();
   }
 
   hasSeen(key: string): boolean {
@@ -1128,6 +1183,9 @@ export class StateStore {
     tokenId: string;
     side: "BUY" | "SELL";
     price: number;
+    leaderPrice?: number;
+    executablePrice?: number | null;
+    slippagePct?: number | null;
     orderSize: number;
     filledShares: number;
     filledUsd: number;
@@ -1144,6 +1202,9 @@ export class StateStore {
       tokenId,
       side,
       price,
+      leaderPrice,
+      executablePrice,
+      slippagePct,
       orderSize,
       filledShares,
       filledUsd,
@@ -1213,6 +1274,9 @@ export class StateStore {
           side,
           size: appliedShares,
           price,
+          leaderPrice,
+          executablePrice,
+          slippagePct,
           reason: auditReason,
           preview: false,
         });

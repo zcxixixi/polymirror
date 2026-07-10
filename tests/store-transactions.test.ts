@@ -295,6 +295,9 @@ describe("StateStore transactions", () => {
       tokenId: "tok-a",
       side: "BUY",
       price: 0.5,
+      leaderPrice: 0.49,
+      executablePrice: 0.5,
+      slippagePct: 2.0408,
       orderSize: 10,
       filledShares: 4,
       filledUsd: 2,
@@ -310,5 +313,11 @@ describe("StateStore transactions", () => {
     expect(store.countPendingOrders()).toBe(1);
     expect(store.listPendingOrders()[0]?.filledShares).toBe(4);
     expect(store.getDailyVolumeUsd()).toBe(2);
+    expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
+      price: 0.5,
+      leaderPrice: 0.49,
+      executablePrice: 0.5,
+      slippagePct: 2.0408,
+    });
   });
 });

@@ -144,10 +144,15 @@ export class AccountManager {
   }
 
   async reloadConfig(): Promise<void> {
-    this.normalized = readNormalizedConfig(this.configFileKey);
     const multi = loadMultiAccountConfig(this.configFileKey);
+    const validationError = validateAllAccounts(multi.accounts);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+    const normalized = readNormalizedConfig(this.configFileKey);
     assertLiveTradingForAccounts(multi.accounts);
-    applyProxyFromYaml(this.normalized.defaultsGlobal.proxy);
+    applyProxyFromYaml(normalized.defaultsGlobal.proxy);
+    this.normalized = normalized;
     this.pollIntervalMs = multi.pollIntervalMs;
     this.healthPort = multi.healthPort;
 

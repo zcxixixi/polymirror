@@ -188,6 +188,7 @@ global:
   poll_interval_ms: 5000        # 轮询间隔（毫秒），最小 1000
   activity_limit: 100           # 每个 Leader 每次拉取 activity 条数
   preview_mode: true            # true=模拟，false=实盘
+  copy_price_mode: leader_limit # leader_limit | executable_guarded
   copy_trades_only: true        # 只处理 TRADE 类型
   max_trade_age_hours: 1        # 忽略超过 N 小时的 Leader 成交
   buy_dedup_window_ms: 60000    # 同 token BUY 去重窗口（毫秒）
@@ -198,6 +199,7 @@ global:
 | 参数 | 建议值 | 说明 |
 |------|--------|------|
 | `poll_interval_ms` | 5000–15000 | Leader 多时适当加大，降低 API 压力 |
+| `copy_price_mode` | `executable_guarded`（新实验） | 按当前订单簿检查 tick、滑点、足额深度和市场最小订单股数；任一不满足即跳过，满足时按最差允许价保守记账/下单。必须配合 `order_type: FOK`；`leader_limit` 仅用于兼容旧样本，已有交易历史的数据库不可切换模式 |
 | `max_trade_age_hours` | 1 | 防止重启后跟旧单；Leader 交易稀疏可适当增大 |
 | `trade_aggregation_window_ms` | 0 或 3000–5000 | Leader 连续碎单时可开启合并 |
 
@@ -212,7 +214,7 @@ global:
     max_open_markets: 15            # 最多同时持有多少个 token
     max_order_usd: 25               # 全局单笔上限
     min_order_usd: 1                # 低于此金额 skip
-    slippage_tolerance: 0.03        # 实盘滑点容忍（绝对值，非百分比）
+    slippage_tolerance: 0.03        # 成交价滑点容忍（绝对价格差，非百分比）
     max_position_per_token_usd: 0   # 单 token 跨 Leader 合计敞口上限（USD），0=不限制
     sync_wallet_balance: true       # Live：SELL 时对照 CLOB 链上余额
 ```
@@ -225,7 +227,7 @@ global:
 
 ```yaml
   execution:
-    order_type: GTC    # GTC | FAK | FOK
+    order_type: GTC    # GTC | FAK | FOK；executable_guarded 必须为 FOK
     retry_limit: 3
     network_retry_limit: 3
     gtc_fill_timeout_ms: 10000       # GTC 初次下单后等待成交的最长时间（毫秒）

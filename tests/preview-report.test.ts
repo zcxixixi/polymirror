@@ -26,6 +26,7 @@ describe("readPreviewAccountReport", () => {
     const report = readPreviewAccountReport({
       accountId: "fresh-goal",
       dbPath,
+      copyPriceMode: "executable_guarded",
       startingCapitalUsd: 200,
     });
 
@@ -656,6 +657,51 @@ describe("readPreviewAccountReport", () => {
     expect(report.copyQuality.notes).toEqual(
       expect.arrayContaining(["市场还没结算，当前盈利只按已结算口径"])
     );
+  });
+
+  it("classifies guarded execution skips as explained parameter filters", () => {
+    const reasons = [
+      "slippage 0.2000 > 0.02",
+      "executable price unavailable",
+      "executable depth 0.5 < 1.93 shares",
+      "market min order 5 > 1.93 shares",
+    ];
+    reasons.forEach((reason, index) => {
+      store.audit({
+        leaderId: "leader-a",
+        action: "DETECT",
+        tokenId: `guarded-${index}`,
+        side: "BUY",
+        size: 1,
+        price: 0.5,
+        preview: true,
+      });
+      store.audit({
+        leaderId: "leader-a",
+        action: "SKIP",
+        tokenId: `guarded-${index}`,
+        side: "BUY",
+        size: 1,
+        price: 0.5,
+        reason,
+        preview: true,
+      });
+    });
+
+    const report = readPreviewAccountReport({
+      accountId: "guarded-skips",
+      dbPath,
+      startingCapitalUsd: 200,
+    });
+
+    expect(report.copyQuality.skips.parameterFiltered).toBe(4);
+    expect(report.copyQuality.copyGap.buy).toMatchObject({
+      effectiveDetected: 4,
+      copied: 0,
+      unclassified: 0,
+      explainedPct: 100,
+      skipped: { parameterFiltered: 4, total: 4 },
+    });
   });
 
   it("prioritizes risk-limit skips over parameter filters when risk limits dominate", () => {

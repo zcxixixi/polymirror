@@ -342,6 +342,7 @@ export interface StabilityGoalAssessment {
 
 export interface QualityAccountReport {
   accountId: string;
+  copyPriceMode?: "leader_limit" | "executable_guarded";
   label?: string;
   enabled: boolean;
   previewMode: boolean;

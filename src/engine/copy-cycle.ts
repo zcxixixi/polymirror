@@ -5,6 +5,10 @@ import { tradeEventKey } from "../monitor/data-api.js";
 import type { Activity } from "../monitor/data-api.js";
 import { fetchResolvedMarketOutcome } from "../monitor/market-resolve.js";
 import { calculateOrderSize } from "../engine/sizing.js";
+import {
+  prepareExecutableGuardedOrder,
+  prepareGuardedOrderTerms,
+} from "../engine/execution-price.js";
 import { processSettlements } from "../engine/settlement.js";
 import { passActivityFilters } from "../engine/filters.js";
 import { isAnyTradeKeySeen, isRecentBuyDuplicate } from "../engine/dedup.js";
@@ -29,7 +33,11 @@ import {
   formatGeoblockMessage,
   getCachedGeoblockStatus,
 } from "../executor/geoblock.js";
-import { fetchBestExecutablePrice } from "../executor/orderbook.js";
+import {
+  fetchBestExecutablePrice,
+  fetchExecutableOrderBookSnapshot,
+  quoteExecutableOrderBook,
+} from "../executor/orderbook.js";
 import { calculateCopySlippageLossPct } from "../sim/copy-slippage.js";
 import { logInfo, logError, logPreviewAction } from "../notify/logger.js";
 import {
@@ -90,15 +98,25 @@ function skip(
   leaderId: string,
   activity: Activity,
   reason: string,
-  preview: boolean
+  preview: boolean,
+  execution?: {
+    leaderPrice: number;
+    executablePrice: number | null;
+    slippagePct: number | null;
+    orderPrice?: number;
+    orderShares?: number;
+  }
 ): void {
   store.audit({
     leaderId,
     action: "SKIP",
     tokenId: activity.asset,
     side: activity.side,
-    size: activity.size,
-    price: activity.price,
+    size: execution?.orderShares ?? activity.size,
+    price: execution?.orderPrice ?? activity.price,
+    leaderPrice: execution?.leaderPrice,
+    executablePrice: execution?.executablePrice,
+    slippagePct: execution?.slippagePct,
     reason,
     preview,
   });
@@ -186,6 +204,11 @@ export async function runCopyCycle(
   let copied = 0;
   let skipped = 0;
   let pendingFilled = 0;
+  const requestedCopyPriceMode = config.app.global.copyPriceMode ?? "leader_limit";
+  const copyPriceModeBinding = store.ensureCopyPriceMode(requestedCopyPriceMode);
+  const copyPriceModeMismatch = copyPriceModeBinding.status === "mismatch"
+    ? `copy price mode mismatch: database=${copyPriceModeBinding.mode} config=${requestedCopyPriceMode}`
+    : null;
 
   const pendingResult = await processPendingOrders(config, store, risk, telegram);
   pendingFilled += pendingResult.filled;
@@ -208,6 +231,19 @@ export async function runCopyCycle(
     );
     copied += settlementResult.leaderRedeems + settlementResult.autoSettled;
     errors.push(...settlementResult.errors);
+  }
+
+  if (copyPriceModeMismatch) {
+    errors.unshift(copyPriceModeMismatch);
+    return {
+      fetched: 0,
+      copied,
+      skipped: 0,
+      pendingFilled,
+      errors,
+      walletDrifts: [],
+      pendingOrders: store.countPendingOrders(),
+    };
   }
 
   const gate = risk.canTrade();
@@ -513,34 +549,206 @@ export async function runCopyCycle(
     }
 
     const leaderPrice = activity.price ?? 0;
+    const guardedExecution = config.app.global.copyPriceMode === "executable_guarded";
+    let observedExecutablePrice: number | null = null;
+    let observedSlippagePct: number | null = null;
+    let orderPrice = leaderPrice;
+    let orderShares = sizing.finalShares;
+    let orderUsd = sizing.finalUsd;
+    let guardedTickSize: number | undefined;
+    let executionAudit:
+      | {
+          leaderPrice: number;
+          executablePrice: number | null;
+          slippagePct: number | null;
+          orderPrice: number;
+          orderShares: number;
+        }
+      | undefined;
+
+    if (guardedExecution) {
+      let snapshot = null;
+      try {
+        snapshot = await fetchExecutableOrderBookSnapshot(
+          config.wallet.clobUrl,
+          config.wallet.chainId,
+          activity.asset,
+          activity.side
+        );
+      } catch {
+        snapshot = null;
+      }
+      const terms = prepareGuardedOrderTerms({
+        side: activity.side,
+        leaderPrice,
+        targetUsd: sizing.finalUsd,
+        minOrderUsd: config.app.global.risk.minOrderUsd,
+        absoluteTolerance: config.app.global.risk.slippageTolerance,
+        tickSize: snapshot?.tickSize,
+      });
+      if (!terms.allow || terms.orderPrice === null) {
+        skipped++;
+        skip(store, leaderId, activity, terms.reason ?? "invalid guarded order", preview);
+        continue;
+      }
+      const quote = snapshot
+        ? quoteExecutableOrderBook(
+          snapshot.levels,
+          activity.side,
+          terms.orderShares,
+          terms.orderPrice,
+          snapshot.minOrderShares,
+          activity.side === "BUY"
+            ? Math.round(terms.orderUsd * 100) / 100
+            : undefined
+        )
+        : null;
+      observedExecutablePrice = quote?.fullyFillable
+        ? quote.averagePrice
+        : (quote?.bestPrice ?? null);
+      const guarded = prepareExecutableGuardedOrder({
+        side: activity.side,
+        leaderPrice,
+        executablePrice: observedExecutablePrice,
+        targetUsd: sizing.finalUsd,
+        minOrderUsd: config.app.global.risk.minOrderUsd,
+        absoluteTolerance: config.app.global.risk.slippageTolerance,
+        tickSize: snapshot?.tickSize,
+      });
+      observedSlippagePct = guarded.slippagePct;
+      if (!guarded.allow || guarded.orderPrice === null) {
+        skipped++;
+        skip(
+          store,
+          leaderId,
+          activity,
+          guarded.reason ?? "guarded execution rejected",
+          preview,
+          {
+            leaderPrice,
+            executablePrice: observedExecutablePrice,
+            slippagePct: observedSlippagePct,
+            orderPrice: terms.orderPrice,
+            orderShares: terms.orderShares,
+          }
+        );
+        continue;
+      }
+      if (!quote?.fullyFillable) {
+        const reason = activity.side === "BUY"
+          ? `executable depth $${Number((quote?.availableUsd ?? 0).toFixed(4))} < $${Number((Math.round(terms.orderUsd * 100) / 100).toFixed(2))}`
+          : `executable depth ${Number((quote?.availableShares ?? 0).toFixed(4))} < ${terms.orderShares} shares`;
+        skipped++;
+        skip(
+          store,
+          leaderId,
+          activity,
+          reason,
+          preview,
+          {
+            leaderPrice,
+            executablePrice: observedExecutablePrice,
+            slippagePct: observedSlippagePct,
+            orderPrice: terms.orderPrice,
+            orderShares: terms.orderShares,
+          }
+        );
+        continue;
+      }
+      if (!quote.meetsMinOrderSize) {
+        const minOrderShares = Number(quote.minOrderShares.toFixed(4));
+        skipped++;
+        skip(
+          store,
+          leaderId,
+          activity,
+          `market min order ${minOrderShares} > ${Number(quote.filledShares.toFixed(4))} shares`,
+          preview,
+          {
+            leaderPrice,
+            executablePrice: observedExecutablePrice,
+            slippagePct: observedSlippagePct,
+            orderPrice: terms.orderPrice,
+            orderShares: terms.orderShares,
+          }
+        );
+        continue;
+      }
+      orderPrice = guarded.orderPrice;
+      orderShares = guarded.orderShares;
+      orderUsd = guarded.orderUsd;
+      guardedTickSize = snapshot?.tickSize;
+      executionAudit = {
+        leaderPrice,
+        executablePrice: observedExecutablePrice,
+        slippagePct: observedSlippagePct,
+        orderPrice,
+        orderShares,
+      };
+      const maxOrderUsd = Math.min(
+        config.app.global.risk.maxOrderUsd,
+        leader.limits?.maxOrderUsd ?? Infinity
+      );
+      if (orderUsd > maxOrderUsd + 1e-9) {
+        skipped++;
+        skip(
+          store,
+          leaderId,
+          activity,
+          `guarded max order $${orderUsd.toFixed(4)} > $${maxOrderUsd}`,
+          preview,
+          executionAudit
+        );
+        continue;
+      }
+      if (activity.side === "BUY" && leader.limits?.maxPositionUsd !== undefined) {
+        const basis = config.app.global.risk.positionCapBasis ?? "market";
+        const heldUsd = basis === "cost"
+          ? store.getPositionCostUsd(leaderId, activity.asset)
+          : store.getPosition(leaderId, activity.asset) * orderPrice;
+        const projectedUsd = heldUsd + orderUsd;
+        if (projectedUsd > leader.limits.maxPositionUsd + 1e-9) {
+          skipped++;
+          skip(
+            store,
+            leaderId,
+            activity,
+            `guarded position cap $${projectedUsd.toFixed(2)} > $${leader.limits.maxPositionUsd}`,
+            preview,
+            executionAudit
+          );
+          continue;
+        }
+      }
+    }
 
     if (activity.side === "BUY") {
       const spendCheck = risk.canSpendUsd(
         leaderId,
-        sizing.finalUsd,
+        orderUsd,
         leader.limits?.maxDailyVolumeUsd
       );
       if (!spendCheck.allow) {
         skipped++;
-        skip(store, leaderId, activity, spendCheck.reason ?? "volume cap", preview);
+        skip(store, leaderId, activity, spendCheck.reason ?? "volume cap", preview, executionAudit);
         continue;
       }
 
-      const cashCheck = risk.canSpendPreviewCash(sizing.finalUsd);
+      const cashCheck = risk.canSpendPreviewCash(orderUsd);
       if (!cashCheck.allow) {
         skipped++;
-        skip(store, leaderId, activity, cashCheck.reason ?? "preview cash", preview);
+        skip(store, leaderId, activity, cashCheck.reason ?? "preview cash", preview, executionAudit);
         continue;
       }
 
       const tokenCap = risk.canAddTokenExposure(
         activity.asset,
-        sizing.finalUsd,
-        leaderPrice
+        orderUsd,
+        orderPrice
       );
       if (!tokenCap.allow) {
         skipped++;
-        skip(store, leaderId, activity, tokenCap.reason ?? "token exposure cap", preview);
+        skip(store, leaderId, activity, tokenCap.reason ?? "token exposure cap", preview, executionAudit);
         continue;
       }
 
@@ -554,7 +762,7 @@ export async function runCopyCycle(
         );
         if (fundedProbeReason) {
           skipped++;
-          skip(store, leaderId, activity, fundedProbeReason, preview);
+          skip(store, leaderId, activity, fundedProbeReason, preview, executionAudit);
           continue;
         }
         const tradeable = liveCollateral.clobUsd ?? 0;
@@ -567,7 +775,8 @@ export async function runCopyCycle(
             leaderId,
             activity,
             `CLOB $0 but chain pUSD $${chain.toFixed(2)} — approve pUSD on polymarket.com (trade once)`,
-            preview
+            preview,
+            executionAudit
           );
           continue;
         }
@@ -576,12 +785,19 @@ export async function runCopyCycle(
         const collateral = checkLiveBuyCollateralAndAllowance(
           buyBalanceUsd,
           buyAllowanceUsd,
-          sizing.finalUsd,
+          orderUsd,
           config.app.global.risk.minOrderUsd
         );
         if (!collateral.allow) {
           skipped++;
-          skip(store, leaderId, activity, collateral.reason ?? "insufficient USDC", preview);
+          skip(
+            store,
+            leaderId,
+            activity,
+            collateral.reason ?? "insufficient USDC",
+            preview,
+            executionAudit
+          );
           continue;
         }
       }
@@ -596,11 +812,11 @@ export async function runCopyCycle(
           held = proportionalSellable(held, walletShares, totalTracked);
         }
       }
-      if (held < sizing.finalShares) {
-        const reason = `SELL held=${held} need=${sizing.finalShares}`;
+      if (held < orderShares) {
+        const reason = `SELL held=${held} need=${orderShares}`;
         store.markSeenMany(sourceTradeKeys, leaderId);
         skipped++;
-        skip(store, leaderId, activity, reason, preview);
+        skip(store, leaderId, activity, reason, preview, executionAudit);
         continue;
       }
 
@@ -608,19 +824,24 @@ export async function runCopyCycle(
         const sellAllowance = await checkLiveSellTokenAllowance(
           config.wallet,
           activity.asset,
-          sizing.finalShares
+          orderShares
         );
         if (!sellAllowance.allow) {
           skipped++;
-          skip(store, leaderId, activity, sellAllowance.reason ?? "token allowance", preview);
+          skip(
+            store,
+            leaderId,
+            activity,
+            sellAllowance.reason ?? "token allowance",
+            preview,
+            executionAudit
+          );
           continue;
         }
       }
     }
 
-    let observedExecutablePrice: number | null = null;
-    let observedSlippagePct: number | null = null;
-    if (preview) {
+    if (!guardedExecution && preview) {
       try {
         observedExecutablePrice = await fetchBestExecutablePrice(
           config.wallet.clobUrl,
@@ -636,7 +857,7 @@ export async function runCopyCycle(
         leaderPrice,
         observedExecutablePrice
       );
-    } else if (config.app.global.risk.slippageTolerance > 0) {
+    } else if (!guardedExecution && config.app.global.risk.slippageTolerance > 0) {
       const ref = await fetchBestExecutablePrice(
         config.wallet.clobUrl,
         config.wallet.chainId,
@@ -659,8 +880,9 @@ export async function runCopyCycle(
     const orderReq = {
       tokenId: activity.asset,
       side: activity.side,
-      price: leaderPrice,
-      size: sizing.finalShares,
+      price: orderPrice,
+      size: orderShares,
+      expectedTickSize: guardedTickSize,
     };
 
     const tradeKeys = sourceTradeKeys;
@@ -672,8 +894,8 @@ export async function runCopyCycle(
         leaderId,
         tokenId: activity.asset,
         side: activity.side,
-        price: leaderPrice,
-        orderSize: sizing.finalShares,
+        price: orderPrice,
+        orderSize: orderShares,
         auditReason: sizing.reasoning,
         market,
       });
@@ -698,7 +920,10 @@ export async function runCopyCycle(
           tokenId: activity.asset,
           side: activity.side,
           size: orderResult.filledShares,
-          price: orderResult.executionPrice ?? leaderPrice,
+          price: orderResult.executionPrice ?? orderPrice,
+          leaderPrice: executionAudit?.leaderPrice,
+          executablePrice: executionAudit?.executablePrice,
+          slippagePct: executionAudit?.slippagePct,
           reason: `${partialFillError}; filled portion will be recorded`,
           preview,
         });
@@ -714,8 +939,11 @@ export async function runCopyCycle(
           action: "ERROR",
           tokenId: activity.asset,
           side: activity.side,
-          size: sizing.finalShares,
-          price: activity.price,
+          size: orderShares,
+          price: orderPrice,
+          leaderPrice: executionAudit?.leaderPrice,
+          executablePrice: executionAudit?.executablePrice,
+          slippagePct: executionAudit?.slippagePct,
           reason: orderResult.error,
           preview,
         });
@@ -739,7 +967,7 @@ export async function runCopyCycle(
       }
     }
 
-    const executionPrice = orderResult.executionPrice ?? leaderPrice;
+    const executionPrice = orderResult.executionPrice ?? orderPrice;
 
     if (preview) {
       if (orderResult.filledShares <= 0) {
@@ -752,7 +980,8 @@ export async function runCopyCycle(
           orderResult.pendingRemaining > 0
             ? `GTC pending (${orderResult.orderStatus ?? "resting"})`
             : (orderResult.orderStatus ?? "order submitted — no fill"),
-          preview
+          preview,
+          executionAudit
         );
         continue;
       }
@@ -788,8 +1017,11 @@ export async function runCopyCycle(
           action: "ERROR",
           tokenId: activity.asset,
           side: activity.side,
-          size: sizing.finalShares,
-          price: activity.price,
+          size: orderShares,
+          price: orderPrice,
+          leaderPrice: executionAudit?.leaderPrice,
+          executablePrice: executionAudit?.executablePrice,
+          slippagePct: executionAudit?.slippagePct,
           reason: msg,
           preview,
         });
@@ -802,7 +1034,10 @@ export async function runCopyCycle(
         tokenId: activity.asset,
         side: activity.side,
         price: executionPrice,
-        orderSize: sizing.finalShares,
+        leaderPrice: executionAudit?.leaderPrice,
+        executablePrice: executionAudit?.executablePrice,
+        slippagePct: executionAudit?.slippagePct,
+        orderSize: orderShares,
         filledShares: orderResult.filledShares,
         filledUsd: orderResult.filledUsd,
         auditReason: sizing.reasoning,
@@ -823,7 +1058,8 @@ export async function runCopyCycle(
           orderResult.pendingRemaining > 0
             ? `GTC pending (${orderResult.orderStatus ?? "resting"})`
             : (orderResult.orderStatus ?? "order submitted — no fill"),
-          preview
+          preview,
+          executionAudit
         );
         continue;
       }

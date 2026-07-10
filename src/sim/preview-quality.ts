@@ -201,7 +201,12 @@ function reasonMatchesParameterFilter(reason: string): boolean {
     reason.startsWith("side ") ||
     reason.startsWith("blocked market keyword ") ||
     reason === "not in allowlist" ||
-    reason.startsWith("invalid price ")
+    reason.startsWith("invalid price ") ||
+    reason.startsWith("slippage ") ||
+    reason === "executable price unavailable" ||
+    reason.startsWith("executable depth ") ||
+    reason.startsWith("market min order ") ||
+    reason.startsWith("guarded max order ")
   );
 }
 

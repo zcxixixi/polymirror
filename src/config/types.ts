@@ -4,6 +4,7 @@ export type OrderType = "GTC" | "FAK" | "FOK";
 export type PositionCapBasis = "market" | "cost";
 export type ConflictMode = "skip_both" | "net" | "priority_leader";
 export type TradeSide = "BUY" | "SELL";
+export type CopyPriceMode = "leader_limit" | "executable_guarded";
 export type TradingBackendKind = "secure";
 
 export type ProxyMode = "none" | "static" | "dynamic";
@@ -19,6 +20,7 @@ export interface GlobalConfig {
   pollIntervalMs: number;
   activityLimit: number;
   previewMode: boolean;
+  copyPriceMode: CopyPriceMode;
   copyTradesOnly: boolean;
   maxTradeAgeHours: number;
   buyDedupWindowMs: number;

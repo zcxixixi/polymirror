@@ -15,6 +15,7 @@ import {
 } from "./preview-evolution.js";
 import type { PreviewAccountReport } from "./preview-report.js";
 import { readPreviewAccountReport } from "./preview-report.js";
+import type { CopyPriceMode } from "../config/types.js";
 import type { PreviewAccountRanking } from "./preview-selection.js";
 import { rankPreviewAccounts } from "./preview-selection.js";
 import {
@@ -34,6 +35,7 @@ export interface GeneratePreviewAccountsReportOptions {
   outDir?: string;
   startingCapitalUsd?: number;
   startingCapitalByAccount?: ReadonlyMap<string, number> | Record<string, number>;
+  copyPriceModeByAccount?: ReadonlyMap<string, CopyPriceMode> | Record<string, CopyPriceMode>;
   limit?: number;
   recentWindowMs?: number;
   nowMs?: number;
@@ -211,6 +213,22 @@ function startingCapitalForAccount(
   return byAccount[accountId] ?? options.startingCapitalUsd ?? 200;
 }
 
+function copyPriceModeForAccount(
+  accountId: string,
+  options: GeneratePreviewAccountsReportOptions
+): CopyPriceMode {
+  const byAccount = options.copyPriceModeByAccount;
+  if (!byAccount) return "leader_limit";
+  if (isCopyPriceModeMap(byAccount)) return byAccount.get(accountId) ?? "leader_limit";
+  return byAccount[accountId] ?? "leader_limit";
+}
+
+function isCopyPriceModeMap(
+  value: GeneratePreviewAccountsReportOptions["copyPriceModeByAccount"]
+): value is ReadonlyMap<string, CopyPriceMode> {
+  return typeof (value as { get?: unknown } | undefined)?.get === "function";
+}
+
 export function generatePreviewAccountsReport(
   options: GeneratePreviewAccountsReportOptions = {}
 ): PreviewAccountsReportResult {
@@ -225,6 +243,7 @@ export function generatePreviewAccountsReport(
     readPreviewAccountReport({
       accountId,
       dbPath: join(dataDir, accountId, "preview.db"),
+      copyPriceMode: copyPriceModeForAccount(accountId, options),
       startingCapitalUsd: startingCapitalForAccount(accountId, options),
       limit: options.limit ?? 8,
       recentWindowMs: options.recentWindowMs,

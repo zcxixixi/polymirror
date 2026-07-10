@@ -117,10 +117,19 @@ export function assessStabilityGoal(
     report.missingMarketMetadataCount === 0;
   const pendingClean =
     report.pendingOrderCount === 0 && report.liveOrderIntentCount === 0;
+  const executableGuarded = report.copyPriceMode === "executable_guarded";
   const overallSlip = goal.slippage.lossPct;
   const recent20Slip = goal.recent20.slippageLossPct;
 
   const checks: StabilityGoalCheck[] = [
+    check(
+      "execution_mode",
+      "执行价模式为 executable_guarded",
+      executableGuarded ? 1 : 0,
+      1,
+      "=",
+      executableGuarded
+    ),
     check(
       "observation_days",
       `观察期 >= ${t.minObservationDays} 天`,
@@ -322,6 +331,7 @@ export function assessStabilityGoal(
   const matureOverall = goal.settledMarketCount >= t.minSettledMarkets;
   const matureRecent20 = goal.recent20.marketCount >= t.minRecent20Markets;
   const hasHardFailure =
+    !executableGuarded ||
     !accountingClean ||
     !pendingClean ||
     recentErrorCount > 0 ||

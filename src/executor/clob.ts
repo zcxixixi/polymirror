@@ -14,6 +14,7 @@ export interface PlaceOrderRequest {
   side: TradeSide;
   price: number;
   size: number;
+  expectedTickSize?: number;
 }
 
 export interface PlaceOrderResult {
@@ -116,7 +117,30 @@ export class ClobExecutor {
     }
 
     const tick = parseFloat(meta.tickSize);
+    if (
+      req.expectedTickSize !== undefined &&
+      Math.abs(tick - req.expectedTickSize) > 1e-9
+    ) {
+      return {
+        preview: false,
+        executionPrice: req.price,
+        error: `guarded order tick changed ${req.expectedTickSize} -> ${tick}`,
+        filledShares: 0,
+        filledUsd: 0,
+        pendingRemaining: 0,
+      };
+    }
     const price = roundToTick(req.price, tick);
+    if (req.expectedTickSize !== undefined && Math.abs(price - req.price) > 1e-9) {
+      return {
+        preview: false,
+        executionPrice: req.price,
+        error: `guarded order price ${req.price} is not aligned to tick ${tick}`,
+        filledShares: 0,
+        filledUsd: 0,
+        pendingRemaining: 0,
+      };
+    }
     const orderType = toOrderType(this.global.execution.orderType);
     const retries = this.global.execution.retryLimit;
 
@@ -154,31 +178,36 @@ export class ClobExecutor {
         if (!orderId) {
           const immFill = parseImmediateFill(immediate, req.side, price);
           if (immFill.shares > 0) {
-            const shares = Math.min(immFill.shares, req.size);
+            const isImmediateOrder =
+              orderType === OrderType.FAK || orderType === OrderType.FOK;
+            const shares = isImmediateOrder
+              ? immFill.shares
+              : Math.min(immFill.shares, req.size);
+            const filledUsd = immFill.usd > 0
+              ? immFill.usd
+              : Math.round(shares * price * 100) / 100;
             const pendingRemaining = Math.max(
               0,
-              Math.round((req.size - shares) * 100) / 100
+              isImmediateOrder ? 0 : Math.round((req.size - shares) * 100) / 100
             );
             if (pendingRemaining > 0) {
               const recovered = await this.findMatchingOpenOrder(req, price);
               if (recovered?.orderId) return recovered;
               return {
                 preview: false,
-                executionPrice: price,
+                executionPrice: averageFillPrice(shares, filledUsd, price),
                 error: "Partial fill without order ID — cannot track remaining GTC",
                 filledShares: shares,
-                filledUsd:
-                  immFill.usd > 0 ? immFill.usd : Math.round(shares * price * 100) / 100,
+                filledUsd,
                 orderStatus: immFill.status || immediate.status || "matched",
                 pendingRemaining: 0,
               };
             }
             return {
               preview: false,
-              executionPrice: price,
+              executionPrice: averageFillPrice(shares, filledUsd, price),
               filledShares: shares,
-              filledUsd:
-                immFill.usd > 0 ? immFill.usd : Math.round(shares * price * 100) / 100,
+              filledUsd,
               orderStatus: immFill.status || immediate.status || "matched",
               pendingRemaining: 0,
             };
@@ -212,7 +241,7 @@ export class ClobExecutor {
         return {
           preview: false,
           orderId,
-          executionPrice: price,
+          executionPrice: averageFillPrice(fill.shares, fill.usd, price),
           filledShares: fill.shares,
           filledUsd: fill.usd,
           orderStatus: fill.status,
@@ -484,6 +513,11 @@ export class ClobExecutor {
       remaining: requestedShares,
     };
   }
+}
+
+function averageFillPrice(shares: number, usd: number, fallback: number): number {
+  if (shares <= 0 || usd <= 0) return fallback;
+  return Math.round((usd / shares) * 100_000_000) / 100_000_000;
 }
 
 function parseImmediateFill(

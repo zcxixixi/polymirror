@@ -43,6 +43,7 @@ export function previewRuntimeConfig(
     app: {
       global: {
         previewMode: true,
+        copyPriceMode: "leader_limit",
         pollIntervalMs: 5000,
         activityLimit: 100,
         copyTradesOnly: true,

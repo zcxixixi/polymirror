@@ -23,6 +23,7 @@ const fallbackStartingCapitalUsd = Number(process.env.REPORT_STARTING_CAPITAL_US
 function loadConfigReportContext():
   | {
       startingCapitalByAccount?: Map<string, number>;
+      copyPriceModeByAccount?: Map<string, "leader_limit" | "executable_guarded">;
       currentActiveAccounts?: string[];
     }
   | undefined {
@@ -35,6 +36,12 @@ function loadConfigReportContext():
         normalized.accounts.map((account) => [
           account.id,
           accountMergedGlobal(normalized, account).risk.starting_capital_usd,
+        ])
+      ),
+      copyPriceModeByAccount: new Map(
+        normalized.accounts.map((account) => [
+          account.id,
+          accountMergedGlobal(normalized, account).copy_price_mode,
         ])
       ),
       currentActiveAccounts: normalized.accounts
@@ -56,6 +63,7 @@ const result = generatePreviewAccountsReport({
   currentActiveAccounts: configContext?.currentActiveAccounts,
   startingCapitalUsd: fallbackStartingCapitalUsd,
   startingCapitalByAccount: configContext?.startingCapitalByAccount,
+  copyPriceModeByAccount: configContext?.copyPriceModeByAccount,
   limit: Number(process.env.REPORT_LIMIT ?? 8),
   recentWindowMs:
     Number.isFinite(recentWindowMinutes) && recentWindowMinutes > 0
