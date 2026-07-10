@@ -21,6 +21,25 @@ afterEach(() => {
 });
 
 describe("StateStore transactions", () => {
+  it("orders audit rows by newest id when timestamps are equal", () => {
+    store.audit({ action: "COPY", reason: "first", preview: true });
+    store.audit({ action: "COPY", reason: "second", preview: true });
+    store.close();
+
+    const db = new Database(dbPath);
+    try {
+      db.prepare("UPDATE audit_log SET ts = 123").run();
+    } finally {
+      db.close();
+    }
+    store = new StateStore(dbPath);
+
+    expect(store.listAuditLog({ action: "COPY" }).items.map((row) => row.reason)).toEqual([
+      "second",
+      "first",
+    ]);
+  });
+
   it("creates audit-log indexes needed by long-running preview reports", () => {
     const db = new Database(dbPath, { readonly: true });
     try {
@@ -141,6 +160,46 @@ describe("StateStore transactions", () => {
     expect(store.getCashBalance(200)).toBe(170);
     expect(store.getDailyVolumeUsd()).toBe(50);
     expect(store.getLeaderDailyVolumeUsd("whale")).toBe(50);
+  });
+
+  it("includes fees in position cost and realized pnl without changing execution price", () => {
+    store.recordCopySuccess({
+      tradeKey: "fee-buy",
+      leaderId: "whale",
+      tokenId: "tok-fee",
+      side: "BUY",
+      filledShares: 10,
+      price: 0.5,
+      filledUsd: 5,
+      feeUsd: 0.1,
+      auditReason: "fee buy",
+      preview: true,
+      cashInitialUsd: 200,
+    });
+
+    expect(store.getPositionCostUsd("whale", "tok-fee")).toBe(5.1);
+    expect(store.getCashBalance(200)).toBe(194.9);
+    expect(store.getDailyVolumeUsd()).toBe(5);
+
+    store.recordCopySuccess({
+      tradeKey: "fee-sell",
+      leaderId: "whale",
+      tokenId: "tok-fee",
+      side: "SELL",
+      filledShares: 10,
+      price: 0.6,
+      filledUsd: 6,
+      feeUsd: 0.12,
+      auditReason: "fee sell",
+      preview: true,
+      cashInitialUsd: 200,
+    });
+
+    expect(store.getCashBalance(200)).toBe(200.78);
+    expect(store.getDailyRealizedPnl()).toBe(0.78);
+    const [sell, buy] = store.listAuditLog({ action: "COPY" }).items;
+    expect(buy).toMatchObject({ price: 0.5, feeUsd: 0.1 });
+    expect(sell).toMatchObject({ price: 0.6, feeUsd: 0.12 });
   });
 
   it("caps preview SELL cash, pnl, and audit size to actual held shares", () => {
@@ -288,6 +347,29 @@ describe("StateStore transactions", () => {
     expect(store.listPendingOrders()[0]?.filledShares).toBe(4);
   });
 
+  it("preserves cumulative pending notional when a legacy caller omits it", () => {
+    store.upsertPendingOrder({
+      orderId: "ord-legacy-progress",
+      leaderId: "whale",
+      tokenId: "tok-a",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 2,
+      filledUsd: 1,
+      tradeKey: "key-legacy-progress",
+      reasoning: "legacy",
+    });
+
+    store.commitPendingOrderProgress({
+      orderId: "ord-legacy-progress",
+      matchedFilledShares: 2,
+      remove: false,
+    });
+
+    expect(store.listPendingOrders()[0]?.filledUsd).toBe(1);
+  });
+
   it("recordLiveOrderAccepted marks seen, pending, and fill atomically", () => {
     store.recordLiveOrderAccepted({
       tradeKeys: ["key-a", "key-b"],
@@ -311,7 +393,13 @@ describe("StateStore transactions", () => {
     expect(store.hasSeen("key-b")).toBe(true);
     expect(store.getPosition("whale", "tok-a")).toBe(4);
     expect(store.countPendingOrders()).toBe(1);
-    expect(store.listPendingOrders()[0]?.filledShares).toBe(4);
+    expect(store.listPendingOrders()[0]).toMatchObject({
+      filledShares: 4,
+      filledUsd: 2,
+      leaderPrice: 0.49,
+      executablePrice: 0.5,
+      slippagePct: 2.0408,
+    });
     expect(store.getDailyVolumeUsd()).toBe(2);
     expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
       price: 0.5,

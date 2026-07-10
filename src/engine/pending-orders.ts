@@ -4,6 +4,7 @@ import type { RiskGate } from "../engine/risk.js";
 import { ClobExecutor } from "../executor/clob.js";
 import { logInfo, logError } from "../notify/logger.js";
 import type { TelegramNotifier } from "../notify/telegram.js";
+import { calculateCopySlippageLossPct } from "../sim/copy-slippage.js";
 
 export function isPreviewOrderId(orderId: string): boolean {
   return orderId.startsWith("preview-");
@@ -34,6 +35,8 @@ interface RowProcessResult {
 function buildFillPayload(
   row: PendingOrderRow,
   delta: number,
+  deltaUsd: number,
+  deltaFeeUsd: number,
   preview: boolean
 ): {
   leaderId: string;
@@ -41,16 +44,28 @@ function buildFillPayload(
   side: "BUY" | "SELL";
   delta: number;
   price: number;
+  feeUsd?: number;
+  leaderPrice?: number;
+  executablePrice?: number | null;
+  slippagePct?: number | null;
   auditReason: string;
   preview: boolean;
 } | undefined {
   if (delta <= 0) return undefined;
+  const price = deltaUsd > 0 ? deltaUsd / delta : row.price;
+  const leaderPrice = row.leaderPrice ?? undefined;
   return {
     leaderId: row.leaderId,
     tokenId: row.tokenId,
     side: row.side,
     delta,
-    price: row.price,
+    price,
+    feeUsd: deltaFeeUsd,
+    leaderPrice,
+    executablePrice: price,
+    slippagePct: leaderPrice === undefined
+      ? row.slippagePct
+      : calculateCopySlippageLossPct(row.side, leaderPrice, price),
     auditReason: `${row.reasoning}; pending fill`,
     preview,
   };
@@ -87,7 +102,17 @@ async function processPendingOrderRow(
     const status = statusResult.status;
     const matched = Math.min(status.sizeMatched, row.size);
     const delta = Math.round((matched - row.filledShares) * 100) / 100;
-    const fill = buildFillPayload(row, delta, preview);
+    const reportedFilledUsd = status.filledUsd;
+    const matchedFilledUsd = reportedFilledUsd !== undefined && reportedFilledUsd > 0
+      ? reportedFilledUsd * (matched / status.sizeMatched)
+      : matched * row.price;
+    const deltaUsd = Math.max(0, matchedFilledUsd - row.filledUsd);
+    const reportedFeeUsd = status.feeUsd;
+    const matchedFeeUsd = reportedFeeUsd !== undefined && reportedFeeUsd >= 0 && status.sizeMatched > 0
+      ? reportedFeeUsd * (matched / status.sizeMatched)
+      : row.feeUsd;
+    const deltaFeeUsd = Math.max(0, matchedFeeUsd - row.feeUsd);
+    const fill = buildFillPayload(row, delta, deltaUsd, deltaFeeUsd, preview);
     const terminal = status.terminal || matched >= row.size * 0.99;
     const filled = fill ? 1 : 0;
 
@@ -95,6 +120,8 @@ async function processPendingOrderRow(
       store.commitPendingOrderProgress({
         orderId: row.orderId,
         matchedFilledShares: matched,
+        matchedFilledUsd,
+        matchedFeeUsd,
         fill,
         remove: true,
       });
@@ -123,6 +150,8 @@ async function processPendingOrderRow(
         store.commitPendingOrderProgress({
           orderId: row.orderId,
           matchedFilledShares: matched,
+          matchedFilledUsd,
+          matchedFeeUsd,
           fill,
           remove: true,
           staleSkipAudit: {
@@ -151,6 +180,8 @@ async function processPendingOrderRow(
       store.commitPendingOrderProgress({
         orderId: row.orderId,
         matchedFilledShares: matched,
+        matchedFilledUsd,
+        matchedFeeUsd,
         fill,
         remove: false,
       });
@@ -178,6 +209,8 @@ async function processPendingOrderRow(
     store.commitPendingOrderProgress({
       orderId: row.orderId,
       matchedFilledShares: matched,
+      matchedFilledUsd,
+      matchedFeeUsd,
       fill,
       remove: false,
     });

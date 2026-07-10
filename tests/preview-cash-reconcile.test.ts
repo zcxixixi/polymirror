@@ -22,6 +22,45 @@ afterEach(() => {
 });
 
 describe("reconcilePreviewCash", () => {
+  it("replays BUY and SELL fees from the audit log", () => {
+    store.recordCopySuccess({
+      tradeKey: "cash-fee-buy",
+      leaderId: "whale",
+      tokenId: "tok-fee",
+      side: "BUY",
+      filledShares: 2,
+      price: 0.5,
+      filledUsd: 1,
+      feeUsd: 0.1,
+      auditReason: "fee-aware buy",
+      preview: true,
+      cashInitialUsd: 20,
+    });
+    store.recordCopySuccess({
+      tradeKey: "cash-fee-sell",
+      leaderId: "whale",
+      tokenId: "tok-fee",
+      side: "SELL",
+      filledShares: 1,
+      price: 0.6,
+      filledUsd: 0.6,
+      feeUsd: 0.06,
+      auditReason: "fee-aware sell",
+      preview: true,
+      cashInitialUsd: 20,
+    });
+    store.close();
+
+    const result = reconcilePreviewCash({
+      dbPath,
+      startingCapitalUsd: 20,
+      dryRun: true,
+    });
+
+    expect(result.replayedCashUsd).toBe(19.44);
+    expect(result.deltaUsd).toBe(0);
+  });
+
   it("replays audit rows and corrects stale rounded preview cash", () => {
     store.recordCopySuccess({
       tradeKey: "cash-buy-a",

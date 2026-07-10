@@ -160,6 +160,60 @@ describe("adoptUntrackedOpenOrders", () => {
     });
   });
 
+  it("recovers a unique partial immediate fill after submit succeeded but local commit crashed", async () => {
+    const createdAt = Date.now() - 10 * 60_000;
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-partial"],
+      leaderId: "whale",
+      tokenId: "tok-partial",
+      side: "BUY",
+      price: 0.55,
+      leaderPrice: 0.5,
+      executablePrice: 0.52,
+      slippagePct: 4,
+      orderSize: 20,
+      auditReason: "10% copy",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, createdAt);
+    mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockResolvedValue({
+      kind: "ok",
+      fills: [
+        {
+          orderId: "clob-fak-partial",
+          tokenId: "tok-partial",
+          side: "BUY",
+          averagePrice: 0.54,
+          shares: 4,
+          usd: 2.16,
+          feeUsd: 0.02,
+          matchedAt: createdAt + 1_000,
+        },
+      ],
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const { adopted, warnings } = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(adopted).toBe(1);
+    expect(warnings).toEqual([]);
+    expect(store.getPosition("whale", "tok-partial")).toBe(4);
+    expect(store.getPositionCostUsd("whale", "tok-partial")).toBe(2.18);
+    expect(store.hasSeen("source-partial")).toBe(true);
+    expect(store.listLiveOrderIntents()).toHaveLength(0);
+    expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
+      leaderId: "whale",
+      tokenId: "tok-partial",
+      side: "BUY",
+      size: 4,
+      price: 0.54,
+      leaderPrice: 0.5,
+      executablePrice: 0.54,
+      slippagePct: 8,
+      feeUsd: 0.02,
+    });
+  });
+
   it("keeps a stale intent when completed fill matching is ambiguous", async () => {
     const createdAt = Date.now() - 10 * 60_000;
     const intentId = store.recordLiveOrderIntent({

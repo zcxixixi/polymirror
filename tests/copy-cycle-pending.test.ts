@@ -164,6 +164,10 @@ describe("runCopyCycle pending reconciliation", () => {
       price: 0.5,
       size: 10,
       filledShares: 0,
+      filledUsd: 0,
+      leaderPrice: 0.5,
+      executablePrice: 0.5,
+      slippagePct: 0,
       tradeKey: "k1",
       reasoning: "10%",
     });
@@ -174,6 +178,9 @@ describe("runCopyCycle pending reconciliation", () => {
         originalSize: 10,
         status: "MATCHED",
         terminal: true,
+        filledUsd: 4.8,
+        averagePrice: 0.48,
+        feeUsd: 0.048,
       },
     });
 
@@ -181,6 +188,15 @@ describe("runCopyCycle pending reconciliation", () => {
     expect(result.pendingFilled).toBe(1);
     expect(result.copied).toBe(0);
     expect(store.countPendingOrders()).toBe(0);
+    expect(store.getPositionCostUsd("whale", "tok-a")).toBe(4.848);
+    expect(store.getDailyVolumeUsd()).toBe(4.8);
+    expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
+      price: 0.48,
+      leaderPrice: 0.5,
+      executablePrice: 0.48,
+      slippagePct: 0,
+      feeUsd: 0.048,
+    });
     expect(result.errors.some((e) => e.includes("copy trading disabled"))).toBe(true);
   });
 

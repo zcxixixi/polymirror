@@ -12,6 +12,7 @@ const wallet = {} as WalletConfig;
 const mockGetSecureClient = vi.mocked(getSecureClient);
 const placeMarketOrder = vi.fn();
 const listAccountTrades = vi.fn();
+const fetchOrder = vi.fn();
 
 describe("SecureTradingBackend", () => {
   beforeEach(() => {
@@ -24,8 +25,9 @@ describe("SecureTradingBackend", () => {
       takingAmount: "10",
     });
     listAccountTrades.mockReset();
+    fetchOrder.mockReset();
     mockGetSecureClient.mockReset();
-    mockGetSecureClient.mockResolvedValue({ placeMarketOrder, listAccountTrades } as never);
+    mockGetSecureClient.mockResolvedValue({ placeMarketOrder, listAccountTrades, fetchOrder } as never);
   });
 
   it.each([
@@ -55,14 +57,15 @@ describe("SecureTradingBackend", () => {
     }
   );
 
-  it("groups recent successful taker fills by order id", async () => {
+  it("groups only confirmed taker fills by order id", async () => {
     const since = Date.parse("2026-07-10T00:00:00.000Z");
     const trade = (overrides: Record<string, unknown>) => ({
       tokenId: "token-1",
       side: "BUY",
       price: "0.50",
       size: "4",
-      status: "MATCHED",
+      feeRateBps: "100",
+      status: "CONFIRMED",
       takerOrderId: "order-1",
       traderSide: "TAKER",
       matchedAt: "2026-07-10T00:00:01.000Z",
@@ -79,6 +82,9 @@ describe("SecureTradingBackend", () => {
               size: "6",
               matchedAt: "2026-07-10T00:00:02.000Z",
             }),
+            trade({ status: "MATCHED", takerOrderId: "matched-order" }),
+            trade({ status: "MINED", takerOrderId: "mined-order" }),
+            trade({ status: "RETRYING", takerOrderId: "retrying-order" }),
             trade({ status: "FAILED", takerOrderId: "failed-order" }),
             trade({ traderSide: "MAKER", takerOrderId: "maker-order" }),
             trade({
@@ -101,8 +107,62 @@ describe("SecureTradingBackend", () => {
         averagePrice: 0.56,
         shares: 10,
         usd: 5.6,
+        feeUsd: 0.056,
         matchedAt: Date.parse("2026-07-10T00:00:02.000Z"),
       },
     ]);
+  });
+
+  it("returns trade-weighted fill details for an open partially filled order", async () => {
+    fetchOrder.mockResolvedValue({
+      sizeMatched: "10",
+      originalSize: "20",
+      status: "LIVE",
+    });
+    listAccountTrades.mockReturnValue(
+      (async function* () {
+        yield {
+          items: [
+            {
+              tokenId: "token-1",
+              side: "BUY",
+              price: "0.40",
+              size: "4",
+              status: "MATCHED",
+              takerOrderId: "order-1",
+              traderSide: "TAKER",
+              matchedAt: "2026-07-10T00:00:01.000Z",
+              makerOrders: [],
+            },
+            {
+              tokenId: "token-1",
+              side: "BUY",
+              price: "0.60",
+              size: "6",
+              status: "MINED",
+              takerOrderId: "order-1",
+              traderSide: "TAKER",
+              matchedAt: "2026-07-10T00:00:02.000Z",
+              makerOrders: [],
+            },
+          ],
+        };
+      })()
+    );
+
+    const result = await new SecureTradingBackend(wallet).getOrderStatus("order-1", "token-1");
+
+    expect(result).toEqual({
+      kind: "ok",
+      status: {
+        sizeMatched: 10,
+        originalSize: 20,
+        status: "LIVE",
+        terminal: false,
+        filledUsd: 5.2,
+        averagePrice: 0.52,
+        feeUsd: 0,
+      },
+    });
   });
 });

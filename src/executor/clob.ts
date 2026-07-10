@@ -12,6 +12,7 @@ import {
 } from "./trading-backend.js";
 import { logError, logInfo } from "../notify/logger.js";
 import { OrderType } from "@polymarket/client";
+import { calculatePlatformFeeUsd } from "./fees.js";
 
 export interface PlaceOrderRequest {
   tokenId: string;
@@ -19,6 +20,8 @@ export interface PlaceOrderRequest {
   price: number;
   size: number;
   expectedTickSize?: number;
+  feeRate?: number;
+  feeExponent?: number;
 }
 
 export interface PlaceOrderResult {
@@ -29,6 +32,7 @@ export interface PlaceOrderResult {
   executionPrice?: number;
   filledShares: number;
   filledUsd: number;
+  feeUsd?: number;
   orderStatus?: string;
   /** Shares still resting on CLOB (GTC only). */
   pendingRemaining: number;
@@ -39,6 +43,9 @@ export interface OrderStatusSnapshot {
   originalSize: number;
   status: string;
   terminal: boolean;
+  filledUsd?: number;
+  averagePrice?: number;
+  feeUsd?: number;
 }
 
 export type OrderStatusResult =
@@ -98,12 +105,19 @@ export class ClobExecutor {
     const notional = req.price * req.size;
 
     if (this.global.previewMode) {
+      const feeUsd = calculatePlatformFeeUsd(
+        req.size,
+        req.price,
+        req.feeRate ?? 0,
+        req.feeExponent ?? 0
+      );
       return {
         preview: true,
         orderId: `preview-${req.tokenId.slice(0, 8)}-${Date.now()}`,
         executionPrice: req.price,
         filledShares: req.size,
         filledUsd: notional,
+        feeUsd,
         orderStatus: "PREVIEW",
         pendingRemaining: 0,
       };
@@ -194,6 +208,13 @@ export class ClobExecutor {
             const filledUsd = immFill.usd > 0
               ? immFill.usd
               : Math.round(shares * price * 100) / 100;
+            const executionPrice = averageFillPrice(shares, filledUsd, price);
+            const feeUsd = calculatePlatformFeeUsd(
+              shares,
+              executionPrice,
+              meta.feeRate,
+              meta.feeExponent
+            );
             const pendingRemaining = Math.max(
               0,
               isImmediateOrder ? 0 : Math.round((req.size - shares) * 100) / 100
@@ -203,19 +224,21 @@ export class ClobExecutor {
               if (recovered?.orderId) return recovered;
               return {
                 preview: false,
-                executionPrice: averageFillPrice(shares, filledUsd, price),
+                executionPrice,
                 error: "Partial fill without order ID — cannot track remaining GTC",
                 filledShares: shares,
                 filledUsd,
+                feeUsd,
                 orderStatus: immFill.status || immediate.status || "matched",
                 pendingRemaining: 0,
               };
             }
             return {
               preview: false,
-              executionPrice: averageFillPrice(shares, filledUsd, price),
+              executionPrice,
               filledShares: shares,
               filledUsd,
+              feeUsd,
               orderStatus: immFill.status || immediate.status || "matched",
               pendingRemaining: 0,
             };
@@ -246,12 +269,21 @@ export class ClobExecutor {
           immediate
         );
 
+        const averagePrice = averageFillPrice(fill.shares, fill.usd, price);
+        const feeUsd = fill.feeUsd ?? calculatePlatformFeeUsd(
+          fill.shares,
+          averagePrice,
+          meta.feeRate,
+          meta.feeExponent
+        );
+
         return {
           preview: false,
           orderId,
-          executionPrice: averageFillPrice(fill.shares, fill.usd, price),
+          executionPrice: averagePrice,
           filledShares: fill.shares,
           filledUsd: fill.usd,
+          feeUsd,
           orderStatus: fill.status,
           pendingRemaining: fill.remaining,
         };
@@ -394,9 +426,14 @@ export class ClobExecutor {
         if (statusResult.kind !== "ok") continue;
 
         const { sizeMatched, status } = statusResult.status;
+        const filledShares = Math.min(sizeMatched, req.size);
+        const reportedUsd = statusResult.status.filledUsd;
+        const filledUsd = reportedUsd !== undefined && reportedUsd > 0 && sizeMatched > 0
+          ? reportedUsd * (filledShares / sizeMatched)
+          : filledShares * matchPrice;
         const remaining = Math.max(
           0,
-          Math.round((req.size - Math.min(sizeMatched, req.size)) * 100) / 100
+          Math.round((req.size - filledShares) * 100) / 100
         );
         logInfo("Recovered open order after submit failure", {
           orderId: orderId.slice(0, 12),
@@ -406,9 +443,10 @@ export class ClobExecutor {
         return {
           preview: false,
           orderId,
-          executionPrice: matchPrice,
-          filledShares: Math.min(sizeMatched, req.size),
-          filledUsd: Math.min(sizeMatched, req.size) * matchPrice,
+          executionPrice: averageFillPrice(filledShares, filledUsd, matchPrice),
+          filledShares,
+          filledUsd: Math.round(filledUsd * 100_000_000) / 100_000_000,
+          feeUsd: statusResult.status.feeUsd,
           orderStatus: `${status} (recovered)`,
           pendingRemaining: remaining,
         };
@@ -428,7 +466,7 @@ export class ClobExecutor {
     price: number,
     orderType: OrderType,
     immediate: { takingAmount?: string; makingAmount?: string; status?: string }
-  ): Promise<{ shares: number; usd: number; status: string; remaining: number }> {
+  ): Promise<{ shares: number; usd: number; feeUsd?: number; status: string; remaining: number }> {
     if (orderType === OrderType.FAK || orderType === OrderType.FOK) {
       const fromResp = parseImmediateFill(immediate, req.side, price);
       if (fromResp.shares > 0) {
@@ -464,7 +502,7 @@ export class ClobExecutor {
     price: number,
     timeoutMs: number,
     tokenId?: string
-  ): Promise<{ shares: number; usd: number; status: string; remaining: number }> {
+  ): Promise<{ shares: number; usd: number; feeUsd?: number; status: string; remaining: number }> {
     if (timeoutMs <= 0) {
       return {
         shares: 0,
@@ -487,10 +525,17 @@ export class ClobExecutor {
 
         if (matched > 0) {
           const shares = Math.min(matched, requestedShares);
+          const actualUsd = statusResult.status.filledUsd;
+          const usd = actualUsd !== undefined && actualUsd > 0
+            ? actualUsd * (shares / matched)
+            : shares * price;
           const remaining = Math.max(0, Math.round((requestedShares - shares) * 100) / 100);
           return {
             shares: Math.round(shares * 100) / 100,
-            usd: Math.round(shares * price * 100) / 100,
+            usd: Math.round(usd * 100_000_000) / 100_000_000,
+            feeUsd: statusResult.status.feeUsd === undefined
+              ? undefined
+              : statusResult.status.feeUsd * (shares / matched),
             status: matched >= original * 0.99 ? status : `${status} (partial)`,
             remaining,
           };
@@ -513,13 +558,20 @@ export class ClobExecutor {
       const statusResult = await this.getOrderStatus(orderId, tokenId);
       if (statusResult.kind === "ok" && statusResult.status.sizeMatched > 0) {
         const shares = Math.min(statusResult.status.sizeMatched, requestedShares);
+        const actualUsd = statusResult.status.filledUsd;
+        const usd = actualUsd !== undefined && actualUsd > 0
+          ? actualUsd * (shares / statusResult.status.sizeMatched)
+          : shares * price;
         logInfo("GTC partial fill after timeout", {
           orderId: orderId.slice(0, 12),
           matched: shares,
         });
         return {
           shares: Math.round(shares * 100) / 100,
-          usd: Math.round(shares * price * 100) / 100,
+          usd: Math.round(usd * 100_000_000) / 100_000_000,
+          feeUsd: statusResult.status.feeUsd === undefined
+            ? undefined
+            : statusResult.status.feeUsd * (shares / statusResult.status.sizeMatched),
           status: `${statusResult.status.status} (partial, timeout)`,
           remaining: Math.max(0, Math.round((requestedShares - shares) * 100) / 100),
         };

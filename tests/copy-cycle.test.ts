@@ -144,6 +144,8 @@ describe("runCopyCycle", () => {
       levels: [{ price: "0.51", size: "10" }],
       tickSize: 0.01,
       minOrderShares: 1,
+      feeRate: 0.25,
+      feeExponent: 2,
     });
 
     const result = await runCopyCycle(config, store);
@@ -155,9 +157,10 @@ describe("runCopyCycle", () => {
       leaderPrice: 0.5,
       executablePrice: 0.52,
       slippagePct: 4,
+      feeUsd: 0.03005983,
     });
     expect(store.getCashBalance(config.app.global.risk.startingCapitalUsd)).toBeCloseTo(
-      config.app.global.risk.startingCapitalUsd - 1.0036,
+      config.app.global.risk.startingCapitalUsd - 1.03365983,
       4
     );
   });

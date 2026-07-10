@@ -36,6 +36,7 @@ export interface CompletedOrderFill {
   averagePrice: number;
   shares: number;
   usd: number;
+  feeUsd?: number;
   matchedAt: number;
 }
 

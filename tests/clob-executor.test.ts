@@ -142,6 +142,8 @@ describe("ClobExecutor", () => {
         originalSize: 2,
         status: "LIVE",
         terminal: false,
+        filledUsd: 0.225,
+        averagePrice: 0.45,
       },
     });
     const retryingGlobal: GlobalConfig = {
@@ -158,6 +160,8 @@ describe("ClobExecutor", () => {
 
     expect(mockSubmitOrder).toHaveBeenCalledTimes(1);
     expect(result.orderId).toBe("ord-recovered");
+    expect(result.executionPrice).toBe(0.45);
+    expect(result.filledUsd).toBe(0.225);
     expect(result.pendingRemaining).toBe(1.5);
   });
 
@@ -175,6 +179,12 @@ describe("ClobExecutor", () => {
   });
 
   it("returns the actual FOK average fill price instead of the limit", async () => {
+    mockFetchOrderBookMeta.mockResolvedValueOnce({
+      tickSize: "0.01",
+      negRisk: false,
+      feeRate: 0.25,
+      feeExponent: 2,
+    });
     mockSubmitOrder.mockResolvedValueOnce({
       raw: { ok: true },
       orderId: "ord-fok",
@@ -192,6 +202,45 @@ describe("ClobExecutor", () => {
       side: "BUY",
       price: 0.52,
       size: 1.93,
+      expectedTickSize: 0.01,
+    });
+
+    expect(result).toMatchObject({
+      executionPrice: 0.5,
+      filledShares: 2,
+      filledUsd: 1,
+      feeUsd: 0.03125,
+      pendingRemaining: 0,
+    });
+  });
+
+  it("uses actual trade notional when an immediate fill must be polled", async () => {
+    mockSubmitOrder.mockResolvedValueOnce({
+      raw: { ok: true },
+      orderId: "ord-polled",
+      status: "matched",
+    });
+    mockGetOrderStatus.mockResolvedValueOnce({
+      kind: "ok",
+      status: {
+        sizeMatched: 2,
+        originalSize: 2,
+        status: "MATCHED",
+        terminal: true,
+        filledUsd: 1,
+        averagePrice: 0.5,
+      },
+    });
+    const fokGlobal: GlobalConfig = {
+      ...global,
+      execution: { ...global.execution, orderType: "FOK" },
+    };
+
+    const result = await new ClobExecutor(wallet, fokGlobal).placeLimitOrder({
+      tokenId: "token-abc",
+      side: "BUY",
+      price: 0.52,
+      size: 2,
       expectedTickSize: 0.01,
     });
 

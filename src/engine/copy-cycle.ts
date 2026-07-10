@@ -556,6 +556,8 @@ export async function runCopyCycle(
     let orderShares = sizing.finalShares;
     let orderUsd = sizing.finalUsd;
     let guardedTickSize: number | undefined;
+    let guardedFeeRate = 0;
+    let guardedFeeExponent = 0;
     let executionAudit:
       | {
           leaderPrice: number;
@@ -680,6 +682,8 @@ export async function runCopyCycle(
       orderShares = guarded.orderShares;
       orderUsd = guarded.orderUsd;
       guardedTickSize = snapshot?.tickSize;
+      guardedFeeRate = snapshot?.feeRate ?? 0;
+      guardedFeeExponent = snapshot?.feeExponent ?? 0;
       executionAudit = {
         leaderPrice,
         executablePrice: observedExecutablePrice,
@@ -885,6 +889,8 @@ export async function runCopyCycle(
       price: orderPrice,
       size: orderShares,
       expectedTickSize: guardedTickSize,
+      feeRate: guardedExecution ? guardedFeeRate : undefined,
+      feeExponent: guardedExecution ? guardedFeeExponent : undefined,
     };
 
     const tradeKeys = sourceTradeKeys;
@@ -897,6 +903,9 @@ export async function runCopyCycle(
         tokenId: activity.asset,
         side: activity.side,
         price: orderPrice,
+        leaderPrice: executionAudit?.leaderPrice,
+        executablePrice: executionAudit?.executablePrice,
+        slippagePct: executionAudit?.slippagePct,
         orderSize: orderShares,
         auditReason: sizing.reasoning,
         market,
@@ -1010,6 +1019,7 @@ export async function runCopyCycle(
         executablePrice: filledExecutionAudit?.executablePrice ?? observedExecutablePrice,
         slippagePct: filledExecutionAudit?.slippagePct ?? observedSlippagePct,
         filledUsd: orderResult.filledUsd,
+        feeUsd: orderResult.feeUsd,
         auditReason: sizing.reasoning,
         preview: true,
         cashInitialUsd: config.app.global.risk.startingCapitalUsd,
@@ -1053,6 +1063,7 @@ export async function runCopyCycle(
         orderSize: orderShares,
         filledShares: orderResult.filledShares,
         filledUsd: orderResult.filledUsd,
+        feeUsd: orderResult.feeUsd,
         auditReason: sizing.reasoning,
         orderId: orderResult.orderId,
         pendingRemaining: orderResult.pendingRemaining,

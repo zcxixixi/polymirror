@@ -2,6 +2,7 @@ import type { LiveOrderIntentRow, StateStore } from "../state/store.js";
 import type { ClobExecutor } from "../executor/clob.js";
 import type { CompletedOrderFill } from "../executor/trading-backend.js";
 import { logInfo } from "../notify/logger.js";
+import { calculateCopySlippageLossPct } from "../sim/copy-slippage.js";
 
 /** Leader id for orders recovered from CLOB without local metadata. */
 export const RECOVERED_ORDER_LEADER = "_recovered";
@@ -10,8 +11,6 @@ const INTENT_SIZE_TOLERANCE = 0.05;
 const LIVE_ORDER_INTENT_RECOVERY_MS = 2 * 60_000;
 const COMPLETED_FILL_CLOCK_SKEW_MS = 5_000;
 const COMPLETED_FILL_PRICE_EPSILON = 1e-8;
-const COMPLETED_BUY_NOTIONAL_TOLERANCE_PCT = 0.05;
-const COMPLETED_BUY_NOTIONAL_TOLERANCE_USD = 0.05;
 
 type OpenOrder = Awaited<ReturnType<ClobExecutor["listOpenOrders"]>>[number];
 
@@ -40,6 +39,7 @@ function matchesCompletedFill(
   intent: LiveOrderIntentRow,
   fill: CompletedOrderFill
 ): boolean {
+  const feeUsd = fill.feeUsd ?? 0;
   if (intent.tokenId !== fill.tokenId || intent.side !== fill.side) return false;
   if (
     !Number.isFinite(fill.averagePrice) ||
@@ -48,6 +48,8 @@ function matchesCompletedFill(
     fill.shares <= 0 ||
     !Number.isFinite(fill.usd) ||
     fill.usd <= 0 ||
+    !Number.isFinite(feeUsd) ||
+    feeUsd < 0 ||
     !Number.isFinite(fill.matchedAt)
   ) {
     return false;
@@ -58,18 +60,11 @@ function matchesCompletedFill(
   if (intent.side === "BUY") {
     if (fill.averagePrice > intent.price + COMPLETED_FILL_PRICE_EPSILON) return false;
     const expectedUsd = roundUsd(intent.price * intent.size);
-    const shortfallTolerance = Math.max(
-      COMPLETED_BUY_NOTIONAL_TOLERANCE_USD,
-      expectedUsd * COMPLETED_BUY_NOTIONAL_TOLERANCE_PCT
-    );
-    return (
-      fill.usd >= expectedUsd - shortfallTolerance &&
-      fill.usd <= expectedUsd + 0.01
-    );
+    return fill.usd + feeUsd <= expectedUsd + 0.01;
   }
 
   if (fill.averagePrice < intent.price - COMPLETED_FILL_PRICE_EPSILON) return false;
-  return Math.abs(fill.shares - intent.size) <= INTENT_SIZE_TOLERANCE;
+  return fill.shares <= intent.size + INTENT_SIZE_TOLERANCE;
 }
 
 function expireStaleIntents(
@@ -136,15 +131,26 @@ export async function adoptUntrackedOpenOrders(
         0,
         Math.round((order.size - Math.min(filledShares, order.size)) * 100) / 100
       );
+      const filledUsd = statusResult.kind === "ok" && statusResult.status.filledUsd !== undefined
+        ? statusResult.status.filledUsd
+        : roundUsd(filledShares * intent.price);
+      const actualPrice = filledShares > 0 ? filledUsd / filledShares : intent.price;
+      const feeUsd = statusResult.kind === "ok" ? statusResult.status.feeUsd ?? 0 : 0;
       store.recordLiveOrderAccepted({
         tradeKeys: intent.tradeKeys,
         leaderId: intent.leaderId,
         tokenId: order.tokenId,
         side,
-        price: intent.price,
+        price: actualPrice,
+        leaderPrice: intent.leaderPrice ?? undefined,
+        executablePrice: filledShares > 0 ? actualPrice : intent.executablePrice,
+        slippagePct: intent.leaderPrice !== null && filledShares > 0
+          ? calculateCopySlippageLossPct(side, intent.leaderPrice, actualPrice)
+          : intent.slippagePct,
         orderSize: order.size,
         filledShares,
-        filledUsd: roundUsd(filledShares * intent.price),
+        filledUsd,
+        feeUsd,
         auditReason: `${intent.reasoning}; recovered after restart`,
         orderId: order.orderId,
         pendingRemaining,
@@ -172,6 +178,10 @@ export async function adoptUntrackedOpenOrders(
       price: order.price,
       size: order.size,
       filledShares,
+      filledUsd: statusResult.kind === "ok" && statusResult.status.filledUsd !== undefined
+        ? statusResult.status.filledUsd
+        : filledShares * order.price,
+      feeUsd: statusResult.kind === "ok" ? statusResult.status.feeUsd ?? 0 : 0,
       tradeKey: `recovered-${order.orderId}`,
       reasoning: "auto-recovered orphan CLOB order",
     });
@@ -241,9 +251,15 @@ export async function adoptUntrackedOpenOrders(
       tokenId: fill.tokenId,
       side: fill.side,
       price: fill.averagePrice,
+      leaderPrice: intent.leaderPrice ?? undefined,
+      executablePrice: fill.averagePrice,
+      slippagePct: intent.leaderPrice === null
+        ? intent.slippagePct
+        : calculateCopySlippageLossPct(fill.side, intent.leaderPrice, fill.averagePrice),
       orderSize: fill.shares,
       filledShares: fill.shares,
       filledUsd: fill.usd,
+      feeUsd: fill.feeUsd ?? 0,
       auditReason: `${intent.reasoning}; recovered completed immediate fill after restart`,
       orderId: fill.orderId,
       pendingRemaining: 0,

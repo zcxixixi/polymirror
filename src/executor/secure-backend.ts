@@ -10,6 +10,7 @@ import type {
   SubmitOrderResponse,
   TradingBackend,
 } from "./trading-backend.js";
+import { calculateFeeFromBps } from "./fees.js";
 
 function isTerminalStatus(status: string): boolean {
   const s = status.toLowerCase();
@@ -38,6 +39,16 @@ function parseMatchedAt(value: string): number {
 
 function roundFillValue(value: number): number {
   return Math.round(value * 100_000_000) / 100_000_000;
+}
+
+const ACTIVE_FILL_STATUSES = new Set(["MATCHED", "MINED", "CONFIRMED"]);
+const CONFIRMED_FILL_STATUSES = new Set(["CONFIRMED"]);
+
+interface AggregatedOrderFill {
+  shares: number;
+  usd: number;
+  averagePrice: number;
+  feeUsd: number;
 }
 
 function mapAcceptedResponse(resp: {
@@ -112,7 +123,21 @@ export class SecureTradingBackend implements TradingBackend {
       const status = String(order.status ?? "unknown");
       const terminal =
         isTerminalStatus(status) || (originalSize > 0 && sizeMatched >= originalSize * 0.99);
-      return { kind: "ok", status: { sizeMatched, originalSize, status, terminal } };
+      const fill = tokenId && sizeMatched > 0
+        ? await this.aggregateOrderFillFromTrades(orderId, tokenId, ACTIVE_FILL_STATUSES)
+        : null;
+      return {
+        kind: "ok",
+        status: {
+          sizeMatched,
+          originalSize,
+          status,
+          terminal,
+          ...(fill
+            ? { filledUsd: fill.usd, averagePrice: fill.averagePrice, feeUsd: fill.feeUsd }
+            : {}),
+        },
+      };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (!isOrderNoLongerOpen(msg)) return { kind: "transient", message: msg };
@@ -122,11 +147,23 @@ export class SecureTradingBackend implements TradingBackend {
       // instead of being dropped as not_found.
       if (tokenId) {
         try {
-          const sizeMatched = await this.sumMatchedSharesFromTrades(orderId, tokenId);
-          if (sizeMatched > 0) {
+          const fill = await this.aggregateOrderFillFromTrades(
+            orderId,
+            tokenId,
+            CONFIRMED_FILL_STATUSES
+          );
+          if (fill && fill.shares > 0) {
             return {
               kind: "ok",
-              status: { sizeMatched, originalSize: 0, status: "closed", terminal: true },
+              status: {
+                sizeMatched: fill.shares,
+                originalSize: fill.shares,
+                status: "CONFIRMED",
+                terminal: true,
+                filledUsd: fill.usd,
+                averagePrice: fill.averagePrice,
+                feeUsd: fill.feeUsd,
+              },
             };
           }
         } catch (tradeErr) {
@@ -138,24 +175,56 @@ export class SecureTradingBackend implements TradingBackend {
     }
   }
 
-  /** Sum shares matched against `orderId` across all account trades for `tokenId`. */
-  private async sumMatchedSharesFromTrades(orderId: string, tokenId: string): Promise<number> {
+  /** Aggregate actual executions for either a taker or maker order id. */
+  private async aggregateOrderFillFromTrades(
+    orderId: string,
+    tokenId: string,
+    acceptedStatuses: ReadonlySet<string>
+  ): Promise<AggregatedOrderFill | null> {
     const client = await getSecureClient(this.wallet);
-    let matched = 0;
+    let shares = 0;
+    let usd = 0;
+    let feeUsd = 0;
     for await (const page of client.listAccountTrades({ tokenId })) {
       for (const trade of page.items) {
-        if (String(trade.status ?? "").toUpperCase() === "FAILED") continue;
+        if (!acceptedStatuses.has(String(trade.status ?? "").toUpperCase())) continue;
         if (trade.takerOrderId === orderId) {
-          matched += parseFloat(String(trade.size ?? "0"));
+          const matchedShares = parseFloat(String(trade.size ?? "0"));
+          const price = parseFloat(String(trade.price ?? "0"));
+          if (matchedShares > 0 && price > 0) {
+            const notional = matchedShares * price;
+            shares += matchedShares;
+            usd += notional;
+            feeUsd += calculateFeeFromBps(
+              notional,
+              parseFloat(String(trade.feeRateBps ?? "0"))
+            );
+          }
         }
         for (const maker of trade.makerOrders ?? []) {
           if (maker.orderId === orderId) {
-            matched += parseFloat(String(maker.matchedAmount ?? "0"));
+            const matchedShares = parseFloat(String(maker.matchedAmount ?? "0"));
+            const price = parseFloat(String(maker.price ?? "0"));
+            if (matchedShares > 0 && price > 0) {
+              const notional = matchedShares * price;
+              shares += matchedShares;
+              usd += notional;
+              feeUsd += calculateFeeFromBps(
+                notional,
+                parseFloat(String(maker.feeRateBps ?? "0"))
+              );
+            }
           }
         }
       }
     }
-    return Math.round(matched * 100) / 100;
+    if (shares <= 0 || usd <= 0) return null;
+    return {
+      shares: roundFillValue(shares),
+      usd: roundFillValue(usd),
+      averagePrice: roundFillValue(usd / shares),
+      feeUsd: roundFillValue(feeUsd),
+    };
   }
 
   async listRecentCompletedFills(sinceMs: number): Promise<CompletedOrderFill[]> {
@@ -168,7 +237,7 @@ export class SecureTradingBackend implements TradingBackend {
 
     for await (const page of client.listAccountTrades({ after })) {
       for (const trade of page.items) {
-        if (String(trade.status ?? "").toUpperCase().includes("FAILED")) continue;
+        if (String(trade.status ?? "").toUpperCase() !== "CONFIRMED") continue;
         if (String(trade.traderSide ?? "").toUpperCase() !== "TAKER") continue;
 
         const orderId = String(trade.takerOrderId ?? "").trim();
@@ -193,6 +262,10 @@ export class SecureTradingBackend implements TradingBackend {
         }
 
         const usd = price * shares;
+        const feeUsd = calculateFeeFromBps(
+          usd,
+          parseFloat(String(trade.feeRateBps ?? "0"))
+        );
         const existing = groups.get(orderId);
         if (!existing) {
           groups.set(orderId, {
@@ -202,6 +275,7 @@ export class SecureTradingBackend implements TradingBackend {
             averagePrice: price,
             shares,
             usd,
+            feeUsd,
             matchedAt,
             invalid: false,
           });
@@ -213,6 +287,7 @@ export class SecureTradingBackend implements TradingBackend {
         }
         existing.shares += shares;
         existing.usd += usd;
+        existing.feeUsd = (existing.feeUsd ?? 0) + feeUsd;
         existing.matchedAt = Math.max(existing.matchedAt, matchedAt);
       }
     }
@@ -224,6 +299,7 @@ export class SecureTradingBackend implements TradingBackend {
         averagePrice: roundFillValue(fill.usd / fill.shares),
         shares: roundFillValue(fill.shares),
         usd: roundFillValue(fill.usd),
+        feeUsd: roundFillValue(fill.feeUsd ?? 0),
       }))
       .sort((a, b) => a.matchedAt - b.matchedAt || a.orderId.localeCompare(b.orderId));
   }

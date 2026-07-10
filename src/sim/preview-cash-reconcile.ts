@@ -31,6 +31,11 @@ function tableExists(db: Database.Database, table: string): boolean {
   return row !== undefined;
 }
 
+function columnExists(db: Database.Database, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
+}
+
 export function replayPreviewCashFromAudit(
   db: Database.Database,
   startingCapitalUsd: number
@@ -39,9 +44,12 @@ export function replayPreviewCashFromAudit(
     return { cashUsd: roundCashUsd(startingCapitalUsd), auditRows: 0 };
   }
 
+  const feeExpression = columnExists(db, "audit_log", "fee_usd")
+    ? "COALESCE(fee_usd, 0)"
+    : "0";
   const rows = db
     .prepare(
-      `SELECT action, side, size, price
+      `SELECT action, side, size, price, ${feeExpression} AS feeUsd
        FROM audit_log
        WHERE action IN ('COPY', 'REDEEM')
        ORDER BY id ASC`
@@ -51,14 +59,15 @@ export function replayPreviewCashFromAudit(
     side: string | null;
     size: number | null;
     price: number | null;
+    feeUsd: number;
   }>;
 
   let cash = startingCapitalUsd;
   for (const row of rows) {
     if (row.action === "COPY") {
       const usd = (row.size ?? 0) * (row.price ?? 0);
-      if (row.side === "BUY") cash = roundCashUsd(cash - usd);
-      if (row.side === "SELL") cash = roundCashUsd(cash + usd);
+      if (row.side === "BUY") cash = roundCashUsd(cash - usd - row.feeUsd);
+      if (row.side === "SELL") cash = roundCashUsd(cash + usd - row.feeUsd);
     } else if (row.action === "REDEEM") {
       cash = roundCashUsd(cash + (row.size ?? 0));
     }

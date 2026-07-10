@@ -1,9 +1,12 @@
 import { OrderType, OrderSide } from "@polymarket/client";
+import { fetchMarketInfo } from "@polymarket/client/actions";
 import { getPublicClient } from "../sdk/public-client.js";
 
 export interface OrderBookMeta {
   tickSize: string;
   negRisk: boolean;
+  feeRate: number;
+  feeExponent: number;
 }
 
 export interface ExecutableOrderBookQuote {
@@ -26,6 +29,8 @@ export interface ExecutableOrderBookSnapshot {
   levels: OrderBookLevelLike[];
   tickSize: number;
   minOrderShares: number;
+  feeRate: number;
+  feeExponent: number;
 }
 
 export async function fetchOrderBookMeta(
@@ -38,7 +43,13 @@ export async function fetchOrderBookMeta(
   try {
     const client = await getPublicClient();
     const book = await client.fetchOrderBook({ tokenId });
-    return { tickSize: String(book.tickSize), negRisk: book.negRisk };
+    const market = await fetchMarketInfo(client, { conditionId: book.market });
+    return {
+      tickSize: String(book.tickSize),
+      negRisk: book.negRisk,
+      feeRate: market.feeInfo.rate,
+      feeExponent: market.feeInfo.exponent,
+    };
   } catch {
     return null;
   }
@@ -220,6 +231,7 @@ export async function fetchExecutableOrderBookSnapshot(
   try {
     const client = await getPublicClient();
     const book = await client.fetchOrderBook({ tokenId });
+    const market = await fetchMarketInfo(client, { conditionId: book.market });
     const tickSize = Number(book.tickSize);
     const minOrderShares = Number(book.minOrderSize);
     if (!Number.isFinite(tickSize) || tickSize <= 0) return null;
@@ -228,6 +240,8 @@ export async function fetchExecutableOrderBookSnapshot(
       tickSize,
       minOrderShares:
         Number.isFinite(minOrderShares) && minOrderShares > 0 ? minOrderShares : 0,
+      feeRate: market.feeInfo.rate,
+      feeExponent: market.feeInfo.exponent,
     };
   } catch {
     return null;

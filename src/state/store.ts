@@ -16,6 +16,11 @@ export interface PendingOrderRow {
   price: number;
   size: number;
   filledShares: number;
+  filledUsd: number;
+  feeUsd: number;
+  leaderPrice: number | null;
+  executablePrice: number | null;
+  slippagePct: number | null;
   tradeKey: string;
   reasoning: string;
   createdAt: number;
@@ -28,6 +33,9 @@ export interface LiveOrderIntentRow {
   tokenId: string;
   side: "BUY" | "SELL";
   price: number;
+  leaderPrice: number | null;
+  executablePrice: number | null;
+  slippagePct: number | null;
   size: number;
   tradeKeys: string[];
   reasoning: string;
@@ -48,6 +56,7 @@ export interface AuditLogRow {
   leaderPrice: number | null;
   executablePrice: number | null;
   slippagePct: number | null;
+  feeUsd: number;
   reason: string | null;
   preview: boolean;
 }
@@ -177,6 +186,29 @@ function appliedFillUsd(
   return appliedShares * price;
 }
 
+function appliedFeeUsd(
+  side: "BUY" | "SELL",
+  requestedShares: number,
+  reportedFeeUsd: number,
+  appliedShares: number
+): number {
+  if (side === "BUY") return reportedFeeUsd;
+  if (appliedShares <= 0 || reportedFeeUsd <= 0) return 0;
+  return requestedShares > 0 ? reportedFeeUsd * (appliedShares / requestedShares) : 0;
+}
+
+function feeAdjustedPrice(
+  side: "BUY" | "SELL",
+  shares: number,
+  notionalUsd: number,
+  feeUsd: number,
+  fallback: number
+): number {
+  if (shares <= 0 || notionalUsd <= 0) return fallback;
+  const cashUsd = side === "BUY" ? notionalUsd + feeUsd : Math.max(0, notionalUsd - feeUsd);
+  return cashUsd / shares;
+}
+
 function parseMarketJson(value: string | null): TokenMarketEntry | undefined {
   if (!value) return undefined;
   try {
@@ -287,6 +319,7 @@ export class StateStore {
         leader_price REAL,
         executable_price REAL,
         slippage_pct REAL,
+        fee_usd REAL NOT NULL DEFAULT 0,
         reason TEXT,
         preview INTEGER NOT NULL DEFAULT 1
       );
@@ -321,6 +354,11 @@ export class StateStore {
         price REAL NOT NULL,
         size REAL NOT NULL,
         filled_shares REAL NOT NULL DEFAULT 0,
+        filled_usd REAL NOT NULL DEFAULT 0,
+        fee_usd REAL NOT NULL DEFAULT 0,
+        leader_price REAL,
+        executable_price REAL,
+        slippage_pct REAL,
         trade_key TEXT NOT NULL,
         reasoning TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
@@ -333,6 +371,9 @@ export class StateStore {
         token_id TEXT NOT NULL,
         side TEXT NOT NULL,
         price REAL NOT NULL,
+        leader_price REAL,
+        executable_price REAL,
+        slippage_pct REAL,
         size REAL NOT NULL,
         trade_keys TEXT NOT NULL,
         reasoning TEXT NOT NULL DEFAULT '',
@@ -380,6 +421,36 @@ export class StateStore {
     }
     if (!auditCols.some((c) => c.name === "slippage_pct")) {
       this.db.exec("ALTER TABLE audit_log ADD COLUMN slippage_pct REAL");
+    }
+    if (!auditCols.some((c) => c.name === "fee_usd")) {
+      this.db.exec("ALTER TABLE audit_log ADD COLUMN fee_usd REAL NOT NULL DEFAULT 0");
+    }
+    const intentCols = this.db.prepare("PRAGMA table_info(live_order_intents)").all() as { name: string }[];
+    if (!intentCols.some((c) => c.name === "leader_price")) {
+      this.db.exec("ALTER TABLE live_order_intents ADD COLUMN leader_price REAL");
+    }
+    if (!intentCols.some((c) => c.name === "executable_price")) {
+      this.db.exec("ALTER TABLE live_order_intents ADD COLUMN executable_price REAL");
+    }
+    if (!intentCols.some((c) => c.name === "slippage_pct")) {
+      this.db.exec("ALTER TABLE live_order_intents ADD COLUMN slippage_pct REAL");
+    }
+    const pendingCols = this.db.prepare("PRAGMA table_info(pending_orders)").all() as { name: string }[];
+    if (!pendingCols.some((c) => c.name === "filled_usd")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN filled_usd REAL NOT NULL DEFAULT 0");
+      this.db.exec("UPDATE pending_orders SET filled_usd = filled_shares * price");
+    }
+    if (!pendingCols.some((c) => c.name === "fee_usd")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN fee_usd REAL NOT NULL DEFAULT 0");
+    }
+    if (!pendingCols.some((c) => c.name === "leader_price")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN leader_price REAL");
+    }
+    if (!pendingCols.some((c) => c.name === "executable_price")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN executable_price REAL");
+    }
+    if (!pendingCols.some((c) => c.name === "slippage_pct")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN slippage_pct REAL");
     }
   }
 
@@ -852,6 +923,11 @@ export class StateStore {
     price: number;
     size: number;
     filledShares: number;
+    filledUsd?: number;
+    feeUsd?: number;
+    leaderPrice?: number;
+    executablePrice?: number | null;
+    slippagePct?: number | null;
     tradeKey: string;
     reasoning: string;
   }): void {
@@ -859,10 +935,16 @@ export class StateStore {
     this.db
       .prepare(
         `INSERT INTO pending_orders
-         (order_id, leader_id, token_id, side, price, size, filled_shares, trade_key, reasoning, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (order_id, leader_id, token_id, side, price, size, filled_shares, filled_usd, fee_usd,
+          leader_price, executable_price, slippage_pct, trade_key, reasoning, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            filled_shares = excluded.filled_shares,
+           filled_usd = excluded.filled_usd,
+           fee_usd = excluded.fee_usd,
+           leader_price = COALESCE(excluded.leader_price, pending_orders.leader_price),
+           executable_price = COALESCE(excluded.executable_price, pending_orders.executable_price),
+           slippage_pct = COALESCE(excluded.slippage_pct, pending_orders.slippage_pct),
            updated_at = excluded.updated_at`
       )
       .run(
@@ -873,6 +955,11 @@ export class StateStore {
         entry.price,
         entry.size,
         entry.filledShares,
+        entry.filledUsd ?? entry.filledShares * entry.price,
+        entry.feeUsd ?? 0,
+        entry.leaderPrice ?? null,
+        entry.executablePrice ?? null,
+        entry.slippagePct ?? null,
         entry.tradeKey,
         entry.reasoning,
         now,
@@ -884,7 +971,10 @@ export class StateStore {
     const rows = this.db
       .prepare(
         `SELECT order_id AS orderId, leader_id AS leaderId, token_id AS tokenId, side,
-                price, size, filled_shares AS filledShares, trade_key AS tradeKey,
+                price, size, filled_shares AS filledShares, filled_usd AS filledUsd,
+                fee_usd AS feeUsd,
+                leader_price AS leaderPrice, executable_price AS executablePrice,
+                slippage_pct AS slippagePct, trade_key AS tradeKey,
                 reasoning, created_at AS createdAt, updated_at AS updatedAt
          FROM pending_orders ORDER BY created_at ASC`
       )
@@ -926,6 +1016,9 @@ export class StateStore {
     tokenId: string;
     side: "BUY" | "SELL";
     price: number;
+    leaderPrice?: number;
+    executablePrice?: number | null;
+    slippagePct?: number | null;
     orderSize: number;
     auditReason: string;
     market?: TokenMarketEntry;
@@ -937,12 +1030,16 @@ export class StateStore {
     this.db
       .prepare(
         `INSERT INTO live_order_intents
-         (intent_id, leader_id, token_id, side, price, size, trade_keys, reasoning, market_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (intent_id, leader_id, token_id, side, price, leader_price, executable_price,
+          slippage_pct, size, trade_keys, reasoning, market_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(intent_id) DO UPDATE SET
            token_id = excluded.token_id,
            side = excluded.side,
            price = excluded.price,
+           leader_price = excluded.leader_price,
+           executable_price = excluded.executable_price,
+           slippage_pct = excluded.slippage_pct,
            size = excluded.size,
            trade_keys = excluded.trade_keys,
            reasoning = excluded.reasoning,
@@ -955,6 +1052,9 @@ export class StateStore {
         entry.tokenId,
         entry.side,
         entry.price,
+        entry.leaderPrice ?? null,
+        entry.executablePrice ?? null,
+        entry.slippagePct ?? null,
         entry.orderSize,
         JSON.stringify(tradeKeys),
         entry.auditReason,
@@ -969,7 +1069,8 @@ export class StateStore {
     const rows = this.db
       .prepare(
         `SELECT intent_id AS intentId, leader_id AS leaderId, token_id AS tokenId,
-                side, price, size, trade_keys AS tradeKeys, reasoning, market_json AS marketJson,
+                side, price, leader_price AS leaderPrice, executable_price AS executablePrice,
+                slippage_pct AS slippagePct, size, trade_keys AS tradeKeys, reasoning, market_json AS marketJson,
                 created_at AS createdAt, updated_at AS updatedAt
          FROM live_order_intents ORDER BY created_at ASC`
       )
@@ -994,6 +1095,9 @@ export class StateStore {
         tokenId: r.tokenId,
         side: r.side === "SELL" ? "SELL" : "BUY",
         price: r.price,
+        leaderPrice: r.leaderPrice,
+        executablePrice: r.executablePrice,
+        slippagePct: r.slippagePct,
         size: r.size,
         tradeKeys,
         reasoning: r.reasoning,
@@ -1028,6 +1132,9 @@ export class StateStore {
         side: intent.side,
         size: intent.size,
         price: intent.price,
+        leaderPrice: intent.leaderPrice ?? undefined,
+        executablePrice: intent.executablePrice,
+        slippagePct: intent.slippagePct,
         reason,
         preview: false,
       });
@@ -1061,12 +1168,18 @@ export class StateStore {
   commitPendingOrderProgress(entry: {
     orderId: string;
     matchedFilledShares: number;
+    matchedFilledUsd?: number;
+    matchedFeeUsd?: number;
     fill?: {
       leaderId: string;
       tokenId: string;
       side: "BUY" | "SELL";
       delta: number;
       price: number;
+      feeUsd?: number;
+      leaderPrice?: number;
+      executablePrice?: number | null;
+      slippagePct?: number | null;
       auditReason: string;
       preview: boolean;
       cashInitialUsd?: number;
@@ -1086,6 +1199,8 @@ export class StateStore {
     const {
       orderId,
       matchedFilledShares,
+      matchedFilledUsd,
+      matchedFeeUsd,
       fill,
       remove,
       skipPendingRowUpdate,
@@ -1095,13 +1210,21 @@ export class StateStore {
     this.db.transaction(() => {
       if (fill && fill.delta > 0) {
         const reportedUsd = fill.delta * fill.price;
+        const feeUsd = fill.feeUsd ?? 0;
+        const accountingPrice = feeAdjustedPrice(
+          fill.side,
+          fill.delta,
+          reportedUsd,
+          feeUsd,
+          fill.price
+        );
         if (fill.market) this.upsertTokenMarket(fill.market);
         const applied = this.applyCopyFill(
           fill.leaderId,
           fill.tokenId,
           fill.side,
           fill.delta,
-          fill.price
+          accountingPrice
         );
         const appliedShares =
           fill.side === "SELL" ? applied.appliedShares : fill.delta;
@@ -1112,11 +1235,18 @@ export class StateStore {
           appliedShares,
           fill.price
         );
+        const appliedFee = appliedFeeUsd(
+          fill.side,
+          fill.delta,
+          feeUsd,
+          appliedShares
+        );
+        const cashUsd = fill.side === "BUY" ? usd + appliedFee : usd - appliedFee;
         if (fill.side === "BUY") this.recordBuy(fill.leaderId, fill.tokenId);
         this.addDailyVolume(fill.side === "BUY" ? usd : 0);
         if (fill.side === "BUY") this.addLeaderDailyVolume(fill.leaderId, usd);
         if (fill.preview && fill.cashInitialUsd !== undefined) {
-          this.adjustCash(fill.side === "BUY" ? -usd : usd, fill.cashInitialUsd);
+          this.adjustCash(fill.side === "BUY" ? -cashUsd : cashUsd, fill.cashInitialUsd);
         }
         this.audit({
           leaderId: fill.leaderId,
@@ -1125,6 +1255,10 @@ export class StateStore {
           side: fill.side,
           size: appliedShares,
           price: fill.price,
+          leaderPrice: fill.leaderPrice,
+          executablePrice: fill.executablePrice,
+          slippagePct: fill.slippagePct,
+          feeUsd: appliedFee,
           reason: fill.auditReason,
           preview: fill.preview,
         });
@@ -1150,9 +1284,18 @@ export class StateStore {
       } else {
         this.db
           .prepare(
-            "UPDATE pending_orders SET filled_shares = ?, updated_at = ? WHERE order_id = ?"
+            `UPDATE pending_orders
+             SET filled_shares = ?, filled_usd = COALESCE(?, filled_usd),
+                 fee_usd = COALESCE(?, fee_usd), updated_at = ?
+             WHERE order_id = ?`
           )
-          .run(matchedFilledShares, Date.now(), orderId);
+          .run(
+            matchedFilledShares,
+            matchedFilledUsd ?? null,
+            matchedFeeUsd ?? null,
+            Date.now(),
+            orderId
+          );
       }
     })();
   }
@@ -1170,6 +1313,7 @@ export class StateStore {
     executablePrice?: number | null;
     slippagePct?: number | null;
     filledUsd: number;
+    feeUsd?: number;
     auditReason: string;
     preview: boolean;
     cashInitialUsd?: number;
@@ -1187,6 +1331,7 @@ export class StateStore {
       executablePrice,
       slippagePct,
       filledUsd,
+      feeUsd = 0,
       auditReason,
       preview,
       cashInitialUsd,
@@ -1198,7 +1343,8 @@ export class StateStore {
         this.markSeen(key, leaderId);
       }
       if (market) this.upsertTokenMarket(market);
-      const applied = this.applyCopyFill(leaderId, tokenId, side, filledShares, price);
+      const accountingPrice = feeAdjustedPrice(side, filledShares, filledUsd, feeUsd, price);
+      const applied = this.applyCopyFill(leaderId, tokenId, side, filledShares, accountingPrice);
       const appliedShares = side === "SELL" ? applied.appliedShares : filledShares;
       const appliedUsd = appliedFillUsd(
         side,
@@ -1207,11 +1353,13 @@ export class StateStore {
         appliedShares,
         price
       );
+      const appliedFee = appliedFeeUsd(side, filledShares, feeUsd, appliedShares);
+      const cashUsd = side === "BUY" ? appliedUsd + appliedFee : appliedUsd - appliedFee;
       if (side === "BUY") this.recordBuy(leaderId, tokenId);
       this.addDailyVolume(side === "BUY" ? appliedUsd : 0);
       if (side === "BUY") this.addLeaderDailyVolume(leaderId, appliedUsd);
       if (preview && cashInitialUsd !== undefined) {
-        this.adjustCash(side === "BUY" ? -appliedUsd : appliedUsd, cashInitialUsd);
+        this.adjustCash(side === "BUY" ? -cashUsd : cashUsd, cashInitialUsd);
       }
       this.audit({
         leaderId,
@@ -1223,6 +1371,7 @@ export class StateStore {
         leaderPrice,
         executablePrice,
         slippagePct,
+        feeUsd: appliedFee,
         reason: auditReason,
         preview,
       });
@@ -1245,6 +1394,7 @@ export class StateStore {
     orderSize: number;
     filledShares: number;
     filledUsd: number;
+    feeUsd?: number;
     auditReason: string;
     orderId?: string;
     pendingRemaining: number;
@@ -1264,6 +1414,7 @@ export class StateStore {
       orderSize,
       filledShares,
       filledUsd,
+      feeUsd = 0,
       auditReason,
       orderId,
       pendingRemaining,
@@ -1289,10 +1440,16 @@ export class StateStore {
         this.db
           .prepare(
             `INSERT INTO pending_orders
-             (order_id, leader_id, token_id, side, price, size, filled_shares, trade_key, reasoning, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (order_id, leader_id, token_id, side, price, size, filled_shares, filled_usd, fee_usd,
+              leader_price, executable_price, slippage_pct, trade_key, reasoning, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(order_id) DO UPDATE SET
                filled_shares = excluded.filled_shares,
+               filled_usd = excluded.filled_usd,
+               fee_usd = excluded.fee_usd,
+               leader_price = excluded.leader_price,
+               executable_price = excluded.executable_price,
+               slippage_pct = excluded.slippage_pct,
                updated_at = excluded.updated_at`
           )
           .run(
@@ -1303,6 +1460,11 @@ export class StateStore {
             price,
             orderSize,
             filledShares,
+            filledUsd,
+            feeUsd,
+            leaderPrice ?? null,
+            executablePrice ?? null,
+            slippagePct ?? null,
             primaryKey,
             auditReason,
             now,
@@ -1311,7 +1473,8 @@ export class StateStore {
       }
 
       if (filledShares > 0) {
-        const applied = this.applyCopyFill(leaderId, tokenId, side, filledShares, price);
+        const accountingPrice = feeAdjustedPrice(side, filledShares, filledUsd, feeUsd, price);
+        const applied = this.applyCopyFill(leaderId, tokenId, side, filledShares, accountingPrice);
         const appliedShares = side === "SELL" ? applied.appliedShares : filledShares;
         const appliedUsd = appliedFillUsd(
           side,
@@ -1320,6 +1483,7 @@ export class StateStore {
           appliedShares,
           price
         );
+        const appliedFee = appliedFeeUsd(side, filledShares, feeUsd, appliedShares);
         if (side === "BUY") this.recordBuy(leaderId, tokenId);
         this.addDailyVolume(side === "BUY" ? appliedUsd : 0);
         if (side === "BUY") this.addLeaderDailyVolume(leaderId, appliedUsd);
@@ -1333,6 +1497,7 @@ export class StateStore {
           leaderPrice,
           executablePrice,
           slippagePct,
+          feeUsd: appliedFee,
           reason: auditReason,
           preview: false,
         });
@@ -1368,6 +1533,7 @@ export class StateStore {
     leaderPrice?: number;
     executablePrice?: number | null;
     slippagePct?: number | null;
+    feeUsd?: number;
     reason?: string;
     preview: boolean;
   }): void {
@@ -1375,8 +1541,8 @@ export class StateStore {
       .prepare(
         `INSERT INTO audit_log
          (ts, leader_id, action, token_id, side, size, price, leader_price,
-          executable_price, slippage_pct, reason, preview)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          executable_price, slippage_pct, fee_usd, reason, preview)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         Date.now(),
@@ -1389,6 +1555,7 @@ export class StateStore {
         entry.leaderPrice ?? null,
         entry.executablePrice ?? null,
         entry.slippagePct ?? null,
+        entry.feeUsd ?? 0,
         entry.reason ?? null,
         entry.preview ? 1 : 0
       );
@@ -1516,9 +1683,10 @@ export class StateStore {
         `SELECT id, ts, leader_id AS leaderId, action, token_id AS tokenId, side,
                 size, price, leader_price AS leaderPrice,
                 executable_price AS executablePrice, slippage_pct AS slippagePct,
+                fee_usd AS feeUsd,
                 reason, preview
          FROM audit_log ${where}
-         ORDER BY ts DESC
+         ORDER BY ts DESC, id DESC
          LIMIT ? OFFSET ?`
       )
       .all(...params, limit, offset) as AuditLogRow[];
@@ -1535,6 +1703,7 @@ export class StateStore {
         `SELECT id, ts, leader_id AS leaderId, action, token_id AS tokenId, side,
                 size, price, leader_price AS leaderPrice,
                 executable_price AS executablePrice, slippage_pct AS slippagePct,
+                fee_usd AS feeUsd,
                 reason, preview
          FROM audit_log
          WHERE id > ?
