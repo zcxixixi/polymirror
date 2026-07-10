@@ -134,6 +134,11 @@ export interface EnsureCopyPriceModeResult {
   status: "bound" | "matched" | "mismatch";
 }
 
+export interface CopyPriceModeCompatibilityResult {
+  mode: CopyPriceMode;
+  status: "unbound" | "matched" | "mismatch";
+}
+
 function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -187,6 +192,62 @@ function parseMarketJson(value: string | null): TokenMarketEntry | undefined {
   } catch {
     return undefined;
   }
+}
+
+function hasTable(db: Database.Database, table: string): boolean {
+  return (
+    db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table) !== undefined
+  );
+}
+
+function hasRows(db: Database.Database, table: string, where = ""): boolean {
+  return hasTable(db, table) && db.prepare(`SELECT 1 FROM ${table}${where} LIMIT 1`).get() !== undefined;
+}
+
+function legacyCopyPriceModeState(db: Database.Database): boolean {
+  return (
+    hasRows(db, "positions") ||
+    hasRows(db, "seen_trades") ||
+    hasRows(db, "cash_ledger") ||
+    hasRows(
+      db,
+      "daily_stats",
+      " WHERE volume_usd <> 0 OR realized_pnl <> 0 OR copy_count <> 0 OR kill_switch <> 0"
+    ) ||
+    hasRows(db, "leader_daily_stats", " WHERE volume_usd <> 0") ||
+    hasRows(db, "buy_dedup") ||
+    hasRows(db, "pending_orders") ||
+    hasRows(db, "live_order_intents") ||
+    hasRows(db, "audit_log", " WHERE action IN ('COPY', 'REDEEM')")
+  );
+}
+
+function copyPriceModeCompatibility(
+  db: Database.Database,
+  requested: CopyPriceMode
+): CopyPriceModeCompatibilityResult {
+  const existing = hasTable(db, "runtime_metadata")
+    ? (db
+        .prepare("SELECT value FROM runtime_metadata WHERE key = 'copy_price_mode'")
+        .get() as { value: CopyPriceMode } | undefined)
+    : undefined;
+  if (existing) {
+    return {
+      mode: existing.value,
+      status: existing.value === requested ? "matched" : "mismatch",
+    };
+  }
+
+  if (legacyCopyPriceModeState(db)) {
+    return {
+      mode: "leader_limit",
+      status: requested === "leader_limit" ? "matched" : "mismatch",
+    };
+  }
+
+  return { mode: requested, status: "unbound" };
 }
 
 export class StateStore {
@@ -320,50 +381,45 @@ export class StateStore {
     if (!auditCols.some((c) => c.name === "slippage_pct")) {
       this.db.exec("ALTER TABLE audit_log ADD COLUMN slippage_pct REAL");
     }
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO runtime_metadata (key, value)
-         SELECT 'copy_price_mode', 'leader_limit'
-         WHERE EXISTS (
-           SELECT 1 FROM audit_log WHERE action IN ('COPY', 'REDEEM')
-         ) OR EXISTS (
-           SELECT 1 FROM pending_orders
-         ) OR EXISTS (
-           SELECT 1 FROM live_order_intents
-         )`
-      )
-      .run();
+  }
+
+  getCopyPriceModeCompatibility(requested: CopyPriceMode): CopyPriceModeCompatibilityResult {
+    return copyPriceModeCompatibility(this.db, requested);
+  }
+
+  static getCopyPriceModeCompatibilityForPath(
+    path: string,
+    requested: CopyPriceMode
+  ): CopyPriceModeCompatibilityResult {
+    if (!path || !existsSync(path)) return { mode: requested, status: "unbound" };
+    const db = new Database(path, { readonly: true });
+    try {
+      return copyPriceModeCompatibility(db, requested);
+    } finally {
+      db.close();
+    }
   }
 
   ensureCopyPriceMode(requested: CopyPriceMode): EnsureCopyPriceModeResult {
     return this.db.transaction((): EnsureCopyPriceModeResult => {
-      const existing = this.db
-        .prepare("SELECT value FROM runtime_metadata WHERE key = 'copy_price_mode'")
-        .get() as { value: CopyPriceMode } | undefined;
-      if (existing) {
-        return {
-          mode: existing.value,
-          status: existing.value === requested ? "matched" : "mismatch",
-        };
+      const compatibility = this.getCopyPriceModeCompatibility(requested);
+      const mode = compatibility.mode;
+      if (compatibility.status === "unbound") {
+        this.db
+          .prepare("INSERT INTO runtime_metadata (key, value) VALUES ('copy_price_mode', ?)")
+          .run(mode);
+        return { mode, status: "bound" };
       }
 
-      const hasExecutionHistory = this.db
-        .prepare(
-          `SELECT 1
-           WHERE EXISTS (
-             SELECT 1 FROM audit_log WHERE action IN ('COPY', 'REDEEM')
-           ) OR EXISTS (
-             SELECT 1 FROM pending_orders
-           ) OR EXISTS (
-             SELECT 1 FROM live_order_intents
-           )`
-        )
-        .get();
-      const mode: CopyPriceMode = hasExecutionHistory ? "leader_limit" : requested;
-      this.db
-        .prepare("INSERT INTO runtime_metadata (key, value) VALUES ('copy_price_mode', ?)")
-        .run(mode);
-      return { mode, status: mode === requested ? "bound" : "mismatch" };
+      if (!hasTable(this.db, "runtime_metadata") || !this.db
+        .prepare("SELECT 1 FROM runtime_metadata WHERE key = 'copy_price_mode'")
+        .get()) {
+        this.db
+          .prepare("INSERT INTO runtime_metadata (key, value) VALUES ('copy_price_mode', ?)")
+          .run(mode);
+      }
+
+      return { mode, status: compatibility.status };
     })();
   }
 

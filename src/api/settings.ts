@@ -24,6 +24,7 @@ import {
   maskProxyUrl,
 } from "../util/proxy.js";
 import { fetchWithTimeout } from "../util/fetch.js";
+import { StateStore } from "../state/store.js";
 import {
   flushLivePendingBeforePreview,
   migratePreviewToLiveDb,
@@ -68,6 +69,31 @@ async function writeConfigAndReload(
       throw new Error(`${primary}; config rollback failed: ${rollback}`);
     }
     throw error;
+  }
+}
+
+function validateSettingsCandidate(
+  next: ReturnType<typeof readNormalizedConfigDocument>,
+  actx: AccountApiContext
+): void {
+  const accounts = mapNormalizedAccounts(next);
+  const validationError = validateAllAccounts(accounts);
+  if (validationError) throw new Error(validationError);
+
+  const candidate = accounts.find((account) => account.id === actx.accountId);
+  if (!candidate) throw new Error(`Account not found: ${actx.accountId}`);
+
+  const currentPreviewMode = actx.getConfig().app.global.previewMode;
+  const dbPath =
+    candidate.config.app.global.previewMode === currentPreviewMode ? actx.dbPath : candidate.dbPath;
+  const compatibility = StateStore.getCopyPriceModeCompatibilityForPath(
+    dbPath,
+    candidate.config.app.global.copyPriceMode
+  );
+  if (compatibility.status === "mismatch") {
+    throw new Error(
+      `copy price mode mismatch: database=${compatibility.mode} config=${candidate.config.app.global.copyPriceMode}`
+    );
   }
 }
 
@@ -195,14 +221,9 @@ export async function patchGlobalSettings(
       validateProxyPatch(patch.proxy, normalized.defaultsGlobal as Record<string, unknown>);
     }
     const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
-    const validationError = validateAllAccounts(mapNormalizedAccounts(next));
-    if (validationError) {
-      throw new Error(validationError);
-    }
+    validateSettingsCandidate(next, actx);
 
-    if (patch.previewMode === false && currentConfig.app.global.previewMode) {
-      migratePreviewToLiveDb(actx.accountId, actx.store);
-    } else if (patch.previewMode === true && !currentConfig.app.global.previewMode) {
+    if (patch.previewMode === true && !currentConfig.app.global.previewMode) {
       await flushLivePendingBeforePreview(currentConfig, actx.store);
     }
 
@@ -328,40 +349,31 @@ export async function setPreviewMode(
     }
 
     let flush = { resolved: 0, remaining: 0, errors: [] as string[] };
-    let migration = { seenImported: 0, positionsImported: 0, livePath: "" };
-
-    if (preview && !config.app.global.previewMode) {
-      flush = await flushLivePendingBeforePreview(config, actx.store);
-    } else if (!preview && config.app.global.previewMode) {
-      migration = migratePreviewToLiveDb(actx.accountId, actx.store);
-    }
-
     const normalized = readNormalizedConfigDocument(root.configPath);
     const patch: GlobalSettingsPatch = { previewMode: preview };
     if (!preview) {
       patch.risk = { enableCopyTrading: true };
     }
     const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
-    writeNormalizedConfigDocument(root.configPath, next);
-    await root.reloadConfig();
+    validateSettingsCandidate(next, actx);
+
+    if (preview && !config.app.global.previewMode) {
+      flush = await flushLivePendingBeforePreview(config, actx.store);
+    }
+
+    await writeConfigAndReload(root, next);
     syncAggregateHealth(root.manager.list());
     const rt = root.manager.require(actx.accountId);
     rt.health.previewMode = preview;
     logInfo(`Mode switched via dashboard: account=${actx.accountId} preview=${preview}`, {
       pendingResolved: flush.resolved,
       pendingRemaining: flush.remaining,
-      seenImported: migration.seenImported,
-      positionsImported: migration.positionsImported,
     });
 
     const flushNote = formatPendingFlushNote(flush);
-    const migrateNote =
-      migration.seenImported > 0 || migration.positionsImported > 0
-        ? `已合并 Preview：${migration.seenImported} 条去重、${migration.positionsImported} 条引擎持仓（仅跟踪，链上为准）。`
-        : "";
     const message = preview
       ? `已切换 Preview（引擎已热重载 preview.db）。${flushNote}`.trim()
-      : `已切换 Live（引擎已热重载 polymirror.db）。${migrateNote}请确认钱包 USDC 充足。`.trim();
+      : "已切换 Live（引擎已热重载 polymirror.db）。请确认钱包 USDC 充足。";
 
     return {
       status: 200,
@@ -390,15 +402,16 @@ export async function stopCopyTrading(
 ): Promise<{ status: number; body: unknown }> {
   try {
     const config = actx.getConfig();
-    const flush = await flushLivePendingBeforePreview(config, actx.store);
-
     const normalized = readNormalizedConfigDocument(root.configPath);
     const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, {
       previewMode: true,
       risk: { enableCopyTrading: false },
     });
-    writeNormalizedConfigDocument(root.configPath, next);
-    await root.reloadConfig();
+    validateSettingsCandidate(next, actx);
+
+    const flush = await flushLivePendingBeforePreview(config, actx.store);
+
+    await writeConfigAndReload(root, next);
     syncAggregateHealth(root.manager.list());
     const rt = root.manager.require(actx.accountId);
     rt.health.previewMode = true;

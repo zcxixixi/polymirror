@@ -56,6 +56,15 @@ export function migratePreviewToLiveDb(
   const livePath = resolveAccountDbPath(accountId, false);
   const liveStore = new StateStore(livePath);
   try {
+    const sourceMode = previewStore.getCopyPriceModeCompatibility("leader_limit");
+    if (sourceMode.status !== "unbound") {
+      const targetMode = liveStore.ensureCopyPriceMode(sourceMode.mode);
+      if (targetMode.status === "mismatch") {
+        throw new Error(
+          `copy price mode mismatch: database=${targetMode.mode} config=${sourceMode.mode}`
+        );
+      }
+    }
     const seenImported = liveStore.importSeenTradesFrom(previewStore);
     const positionsImported = liveStore.importPositionsFrom(previewStore);
     if (seenImported > 0 || positionsImported > 0) {

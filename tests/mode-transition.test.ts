@@ -271,6 +271,36 @@ describe("migratePreviewToLiveDb", () => {
     }
   });
 
+  it("binds a legacy preview source as leader_limit before importing positions", () => {
+    const previewDir = mkdtempSync(join(tmpdir(), "pm-preview-legacy-mode-"));
+    const previewStore = new StateStore(join(previewDir, "preview.db"));
+    const accountId = `legacy-mode-${Date.now()}`;
+    const livePath = resolveAccountDbPath(accountId, false);
+    if (existsSync(livePath)) rmSync(livePath, { force: true });
+
+    try {
+      previewStore.applyCopyFill("whale", "legacy-token", "BUY", 3, 0.5);
+
+      expect(migratePreviewToLiveDb(accountId, previewStore).positionsImported).toBe(1);
+
+      const liveStore = new StateStore(livePath);
+      try {
+        expect(liveStore.getCopyPriceModeCompatibility("executable_guarded")).toEqual({
+          mode: "leader_limit",
+          status: "mismatch",
+        });
+      } finally {
+        liveStore.close();
+      }
+    } finally {
+      previewStore.close();
+      rmSync(previewDir, { recursive: true, force: true });
+      if (existsSync(livePath)) rmSync(livePath, { force: true });
+      const liveDir = join(livePath, "..");
+      if (existsSync(liveDir)) rmSync(liveDir, { recursive: true, force: true });
+    }
+  });
+
   it("importSeenTradesFrom is idempotent", () => {
     store.markSeen("dup-key", "a");
     const other = new StateStore(join(dir, "other.db"));
