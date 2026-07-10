@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 import { StateStore } from "../src/state/store.js";
 import { runCopyCycle } from "../src/engine/copy-cycle.js";
 import type { RuntimeConfig } from "../src/config/types.js";
@@ -463,7 +464,7 @@ describe("runCopyCycle pending reconciliation", () => {
       tradeKey: "k-stale-cancel",
       reasoning: "fixed",
     });
-    store.setPendingOrderTimestamps("ord-live-stale-cancel", Date.now() - 48 * 3600_000);
+    store.setPendingOrderTimestamps("ord-live-stale-cancel", Date.now() - 49 * 3600_000);
     mockGetOrderStatus.mockResolvedValue({
       kind: "ok",
       status: {
@@ -480,6 +481,69 @@ describe("runCopyCycle pending reconciliation", () => {
     expect(mockCancelOrder).toHaveBeenCalledWith("ord-live-stale-cancel");
     expect(store.countPendingOrders()).toBe(0);
     expect(store.listPendingOrders({ includeReconciliation: true })).toHaveLength(1);
+  });
+
+  it("backfills a legacy reconciliation timestamp and retires a not-found tombstone", async () => {
+    vi.useFakeTimers();
+    const now = Date.parse("2026-07-10T12:00:00.000Z");
+    vi.setSystemTime(now);
+    const dbPath = join(dir, "test.db");
+    store.close();
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      DROP TABLE pending_orders;
+      CREATE TABLE pending_orders (
+        order_id TEXT PRIMARY KEY,
+        leader_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL NOT NULL,
+        filled_shares REAL NOT NULL DEFAULT 0,
+        filled_usd REAL NOT NULL DEFAULT 0,
+        fee_usd REAL NOT NULL DEFAULT 0,
+        leader_price REAL,
+        executable_price REAL,
+        slippage_pct REAL,
+        trade_key TEXT NOT NULL,
+        reasoning TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        reconciliation_only INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    legacy.prepare(
+      `INSERT INTO pending_orders
+       (order_id, leader_id, token_id, side, price, size, filled_shares, filled_usd,
+        fee_usd, trade_key, reasoning, created_at, updated_at, reconciliation_only)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).run(
+      "legacy-reconciliation",
+      "whale",
+      "tok-legacy-reconciliation",
+      "BUY",
+      0.5,
+      10,
+      0,
+      0,
+      0,
+      "legacy-key",
+      "legacy closed order",
+      now - 26 * 60 * 60_000,
+      now - 25 * 60 * 60_000
+    );
+    legacy.close();
+    store = new StateStore(dbPath);
+    mockGetOrderStatus.mockResolvedValue({ kind: "not_found" });
+
+    const [migrated] = store.listPendingOrders({ includeReconciliation: true });
+    expect(migrated?.reconciliationStartedAt).toBe(now - 25 * 60 * 60_000);
+
+    await runCopyCycle(liveConfig(false), store);
+    await runCopyCycle(liveConfig(false), store);
+
+    expect(store.listPendingOrders({ includeReconciliation: true })).toHaveLength(0);
+    expect(mockGetOrderStatus).toHaveBeenCalledTimes(1);
   });
 
   it("resolves a closed order only when its exact requested size is confirmed", async () => {

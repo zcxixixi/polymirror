@@ -482,6 +482,11 @@ export class StateStore {
     if (!pendingCols.some((c) => c.name === "reconciliation_started_at")) {
       this.db.exec("ALTER TABLE pending_orders ADD COLUMN reconciliation_started_at INTEGER");
     }
+    this.db.exec(
+      `UPDATE pending_orders
+       SET reconciliation_started_at = COALESCE(updated_at, created_at)
+       WHERE reconciliation_only = 1 AND reconciliation_started_at IS NULL`
+    );
   }
 
   getCopyPriceModeCompatibility(requested: CopyPriceMode): CopyPriceModeCompatibilityResult {
