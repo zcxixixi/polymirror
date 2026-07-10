@@ -176,6 +176,14 @@ export async function adoptUntrackedOpenOrders(
         trackPendingGtc: true,
         market: intent.market,
         intentId: intent.intentId,
+        decisionTerms: Object.keys(intent.decisionTerms).length > 0 ? {
+          ...intent.decisionTerms,
+          orderId: order.orderId,
+          filledShares,
+          filledUsd,
+          feeUsd,
+          pendingRemaining,
+        } : undefined,
       });
       claimedIntentIds.add(intent.intentId);
       adopted++;
@@ -288,6 +296,14 @@ export async function adoptUntrackedOpenOrders(
       trackPendingGtc: false,
       market: intent.market,
       intentId: intent.intentId,
+      decisionTerms: Object.keys(intent.decisionTerms).length > 0 ? {
+        ...intent.decisionTerms,
+        orderId: fill.orderId,
+        filledShares: fill.shares,
+        filledUsd: fill.usd,
+        feeUsd: completedFillFeeUsd(fill),
+        pendingRemaining: 0,
+      } : undefined,
     });
     claimedIntentIds.add(intent.intentId);
     reservedOrderIds.add(fill.orderId);

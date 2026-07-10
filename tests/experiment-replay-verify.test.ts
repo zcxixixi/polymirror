@@ -70,7 +70,7 @@ describe("sealed deterministic replay", () => {
     expect(sell.realizedPnl).toBe(0.5);
     store.adjustCash(1.5, 10);
     store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM" }, decidedAt: 5 });
-    store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM", size: 2, price: 1, reason: "settled 1 position(s); pnl $1.00", conditionId: "condition-a", settlementSource: "condition_resolution", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1 }, decidedAt: 6 });
+    store.recordDecision({ rawEventId: raw[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM", size: 2, price: 1, reason: "settled 1 position(s); pnl $1.00", conditionId: "condition-a", settlementSource: "condition_resolution", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1, preview: true }, decidedAt: 6 });
     store.applyCopyFill("whale", "token-a", "SELL", 2, 1);
     store.adjustCash(2, 10);
     store.close();
@@ -313,6 +313,148 @@ describe("sealed deterministic replay", () => {
     expect(result.actual.coverage).toEqual({ buyPct: 50, sellPct: 0, totalPct: 50 });
   });
 
+  it("replays globally interleaved raw-event occurrences in immutable link order", async () => {
+    const dbPath = join(dir, "interleaved.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.risk.startingCapitalUsd = 10;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1 };
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-interleaved", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const first = store.recordRawEvent({ sourceId: "event-a", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token-a", price: 0.5, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(first.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: true });
+    store.recordCopySuccess({ tradeKey: "event-a", leaderId: "whale", tokenId: "token-a", side: "BUY",
+      filledShares: 2, price: 0.5, filledUsd: 1, auditReason: "Fixed $1.00", preview: true,
+      cashInitialUsd: 10, decisionTerms: { requestedPrice: 0.5, requestedShares: 2, filledShares: 2,
+        filledUsd: 1, feeUsd: 0 } });
+
+    const second = store.recordRawEvent({ sourceId: "event-b", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token-b", price: 0.4, size: 5, timestamp: 2, candidate: false,
+      rejectionReasonCode: "price_filter" }, sourceTimestamp: 2, observedTimestamp: 2 });
+    store.setDecisionObservationRefs([store.latestObservationRef(second.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token-b", side: "BUY", size: 5,
+      price: 0.4, reason: "raw activity detected", preview: true });
+    store.audit({ leaderId: "whale", action: "SKIP", tokenId: "token-b", side: "BUY", size: 5,
+      price: 0.4, reason: "price_filter", reasonCode: "price_filter", preview: true });
+
+    store.recordRawEvent({ sourceId: "event-a", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token-a", price: 0.6, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 3 });
+    store.setDecisionObservationRefs([store.latestObservationRef(first.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.6, preview: true });
+    store.audit({ leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.6, reason: "already seen", preview: true });
+    store.setDecisionRawEventIds([]);
+    store.close();
+
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "interleaved-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
+  });
+
+  it("refuses to seal when a changed raw observation has no decision chain", async () => {
+    const dbPath = join(dir, "unlinked-observation.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-unlinked", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const first = store.recordRawEvent({ sourceId: "event-a", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token-a", price: 0.5, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(first.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: true });
+    store.audit({ leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, reason: "position limit", preview: true });
+    store.recordRawEvent({ sourceId: "event-a", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token-a", price: 0.6, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 2 });
+    store.close();
+
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "unlinked-observation-archive") })).rejects.toThrow(/observation|complete|decision/i);
+  });
+
+  it("replays cumulative immediate and pending partial fills from persisted production lineage", async () => {
+    const dbPath = join(dir, "partial-fills.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.previewMode = false;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1.5 };
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-partials", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const sourceId = "partial-trade";
+    const raw = store.recordRawEvent({ sourceId, payload: { leaderId: "whale", type: "TRADE", side: "BUY",
+      asset: "token-a", price: 0.5, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(raw.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: false });
+    store.recordLiveOrderAccepted({ tradeKeys: [sourceId], leaderId: "whale", tokenId: "token-a", side: "BUY",
+      price: 0.5, orderSize: 3, filledShares: 1, filledUsd: 0.5, auditReason: "Fixed $1.50",
+      orderId: "order-partial", pendingRemaining: 2, trackPendingGtc: true });
+    store.setDecisionRawEventIds([]);
+    store.commitPendingOrderProgress({ orderId: "order-partial", matchedFilledShares: 2, matchedFilledUsd: 1,
+      fill: { leaderId: "whale", tokenId: "token-a", side: "BUY", delta: 1, price: 0.5,
+        auditReason: "Fixed $1.50", preview: false }, remove: false });
+    store.commitPendingOrderProgress({ orderId: "order-partial", matchedFilledShares: 3, matchedFilledUsd: 1.5,
+      fill: { leaderId: "whale", tokenId: "token-a", side: "BUY", delta: 1, price: 0.5,
+        auditReason: "Fixed $1.50", preview: false }, remove: true });
+    expect(store.getPosition("whale", "token-a")).toBe(3);
+    expect(store.countPendingOrders()).toBe(0);
+    expect(store.listDecisions().map((decision) => decision.action)).toEqual(["DETECT", "COPY", "COPY", "COPY"]);
+    store.close();
+
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "partial-fills-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
+  });
+
+  it("persists guarded quote evidence until a zero-immediate-fill GTC order later fills", async () => {
+    const dbPath = join(dir, "guarded-pending.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.previewMode = false;
+    config.app.global.copyPriceMode = "executable_guarded";
+    config.app.global.risk.slippageTolerance = 0.02;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1 };
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-guarded-pending", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "guarded-pending", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token-a", price: 0.5, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(raw.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: false });
+    store.recordLiveOrderAccepted({ tradeKeys: ["guarded-pending"], leaderId: "whale", tokenId: "token-a",
+      side: "BUY", price: 0.52, leaderPrice: 0.5, executablePrice: 0.51, slippagePct: 2,
+      orderSize: 1.93, filledShares: 0, filledUsd: 0, auditReason: "Fixed $1.00",
+      orderId: "guarded-order", pendingRemaining: 1.93, trackPendingGtc: true,
+      decisionTerms: { orderType: "GTC", requestedPrice: 0.52, requestedShares: 1.93,
+        quoteBestPrice: 0.51, guardedTickSize: 0.01, guardedFeeRate: 0, guardedFeeExponent: 0,
+        quoteEvidence: { levels: [{ price: "0.51", size: "10" }], tickSize: 0.01,
+          minOrderShares: 1, feeRate: 0, feeExponent: 0 } } });
+    store.setDecisionRawEventIds([]);
+    store.commitPendingOrderProgress({ orderId: "guarded-order", matchedFilledShares: 1.93,
+      matchedFilledUsd: 1.0036, fill: { leaderId: "whale", tokenId: "token-a", side: "BUY",
+        delta: 1.93, price: 0.52, leaderPrice: 0.5, executablePrice: 0.52, slippagePct: 4,
+        auditReason: "Fixed $1.00; pending fill", preview: false }, remove: true });
+    expect(store.getPosition("whale", "token-a")).toBe(1.93);
+    store.close();
+
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "guarded-pending-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
+  });
+
   it("detects when stored outcomes diverge from the decision evidence", async () => {
     const dbPath = join(dir, "diverged.db");
     const store = new StateStore(dbPath);
@@ -354,7 +496,7 @@ describe("sealed deterministic replay", () => {
     }
     store.recordDecision({ rawEventId: raws[2]!.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM" }, decidedAt: 5 });
     store.recordDecision({ rawEventId: raws[2]!.rawEventId, action: "REDEEM", reasonCode: "redeem_settled",
-      exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM", size: 2, price: 1, reason: "settled 1 position(s); pnl $1.00", conditionId: "condition-a", settlementSource: "condition_resolution", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1 }, decidedAt: 6 });
+      exactTerms: { leaderId: "whale", tokenId: "condition-a", side: "REDEEM", size: 2, price: 1, reason: "settled 1 position(s); pnl $1.00", conditionId: "condition-a", settlementSource: "condition_resolution", winnerTokenIds: ["token-a"], grossPayoutUsd: 2, costBasisUsd: 1, realizedPnlUsd: 1, preview: true }, decidedAt: 6 });
     store.applyCopyFill("whale", "token-a", "SELL", 2, 1); store.adjustCash(2, 10);
     store.close();
     const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "conditions-archive") });
@@ -392,7 +534,7 @@ describe("sealed deterministic replay", () => {
     const exp = store.startOrResumeExperiment({ accountId: "candidate-f", candidateAddresses: [], config,
       gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" });
     const raw = store.recordRawEvent({ sourceId: "bad", payload: { leaderId: "whale", type: "TRADE", side: "SELL", asset: "token", price: 0.5, size: 2, timestamp: 1 }, sourceTimestamp: 1, observedTimestamp: 1 });
-    store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token", side: "SELL" }, decidedAt: 0 });
+    store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected", exactTerms: { leaderId: "whale", tokenId: "token", side: "SELL", size: 2, price: 0.5, preview: true }, decidedAt: 0 });
     store.recordDecision({ rawEventId: raw.rawEventId, action: "SELL", reasonCode: "sell_executed", exactTerms: { leaderId: "whale", tokenId: "token", side: "SELL", filledShares: 2 }, decidedAt: 1 });
     store.close();
     await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "invalid-archive") }))

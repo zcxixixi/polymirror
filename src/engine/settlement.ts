@@ -5,7 +5,7 @@ import {
   redeemEventKey,
   type Activity,
 } from "../monitor/data-api.js";
-import type { StateStore } from "../state/store.js";
+import type { DecisionObservationRef, StateStore } from "../state/store.js";
 import {
   listRedeemablePositions,
   redeemConditionOnChain,
@@ -249,7 +249,7 @@ async function processOnChainRedeemableScan(
   }
 
   const byCondition = new Map<string, RedeemablePositionRow[]>();
-  const rawIdsByCondition = new Map<string, string[]>();
+  const rawRefsByCondition = new Map<string, DecisionObservationRef[]>();
   for (const row of redeemable) {
     const sourceId = `onchain-redeemable:${row.conditionId}:${row.tokenId}:${row.size}:${row.payoutPerShare}`;
     const raw = store.getActiveExperiment()
@@ -260,7 +260,8 @@ async function processOnChainRedeemableScan(
           observedTimestamp: Date.now(),
         })
       : undefined;
-    store.setDecisionRawEventIds(raw ? [raw.rawEventId] : []);
+    const rawRef = raw ? store.latestObservationRef(raw.rawEventId) : undefined;
+    store.setDecisionObservationRefs(rawRef ? [rawRef] : []);
     store.audit({ action: "DETECT", tokenId: row.tokenId, side: "REDEEM", size: row.size, price: row.payoutPerShare, reason: "on-chain redeemable detected", preview });
     if (!tracked.has(row.tokenId)) {
       store.audit({ action: "SKIP", tokenId: row.tokenId, side: "REDEEM", reason: "untracked token", reasonCode: "untracked_token", preview });
@@ -270,17 +271,17 @@ async function processOnChainRedeemableScan(
     const bucket = byCondition.get(row.conditionId) ?? [];
     bucket.push(row);
     byCondition.set(row.conditionId, bucket);
-    if (raw) {
-      const ids = rawIdsByCondition.get(row.conditionId) ?? [];
-      ids.push(raw.rawEventId);
-      rawIdsByCondition.set(row.conditionId, ids);
+    if (rawRef) {
+      const refs = rawRefsByCondition.get(row.conditionId) ?? [];
+      refs.push(rawRef);
+      rawRefsByCondition.set(row.conditionId, refs);
     }
     store.setDecisionRawEventIds([]);
   }
 
   let onChainRedeems = 0;
   for (const [conditionId, rows] of byCondition) {
-    store.setDecisionRawEventIds(rawIdsByCondition.get(conditionId) ?? []);
+    store.setDecisionObservationRefs(rawRefsByCondition.get(conditionId) ?? []);
     const ok = await redeemConditionOnce(wallet, conditionId, errors);
     if (!ok) {
       store.audit({ action: "SKIP", tokenId: conditionId, side: "REDEEM", reason: "on-chain redeem failed", preview });

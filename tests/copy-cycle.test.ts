@@ -9,10 +9,12 @@ import {
   fetchExecutableOrderBookSnapshot,
 } from "../src/executor/orderbook.js";
 import { previewRuntimeConfig, testActivity, testLeader } from "./helpers/fixtures.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
+import { archiveExperimentEvidence } from "../src/experiments/archive.js";
+import { verifyExperimentReplay } from "../src/experiments/replay-verify.js";
 
 vi.mock("../src/monitor/poll.js", () => ({
   pollLeaders: vi.fn(),
@@ -40,7 +42,7 @@ let dir: string;
 let store: StateStore;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "pm-copy-cycle-"));
+  dir = realpathSync(mkdtempSync(join(tmpdir(), "pm-copy-cycle-")));
   store = new StateStore(join(dir, "test.db"));
   mockPollLeaders.mockReset();
   mockFetchResolvedMarketOutcome.mockReset();
@@ -104,6 +106,10 @@ describe("runCopyCycle", () => {
     });
     expect(decisions.find((decision) => decision.action === "SKIP")?.reasonCode)
       .toBe("already_seen");
+    const experimentId = store.getActiveExperiment()!.experimentId;
+    const archived = await archiveExperimentEvidence({ dbPath: join(dir, "test.db"), experimentId,
+      archiveDir: join(dir, "leader-limit-archive") });
+    expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: join(dir, "test.db") }).match).toBe(true);
   });
 
   it("links a queued accepted candidate to its own observation when a later poll observation rejects the same source", async () => {
@@ -133,6 +139,38 @@ describe("runCopyCycle", () => {
     expect(linked.map((row) => JSON.parse(row.payloadJson))).toEqual([
       expect.objectContaining({ candidate: true, price: 0.5 }),
     ]);
+  });
+
+  it("records one replayable economic decision for an aggregated production trade", async () => {
+    const first = testActivity({ transactionHash: "0xaggregate-a", timestamp: 100, price: 0.5, size: 10 });
+    const second = testActivity({ transactionHash: "0xaggregate-b", timestamp: 101, price: 0.6, size: 10 });
+    const config = previewRuntimeConfig([
+      testLeader({ strategy: { type: "FIXED", copySize: 1 } }),
+    ]);
+    config.app.global.tradeAggregationWindowMs = 5_000;
+    const experiment = store.startOrResumeExperiment({
+      accountId: "candidate-aggregated", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate",
+    });
+    mockPollLeaders.mockResolvedValue([{
+      leaderId: "whale", fetched: 2, candidates: [first, second],
+    }]);
+
+    const result = await runCopyCycle(config, store);
+
+    expect(result.copied).toBe(1);
+    expect(store.listRawEvents()).toHaveLength(2);
+    expect(store.listDecisions().map((decision) => decision.action)).toEqual(["DETECT", "COPY"]);
+    const db = new Database(join(dir, "test.db"), { readonly: true });
+    const links = db.prepare(`SELECT d.action, COUNT(*) AS count
+      FROM decisions d JOIN decision_observation_links l ON l.decision_id=d.decision_id
+      GROUP BY d.action ORDER BY d.decision_order`).all() as Array<{ action: string; count: number }>;
+    db.close();
+    expect(links).toEqual([{ action: "DETECT", count: 2 }, { action: "COPY", count: 2 }]);
+    const archived = await archiveExperimentEvidence({ dbPath: join(dir, "test.db"),
+      experimentId: experiment.experimentId, archiveDir: join(dir, "aggregated-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: join(dir, "test.db") });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
   });
 
   it("links an incomplete raw activity to a terminal skip", async () => {
@@ -219,6 +257,8 @@ describe("runCopyCycle", () => {
     ]);
     config.app.global.copyPriceMode = "executable_guarded";
     config.app.global.risk.slippageTolerance = 0.02;
+    store.startOrResumeExperiment({ accountId: "guarded-skip", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
     ]);
@@ -239,6 +279,10 @@ describe("runCopyCycle", () => {
       executablePrice: 0.7,
       slippagePct: 40,
     });
+    const experimentId = store.getActiveExperiment()!.experimentId;
+    const archived = await archiveExperimentEvidence({ dbPath: join(dir, "test.db"), experimentId,
+      archiveDir: join(dir, "guarded-skip-archive") });
+    expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: join(dir, "test.db") }).match).toBe(true);
   });
 
   it("fills executable_guarded preview at the conservative limit and resizes fixed USD", async () => {
@@ -248,6 +292,8 @@ describe("runCopyCycle", () => {
     ]);
     config.app.global.copyPriceMode = "executable_guarded";
     config.app.global.risk.slippageTolerance = 0.02;
+    store.startOrResumeExperiment({ accountId: "guarded-copy", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
     ]);
@@ -274,6 +320,11 @@ describe("runCopyCycle", () => {
       config.app.global.risk.startingCapitalUsd - 1.03365983,
       4
     );
+    const experimentId = store.getActiveExperiment()!.experimentId;
+    const archived = await archiveExperimentEvidence({ dbPath: join(dir, "test.db"), experimentId,
+      archiveDir: join(dir, "guarded-copy-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: join(dir, "test.db") });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
   });
 
   it("sells the sizing result's exact shares in executable_guarded mode", async () => {

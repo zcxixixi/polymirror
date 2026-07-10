@@ -187,7 +187,7 @@ describe("processSettlements", () => {
     const { processSettlements, resetSettlementCache } = await import("../src/engine/settlement.js");
     resetSettlementCache();
     await processSettlements(new LeaderRegistry([leader]), { ...globalBase, previewMode: false }, store, false, { wallet });
-    expect(store.listDecisions().map((decision) => decision.action)).toEqual(["DETECT", "DETECT", "REDEEM", "REDEEM", "REDEEM", "REDEEM"]);
+    expect(store.listDecisions().map((decision) => decision.action)).toEqual(["DETECT", "DETECT", "REDEEM", "REDEEM"]);
     const experimentId = store.getActiveExperiment()!.experimentId; const source = join(dir, "test.db");
     store.close();
     const variants = ["swap", "extra", "identity"].map((name) => join(dir, `${name}.db`));
@@ -257,6 +257,11 @@ describe("processSettlements", () => {
         grossPayoutUsd: 10,
         realizedPnlUsd: 5,
       });
+    const experimentId = store.getActiveExperiment()!.experimentId;
+    const archived = await archiveExperimentEvidence({ dbPath: join(dir, "test.db"), experimentId,
+      archiveDir: join(dir, "leader-redeem-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: join(dir, "test.db") });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
   });
 
   it("keeps live local positions open when on-chain redeem fails", async () => {

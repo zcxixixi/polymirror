@@ -47,6 +47,7 @@ export interface PendingOrderRow {
   updatedAt: number;
   reconciliationOnly: boolean;
   reconciliationStartedAt: number | null;
+  decisionTerms: Record<string, unknown>;
 }
 
 export interface LiveOrderIntentRow {
@@ -66,6 +67,7 @@ export interface LiveOrderIntentRow {
   updatedAt: number;
   reconciliationOnly: boolean;
   reconciliationUntil: number;
+  decisionTerms: Record<string, unknown>;
 }
 
 export interface AuditLogRow {
@@ -238,7 +240,7 @@ function feeAdjustedPrice(
   return cashUsd / shares;
 }
 
-function stableSkipReasonCode(reason: string | undefined): DecisionReasonCode {
+export function stableSkipReasonCode(reason: string | undefined): DecisionReasonCode {
   const value = reason?.toLowerCase() ?? "";
   if (value === "already seen") return "already_seen";
   if (value.includes("unsupported") || value.includes("incomplete")) return "unsupported_or_incomplete_activity";
@@ -413,7 +415,8 @@ export class StateStore {
         updated_at INTEGER NOT NULL,
         reconciliation_only INTEGER NOT NULL DEFAULT 0,
         reconciliation_started_at INTEGER,
-        observation_refs_json TEXT NOT NULL DEFAULT '[]'
+        observation_refs_json TEXT NOT NULL DEFAULT '[]',
+        decision_terms_json TEXT NOT NULL DEFAULT '{}'
       );
       CREATE INDEX IF NOT EXISTS idx_pending_orders_leader ON pending_orders(leader_id);
       CREATE TABLE IF NOT EXISTS live_order_intents (
@@ -433,7 +436,8 @@ export class StateStore {
         updated_at INTEGER NOT NULL,
         reconciliation_only INTEGER NOT NULL DEFAULT 0,
         reconciliation_until INTEGER NOT NULL,
-        observation_refs_json TEXT NOT NULL DEFAULT '[]'
+        observation_refs_json TEXT NOT NULL DEFAULT '[]',
+        decision_terms_json TEXT NOT NULL DEFAULT '{}'
       );
       CREATE INDEX IF NOT EXISTS idx_live_order_intents_created ON live_order_intents(created_at);
       CREATE TABLE IF NOT EXISTS cash_ledger (
@@ -916,26 +920,40 @@ export class StateStore {
     reasonCode: DecisionReasonCode;
     exactTerms: Record<string, unknown>;
     decidedAt?: number;
+    observationRefs?: DecisionObservationRef[];
   }): DecisionRow {
     const raw = this.getRawEvent(input.rawEventId);
     if (!raw) throw new Error(`Raw event not found: ${input.rawEventId}`);
-    const contextObservationIds = this.decisionObservationRefs
-      .filter((ref) => ref.rawEventId === raw.rawEventId)
-      .map((ref) => ref.observationId);
+    const contextRefs = input.observationRefs
+      ?? this.decisionObservationRefs.filter((ref) => ref.rawEventId === raw.rawEventId);
     const fallbackObservationId = this.latestObservationIdByRawEventId.get(raw.rawEventId)
       ?? (this.db.prepare(
         "SELECT observation_id AS observationId FROM raw_event_observations WHERE raw_event_id = ? ORDER BY observation_id DESC LIMIT 1"
       ).get(raw.rawEventId) as { observationId: number } | undefined)?.observationId;
-    const observationIds = contextObservationIds.length > 0
-      ? contextObservationIds
+    const observationRefs = contextRefs.length > 0
+      ? contextRefs
       : fallbackObservationId === undefined ? [] : [fallbackObservationId];
-    if (observationIds.length === 0) throw new Error(`Cannot record decision without raw observation context: ${raw.rawEventId}`);
+    const normalizedRefs = observationRefs.map((ref) => typeof ref === "number"
+      ? { rawEventId: raw.rawEventId, observationId: ref }
+      : ref);
+    if (normalizedRefs.length === 0) throw new Error(`Cannot record decision without raw observation context: ${raw.rawEventId}`);
+    const owner = this.db.prepare(`SELECT r.experiment_id AS experimentId
+      FROM raw_event_observations o JOIN raw_events r ON r.raw_event_id=o.raw_event_id
+      WHERE o.observation_id=? AND o.raw_event_id=?`);
+    for (const ref of normalizedRefs) {
+      const row = owner.get(ref.observationId, ref.rawEventId) as { experimentId: string } | undefined;
+      if (row?.experimentId !== raw.experimentId) throw new Error("Decision observation context crosses experiments");
+    }
     return this.db.transaction(() => {
       const exactTermsJson = normalizedPayloadJson(input.exactTerms);
       const decidedAt = input.decidedAt ?? Date.now();
       const decisionOrder = (this.db.prepare("SELECT COALESCE(MAX(decision_order), 0) + 1 AS next FROM decisions WHERE experiment_id=?").get(raw.experimentId) as { next: number }).next;
+      const observationContext = [...normalizedRefs]
+        .sort((a, b) => a.observationId - b.observationId || a.rawEventId.localeCompare(b.rawEventId))
+        .map((ref) => `${ref.rawEventId}:${ref.observationId}`)
+        .join("\n");
       const decisionId = createHash("sha256")
-        .update([raw.experimentId, raw.rawEventId, input.action, input.reasonCode, exactTermsJson].join("\n"))
+        .update([raw.experimentId, observationContext, input.action, input.reasonCode, exactTermsJson].join("\n"))
         .digest("hex");
       this.db.prepare(
         `INSERT OR IGNORE INTO decisions
@@ -959,7 +977,7 @@ export class StateStore {
          (experiment_id, observation_id, decision_id, link_order, linked_at)
          VALUES (?, ?, ?, ?, ?)`
       );
-      for (const observationId of observationIds) {
+      for (const { observationId } of normalizedRefs) {
         const linkOrder = (nextLinkOrder.get(raw.experimentId) as { next: number }).next;
         insertLink.run(raw.experimentId, observationId, decisionId, linkOrder, decidedAt);
       }
@@ -1021,6 +1039,16 @@ export class StateStore {
           : [];
       });
     } catch { return []; }
+  }
+
+  private parseDecisionTerms(value: string | null | undefined): Record<string, unknown> {
+    if (!value) return {};
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch { return {}; }
   }
 
   setDecisionObservationRefs(refs: DecisionObservationRef[]): void {
@@ -1165,6 +1193,9 @@ export class StateStore {
     if (!intentCols.some((c) => c.name === "observation_refs_json")) {
       this.db.exec("ALTER TABLE live_order_intents ADD COLUMN observation_refs_json TEXT NOT NULL DEFAULT '[]'");
     }
+    if (!intentCols.some((c) => c.name === "decision_terms_json")) {
+      this.db.exec("ALTER TABLE live_order_intents ADD COLUMN decision_terms_json TEXT NOT NULL DEFAULT '{}'");
+    }
     const pendingCols = this.db.prepare("PRAGMA table_info(pending_orders)").all() as { name: string }[];
     if (!pendingCols.some((c) => c.name === "filled_usd")) {
       this.db.exec("ALTER TABLE pending_orders ADD COLUMN filled_usd REAL NOT NULL DEFAULT 0");
@@ -1190,6 +1221,9 @@ export class StateStore {
     }
     if (!pendingCols.some((c) => c.name === "observation_refs_json")) {
       this.db.exec("ALTER TABLE pending_orders ADD COLUMN observation_refs_json TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!pendingCols.some((c) => c.name === "decision_terms_json")) {
+      this.db.exec("ALTER TABLE pending_orders ADD COLUMN decision_terms_json TEXT NOT NULL DEFAULT '{}'");
     }
     this.db.exec(
       `UPDATE pending_orders
@@ -1764,16 +1798,20 @@ export class StateStore {
                 slippage_pct AS slippagePct, trade_key AS tradeKey,
                 reasoning, created_at AS createdAt, updated_at AS updatedAt,
                 reconciliation_only AS reconciliationOnly,
-                reconciliation_started_at AS reconciliationStartedAt
+                reconciliation_started_at AS reconciliationStartedAt,
+                decision_terms_json AS decisionTermsJson
          FROM pending_orders
          WHERE reconciliation_only = 0 OR ? = 1
          ORDER BY created_at ASC`
       )
-      .all(options?.includeReconciliation ? 1 : 0) as PendingOrderRow[];
-    return rows.map((r) => ({
-      ...r,
-      side: r.side as "BUY" | "SELL",
-      reconciliationOnly: Boolean(r.reconciliationOnly),
+      .all(options?.includeReconciliation ? 1 : 0) as Array<Omit<PendingOrderRow, "decisionTerms"> & {
+        decisionTermsJson: string;
+      }>;
+    return rows.map(({ decisionTermsJson, ...row }) => ({
+      ...row,
+      side: row.side as "BUY" | "SELL",
+      reconciliationOnly: Boolean(row.reconciliationOnly),
+      decisionTerms: this.parseDecisionTerms(decisionTermsJson),
     }));
   }
 
@@ -1840,6 +1878,7 @@ export class StateStore {
     orderSize: number;
     auditReason: string;
     market?: TokenMarketEntry;
+    decisionTerms?: Record<string, unknown>;
   }): string {
     const tradeKeys = uniqueTradeKeys(entry.tradeKeys);
     if (tradeKeys.length === 0) throw new Error("live order intent requires trade keys");
@@ -1851,8 +1890,8 @@ export class StateStore {
         `INSERT INTO live_order_intents
          (intent_id, leader_id, token_id, side, price, leader_price, executable_price,
           slippage_pct, size, trade_keys, reasoning, market_json, created_at, updated_at,
-          reconciliation_until, observation_refs_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reconciliation_until, observation_refs_json, decision_terms_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(intent_id) DO UPDATE SET
            token_id = excluded.token_id,
            side = excluded.side,
@@ -1865,6 +1904,7 @@ export class StateStore {
            reasoning = excluded.reasoning,
            market_json = excluded.market_json,
            observation_refs_json = excluded.observation_refs_json,
+           decision_terms_json = excluded.decision_terms_json,
            reconciliation_until = excluded.reconciliation_until,
            updated_at = excluded.updated_at`
       )
@@ -1884,7 +1924,8 @@ export class StateStore {
         now,
         now,
         now + FILL_RECONCILIATION_WINDOW_MS,
-        observationRefsJson
+        observationRefsJson,
+        normalizedPayloadJson(entry.decisionTerms ?? {})
       );
     return intentId;
   }
@@ -1897,16 +1938,18 @@ export class StateStore {
                 slippage_pct AS slippagePct, size, trade_keys AS tradeKeys, reasoning, market_json AS marketJson,
                 created_at AS createdAt, updated_at AS updatedAt,
                 reconciliation_only AS reconciliationOnly,
-                reconciliation_until AS reconciliationUntil
+                reconciliation_until AS reconciliationUntil,
+                decision_terms_json AS decisionTermsJson
          FROM live_order_intents
          WHERE reconciliation_only = 0 OR ? = 1
          ORDER BY created_at ASC`
       )
       .all(options?.includeReconciliation ? 1 : 0) as Array<
-      Omit<LiveOrderIntentRow, "tradeKeys" | "market" | "side"> & {
+      Omit<LiveOrderIntentRow, "tradeKeys" | "market" | "side" | "decisionTerms"> & {
         side: string;
         tradeKeys: string;
         marketJson: string | null;
+        decisionTermsJson: string;
       }
     >;
     return rows.map((r) => {
@@ -1934,6 +1977,7 @@ export class StateStore {
         updatedAt: r.updatedAt,
         reconciliationOnly: Boolean(r.reconciliationOnly),
         reconciliationUntil: r.reconciliationUntil,
+        decisionTerms: this.parseDecisionTerms(r.decisionTermsJson),
       };
     });
   }
@@ -2056,7 +2100,8 @@ export class StateStore {
       ? this.db.prepare(
         `SELECT trade_key AS tradeKey, price, size, leader_price AS leaderPrice,
                   executable_price AS executablePrice, slippage_pct AS slippagePct,
-                  observation_refs_json AS observationRefsJson
+                  observation_refs_json AS observationRefsJson,
+                  decision_terms_json AS decisionTermsJson
            FROM pending_orders WHERE order_id = ?`
         ).get(orderId) as {
           tradeKey: string;
@@ -2066,6 +2111,7 @@ export class StateStore {
           executablePrice: number | null;
           slippagePct: number | null;
           observationRefsJson: string;
+          decisionTermsJson: string;
         } | undefined
       : undefined;
     if (this.decisionRawEventIds.length === 0 && orderId) {
@@ -2132,6 +2178,7 @@ export class StateStore {
           preview: fill.preview,
           exactTerms: pendingLineage
             ? {
+                ...this.parseDecisionTerms(pendingLineage.decisionTermsJson),
                 orderId,
                 orderType: "GTC",
                 requestedPrice: pendingLineage.price,
@@ -2353,6 +2400,11 @@ export class StateStore {
       this.setDecisionObservationRefs(refs.length > 0 ? refs : this.observationRefsForSourceKeys(tradeKeys));
     }
     const observationRefsJson = JSON.stringify(this.observationRefsForRawEventIds(this.decisionRawEventIds));
+    const persistedDecisionTerms = decisionTerms ?? {
+      orderType: trackPendingGtc ? "GTC" : "IMMEDIATE",
+      requestedPrice: price,
+      requestedShares: orderSize,
+    };
 
     const apply = this.db.transaction(() => {
       for (const key of [...new Set(tradeKeys)]) {
@@ -2371,8 +2423,8 @@ export class StateStore {
             `INSERT INTO pending_orders
              (order_id, leader_id, token_id, side, price, size, filled_shares, filled_usd, fee_usd,
               leader_price, executable_price, slippage_pct, trade_key, reasoning, created_at, updated_at,
-              observation_refs_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              observation_refs_json, decision_terms_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(order_id) DO UPDATE SET
                filled_shares = excluded.filled_shares,
                filled_usd = excluded.filled_usd,
@@ -2381,6 +2433,7 @@ export class StateStore {
                executable_price = excluded.executable_price,
                slippage_pct = excluded.slippage_pct,
                observation_refs_json = excluded.observation_refs_json,
+               decision_terms_json = excluded.decision_terms_json,
                updated_at = excluded.updated_at`
           )
           .run(
@@ -2400,7 +2453,8 @@ export class StateStore {
             auditReason,
             now,
             now,
-            observationRefsJson
+            observationRefsJson,
+            normalizedPayloadJson(persistedDecisionTerms)
           );
       }
 
@@ -2432,11 +2486,9 @@ export class StateStore {
           feeUsd: appliedFee,
           reason: auditReason,
           preview: false,
-          exactTerms: decisionTerms ?? {
+          exactTerms: {
+            ...persistedDecisionTerms,
             orderId: orderId ?? null,
-            orderType: trackPendingGtc ? "GTC" : "IMMEDIATE",
-            requestedPrice: price,
-            requestedShares: orderSize,
             filledShares,
             appliedShares,
             filledUsd,
@@ -2544,9 +2596,18 @@ export class StateStore {
         preview: entry.preview,
         ...entry.exactTerms,
       };
-      for (const rawEventId of this.decisionRawEventIds) {
-        this.recordDecision({ rawEventId, action: decisionAction, reasonCode, exactTerms });
+      const observationRefs = this.observationRefsForRawEventIds(this.decisionRawEventIds);
+      if (this.decisionRawEventIds.length > 0 && observationRefs.length === 0) {
+        throw new Error("Cannot persist decision without raw observation evidence");
       }
+      const primary = observationRefs[0];
+      if (primary) this.recordDecision({
+        rawEventId: primary.rawEventId,
+        action: decisionAction,
+        reasonCode,
+        exactTerms,
+        observationRefs,
+      });
     }
     })();
   }

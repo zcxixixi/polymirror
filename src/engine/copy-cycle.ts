@@ -1025,6 +1025,16 @@ export async function runCopyCycle(
         orderSize: orderShares,
         auditReason: sizing.reasoning,
         market,
+        decisionTerms: {
+          orderType: config.app.global.execution.orderType,
+          requestedPrice: orderPrice,
+          requestedShares: orderShares,
+          quoteBestPrice: observedExecutablePrice,
+          guardedTickSize: guardedTickSize ?? null,
+          guardedFeeRate,
+          guardedFeeExponent,
+          quoteEvidence: guardedQuoteEvidence,
+        },
       });
     }
 

@@ -8,6 +8,9 @@ import { passActivityFilters } from "../engine/filters.js";
 import { calculateOrderSize } from "../engine/sizing.js";
 import { prepareExecutableGuardedOrder, prepareGuardedOrderTerms } from "../engine/execution-price.js";
 import { quoteExecutableOrderBook, type OrderBookLevelLike } from "../executor/orderbook.js";
+import { aggregateTrades } from "../engine/aggregate.js";
+import { stableSkipReasonCode } from "../state/store.js";
+import { calculateCopySlippageLossPct } from "../sim/copy-slippage.js";
 import { normalizedPayloadJson } from "./provenance.js";
 import { verifyExperimentArchive, type ArchiveVerificationOptions } from "./archive.js";
 import type { ExperimentStateSnapshot } from "./manifest.js";
@@ -20,7 +23,7 @@ export interface ReplayEvidenceSummary {
 }
 interface StoredDecision { decisionId: string; rawEventId: string; action: string; reasonCode: string; exactTermsJson: string; observationId: number; linkOrder: number }
 interface RegeneratedDecision { rawEventId: string; action: string; reasonCode: string; exactTermsJson: string }
-interface RawObservationEvidence { payloadHash: string; payloadJson: string; sourceTimestamp: number; observedTimestamp: number; observationId: number }
+interface RawObservationEvidence { rawEventId: string; payloadHash: string; payloadJson: string; sourceTimestamp: number; observedTimestamp: number; observationId: number }
 interface RawEvidence { rawEventId: string; sourceId: string | null; payloadHash: string; payloadJson: string; observedTimestamp: number; observationCount: number; rawOrder: number; observations: RawObservationEvidence[] }
 
 function round(value: number): number { return Math.round((value + Number.EPSILON) * 1e8) / 1e8; }
@@ -136,15 +139,16 @@ function loadEvidence(db: Database.Database, experimentId: string): { raw: RawEv
     FROM raw_event_observations WHERE raw_event_id=? ORDER BY observation_id`);
   const raw = rawRows.map((row): RawEvidence => ({
     ...row,
-    observations: observationStmt.all(row.rawEventId) as RawObservationEvidence[],
+    observations: (observationStmt.all(row.rawEventId) as Array<Omit<RawObservationEvidence, "rawEventId">>)
+      .map((observation) => ({ ...observation, rawEventId: row.rawEventId })),
   }));
   const canonicalDecisions = db.prepare(`SELECT decision_id AS decisionId, decision_order AS decisionOrder
     FROM decisions WHERE experiment_id=?`).all(experimentId) as Array<{ decisionId: string; decisionOrder: number }>;
   const decisions = db.prepare(`SELECT d.decision_id AS decisionId, d.raw_event_id AS rawEventId, d.action,
     d.reason_code AS reasonCode, d.exact_terms_json AS exactTermsJson,
-    l.observation_id AS observationId, l.link_order AS linkOrder
+    l.observation_id AS observationId, l.link_order AS linkOrder, d.experiment_id AS decisionExperimentId
     FROM decision_observation_links l JOIN decisions d ON d.decision_id=l.decision_id
-    WHERE l.experiment_id=? ORDER BY l.link_order`).all(experimentId) as StoredDecision[];
+    WHERE l.experiment_id=? ORDER BY l.link_order`).all(experimentId) as Array<StoredDecision & { decisionExperimentId: string }>;
   const firstLinkOrderByDecision = new Map<string, number>();
   for (const decision of decisions) {
     const current = firstLinkOrderByDecision.get(decision.decisionId);
@@ -161,9 +165,15 @@ function loadEvidence(db: Database.Database, experimentId: string): { raw: RawEv
   }
   const rawIds = new Set(raw.map((row) => row.rawEventId));
   if (decisions.some((row) => !rawIds.has(row.rawEventId))) throw new Error("Replay evidence has decisions without stored raw events");
-  const observationOwner = new Map(raw.flatMap((row) => row.observations.map((observation) => [observation.observationId, row.rawEventId] as const)));
-  if (decisions.some((decision) => observationOwner.get(decision.observationId) !== decision.rawEventId)) {
-    throw new Error("Replay decision observation link does not match its raw event");
+  const observations = raw.flatMap((row) => row.observations);
+  const observationIds = new Set(observations.map((observation) => observation.observationId));
+  if (decisions.some((decision) => decision.decisionExperimentId !== experimentId || !observationIds.has(decision.observationId))) {
+    throw new Error("Replay decision observation link crosses its experiment or lacks an observation");
+  }
+  const linkedObservationIds = new Set(decisions.map((decision) => decision.observationId));
+  const unlinked = observations.find((observation) => !linkedObservationIds.has(observation.observationId));
+  if (unlinked) {
+    throw new Error(`Replay evidence has an unlinked raw observation: ${unlinked.observationId}`);
   }
   for (const row of raw) {
     if (sha256Text(row.payloadJson) !== row.payloadHash) throw new Error("Replay raw observation payload checksum mismatch");
@@ -344,7 +354,7 @@ function applyTokenRedeems(
   }
 }
 
-export function replayEvidence(dbPath: string, experimentId: string): ReplayEvidenceSummary {
+function legacyReplayEvidence(dbPath: string, experimentId: string): ReplayEvidenceSummary {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
     const experiment = db.prepare(`SELECT canonical_config_json AS configJson, sealed_at AS sealedAt,
@@ -608,6 +618,490 @@ export function replayEvidence(dbPath: string, experimentId: string): ReplayEvid
   } finally { db.close(); }
 }
 
+interface DecisionOccurrence {
+  decisionId: string;
+  rawEventId: string;
+  action: string;
+  reasonCode: string;
+  exactTermsJson: string;
+  observationIds: number[];
+  firstLinkOrder: number;
+}
+
+interface ReplayDecisionGroup {
+  key: string;
+  observations: RawObservationEvidence[];
+  activity?: Activity & { leaderId?: string; candidate?: boolean; rejectionReasonCode?: string | null };
+  sizing?: ReturnType<typeof calculateOrderSize>;
+  filterReason?: string;
+  cumulativeFilledShares: number;
+  cumulativeFilledUsd: number;
+  copied: boolean;
+}
+
+function decisionOccurrences(rows: StoredDecision[]): DecisionOccurrence[] {
+  const byId = new Map<string, DecisionOccurrence>();
+  for (const row of rows) {
+    const existing = byId.get(row.decisionId);
+    if (existing) {
+      if (existing.action !== row.action || existing.reasonCode !== row.reasonCode ||
+        existing.exactTermsJson !== row.exactTermsJson) {
+        throw new Error("Replay decision identity has inconsistent immutable fields");
+      }
+      existing.observationIds.push(row.observationId);
+      existing.firstLinkOrder = Math.min(existing.firstLinkOrder, row.linkOrder);
+    } else {
+      byId.set(row.decisionId, {
+        decisionId: row.decisionId,
+        rawEventId: row.rawEventId,
+        action: row.action,
+        reasonCode: row.reasonCode,
+        exactTermsJson: row.exactTermsJson,
+        observationIds: [row.observationId],
+        firstLinkOrder: row.linkOrder,
+      });
+    }
+  }
+  return [...byId.values()]
+    .map((decision) => ({ ...decision, observationIds: [...decision.observationIds].sort((a, b) => a - b) }))
+    .sort((a, b) => a.firstLinkOrder - b.firstLinkOrder);
+}
+
+function observationContextKey(observationIds: number[]): string {
+  return [...observationIds].sort((a, b) => a - b).join(",");
+}
+
+function decisionTerms(decision: DecisionOccurrence): Record<string, unknown> {
+  return JSON.parse(decision.exactTermsJson) as Record<string, unknown>;
+}
+
+function sameEvidenceValue(actual: unknown, expected: unknown): boolean {
+  return normalizedPayloadJson(actual ?? null) === normalizedPayloadJson(expected ?? null);
+}
+
+function requireEvidenceValue(terms: Record<string, unknown>, key: string, expected: unknown, context: string): void {
+  if (!sameEvidenceValue(terms[key], expected)) {
+    throw new Error(`Re-execution decision mismatch for ${context}: ${key}`);
+  }
+}
+
+function activityForObservations(
+  observations: RawObservationEvidence[], config: RuntimeConfig
+): Activity & { leaderId?: string; candidate?: boolean; rejectionReasonCode?: string | null } {
+  const payloads = observations.map((observation) => JSON.parse(observation.payloadJson) as
+    Activity & { leaderId?: string; candidate?: boolean; rejectionReasonCode?: string | null });
+  if (payloads.length === 0) throw new Error("Replay decision context has no raw observations");
+  if (payloads.every((payload) => payload.type === "TRADE" && payload.candidate !== false)) {
+    const leaders = new Set(payloads.map((payload) => payload.leaderId));
+    if (leaders.size !== 1 || leaders.has(undefined)) throw new Error("Aggregated replay context has mixed leaders");
+    const aggregated = aggregateTrades(payloads.map((activity) => ({ leaderId: activity.leaderId!, activity })),
+      config.app.global.tradeAggregationWindowMs);
+    if (aggregated.length !== 1) throw new Error("Replay observation context does not form one production aggregate");
+    return { ...aggregated[0]!.activity, leaderId: payloads[0]!.leaderId, candidate: true, rejectionReasonCode: null };
+  }
+  if (payloads.length !== 1) throw new Error("Non-trade or rejected replay decisions require one concrete observation");
+  return payloads[0]!;
+}
+
+function validateDetect(
+  decision: DecisionOccurrence,
+  group: ReplayDecisionGroup,
+  config: RuntimeConfig,
+  positions: Map<string, ReplayPosition>,
+  cash: number
+): { detectedBuy: number; detectedSell: number } {
+  if (decision.reasonCode !== "detected") throw new Error("Re-execution DETECT reason code differs");
+  const terms = decisionTerms(decision);
+  const activity = activityForObservations(group.observations, config);
+  group.activity = activity;
+  const type = String(activity.type ?? "");
+  if (activity.candidate === false) {
+    requireEvidenceValue(terms, "leaderId", activity.leaderId ?? null, "rejected DETECT");
+    requireEvidenceValue(terms, "tokenId", activity.asset ?? activity.conditionId ?? null, "rejected DETECT");
+    requireEvidenceValue(terms, "side", activity.side ?? activity.type, "rejected DETECT");
+    requireEvidenceValue(terms, "size", activity.size ?? null, "rejected DETECT");
+    requireEvidenceValue(terms, "price", activity.price ?? null, "rejected DETECT");
+    requireEvidenceValue(terms, "reason", "raw activity detected", "rejected DETECT");
+    return { detectedBuy: 0, detectedSell: 0 };
+  }
+  if (type === "TRADE") {
+    requireEvidenceValue(terms, "leaderId", activity.leaderId ?? null, "TRADE DETECT");
+    requireEvidenceValue(terms, "tokenId", activity.asset ?? null, "TRADE DETECT");
+    requireEvidenceValue(terms, "side", activity.side ?? null, "TRADE DETECT");
+    requireEvidenceValue(terms, "size", activity.size ?? null, "TRADE DETECT");
+    requireEvidenceValue(terms, "price", activity.price ?? null, "TRADE DETECT");
+    const leader = config.app.leaders.find((candidate) => candidate.id === activity.leaderId);
+    if (!leader) throw new Error(`Re-execution leader is absent from canonical config: ${activity.leaderId ?? "missing"}`);
+    if (activity.asset && (activity.side === "BUY" || activity.side === "SELL")) {
+      const filter = passActivityFilters(leader, activity);
+      group.filterReason = filter.pass ? undefined : filter.reason ?? "filter";
+      group.sizing = calculateOrderSize(leader, config.app.global, activity, {
+        getPosition: (leaderId: string, tokenId: string) => positions.get(stateKey(leaderId, tokenId))?.shares ?? 0,
+        getPositionCostUsd: (leaderId: string, tokenId: string) => {
+          const position = positions.get(stateKey(leaderId, tokenId));
+          return position ? position.shares * position.avgEntryPrice : 0;
+        },
+      });
+      if (activity.side === "BUY" && group.sizing.finalUsd > cash && terms.preview === false) {
+        throw new Error("Live replay cannot use preview cash sizing evidence");
+      }
+    }
+    return { detectedBuy: activity.side === "BUY" ? 1 : 0, detectedSell: activity.side === "SELL" ? 1 : 0 };
+  }
+  if (type === "REDEEM") {
+    const leaderShape = sameEvidenceValue(terms.tokenId, activity.asset ?? null)
+      && sameEvidenceValue(terms.size, activity.size ?? null)
+      && sameEvidenceValue(terms.price, activity.price ?? null)
+      && sameEvidenceValue(terms.reason, "leader redeem detected");
+    const copyCycleShape = sameEvidenceValue(terms.tokenId, activity.conditionId ?? null)
+      && sameEvidenceValue(terms.size, activity.usdcSize ?? null)
+      && sameEvidenceValue(terms.price, null)
+      && sameEvidenceValue(terms.reason, activity.title ?? null);
+    requireEvidenceValue(terms, "leaderId", activity.leaderId ?? null, "REDEEM DETECT");
+    requireEvidenceValue(terms, "side", "REDEEM", "REDEEM DETECT");
+    if (!leaderShape && !copyCycleShape) throw new Error("Re-execution production REDEEM DETECT terms differ");
+    return { detectedBuy: 0, detectedSell: 0 };
+  }
+  if (type === "AUTO_SETTLEMENT") {
+    requireEvidenceValue(terms, "leaderId", activity.leaderId ?? null, "AUTO_SETTLEMENT DETECT");
+    requireEvidenceValue(terms, "tokenId", activity.conditionId ?? null, "AUTO_SETTLEMENT DETECT");
+    requireEvidenceValue(terms, "side", "REDEEM", "AUTO_SETTLEMENT DETECT");
+    requireEvidenceValue(terms, "reason", "auto settlement detected", "AUTO_SETTLEMENT DETECT");
+    return { detectedBuy: 0, detectedSell: 0 };
+  }
+  if (type === "TOKEN_SETTLEMENT") {
+    const settlement = (activity as unknown as { settlement?: { payoutPerShare?: number } | null }).settlement;
+    requireEvidenceValue(terms, "leaderId", null, "TOKEN_SETTLEMENT DETECT");
+    requireEvidenceValue(terms, "tokenId", (activity as unknown as { tokenId?: string }).tokenId ?? null, "TOKEN_SETTLEMENT DETECT");
+    requireEvidenceValue(terms, "side", "REDEEM", "TOKEN_SETTLEMENT DETECT");
+    requireEvidenceValue(terms, "price", settlement?.payoutPerShare ?? null, "TOKEN_SETTLEMENT DETECT");
+    requireEvidenceValue(terms, "reason", "token settlement detected", "TOKEN_SETTLEMENT DETECT");
+    return { detectedBuy: 0, detectedSell: 0 };
+  }
+  if (type === "ONCHAIN_REDEEMABLE") {
+    const row = activity as unknown as { tokenId?: string; size?: number; payoutPerShare?: number };
+    requireEvidenceValue(terms, "leaderId", null, "ONCHAIN_REDEEMABLE DETECT");
+    requireEvidenceValue(terms, "tokenId", row.tokenId ?? null, "ONCHAIN_REDEEMABLE DETECT");
+    requireEvidenceValue(terms, "side", "REDEEM", "ONCHAIN_REDEEMABLE DETECT");
+    requireEvidenceValue(terms, "size", row.size ?? null, "ONCHAIN_REDEEMABLE DETECT");
+    requireEvidenceValue(terms, "price", row.payoutPerShare ?? null, "ONCHAIN_REDEEMABLE DETECT");
+    requireEvidenceValue(terms, "reason", "on-chain redeemable detected", "ONCHAIN_REDEEMABLE DETECT");
+    return { detectedBuy: 0, detectedSell: 0 };
+  }
+  throw new Error(`Re-execution decision set mismatch: unsupported raw type ${type}`);
+}
+
+function validateSkip(decision: DecisionOccurrence, group: ReplayDecisionGroup, config: RuntimeConfig): void {
+  const terms = decisionTerms(decision);
+  const reason = typeof terms.reason === "string" ? terms.reason : "";
+  if (!reason) throw new Error("Re-execution SKIP requires an immutable reason");
+  const activity = group.activity ?? activityForObservations(group.observations, config);
+  if (activity.candidate === false) {
+    const expected = activity.rejectionReasonCode ?? "poll_rejected_activity";
+    if (decision.reasonCode !== expected || (reason !== expected && reason !== "poll rejected activity")) {
+      throw new Error("Re-execution poll rejection differs");
+    }
+    return;
+  }
+  if (group.filterReason !== undefined) {
+    if (reason !== group.filterReason || decision.reasonCode !== stableSkipReasonCode(reason)) {
+      throw new Error("Re-execution static filter SKIP differs");
+    }
+    return;
+  }
+  const type = String(activity.type ?? "");
+  if (type === "AUTO_SETTLEMENT") {
+    const expected = expectedSettlementSkip(activity, group.observations[0]!.observedTimestamp, 1, false,
+      config.app.global.maxTradeAgeHours);
+    if (decision.reasonCode !== expected.reasonCode || reason !== expected.reason) {
+      throw new Error("Re-execution AUTO_SETTLEMENT SKIP differs");
+    }
+    return;
+  }
+  if (type === "TOKEN_SETTLEMENT") {
+    const settlement = (activity as unknown as { settlement?: { settled?: boolean } | null }).settlement;
+    const expected = !settlement ? { reasonCode: "settlement_evidence_unavailable", reason: "settlement evidence unavailable" }
+      : !settlement.settled ? { reasonCode: "market_unresolved", reason: "market unresolved" }
+        : null;
+    if (!expected || decision.reasonCode !== expected.reasonCode || reason !== expected.reason) {
+      throw new Error("Re-execution TOKEN_SETTLEMENT SKIP differs");
+    }
+    return;
+  }
+  if (decision.reasonCode !== stableSkipReasonCode(reason) &&
+    !["untracked_token", "settlement_evidence_unavailable", "market_unresolved", "winner_set_unavailable"].includes(decision.reasonCode)) {
+    throw new Error("Re-execution production SKIP reason code differs");
+  }
+}
+
+function validateAndApplyFill(
+  decision: DecisionOccurrence,
+  group: ReplayDecisionGroup,
+  config: RuntimeConfig,
+  positions: Map<string, ReplayPosition>,
+  cash: { value: number },
+  realized: { value: number }
+): { copiedBuy: number; copiedSell: number } {
+  const activity = group.activity ?? activityForObservations(group.observations, config);
+  if (activity.type !== "TRADE" || !activity.asset || (activity.side !== "BUY" && activity.side !== "SELL")) {
+    throw new Error("Re-execution fill lacks a complete TRADE observation context");
+  }
+  const side = activity.side;
+  const expectedAction = side === "BUY" ? "COPY" : "SELL";
+  if (decision.action !== expectedAction || decision.reasonCode !== (side === "BUY" ? "copy_executed" : "sell_executed")) {
+    throw new Error("Re-execution fill action or reason differs");
+  }
+  const terms = decisionTerms(decision);
+  requireEvidenceValue(terms, "leaderId", activity.leaderId ?? null, "fill");
+  requireEvidenceValue(terms, "tokenId", activity.asset, "fill");
+  requireEvidenceValue(terms, "side", side, "fill");
+  const sizing = group.sizing;
+  if (!sizing) throw new Error("Re-execution fill has no prior sizing evidence");
+  const requestedShares = requiredNumber(terms, "requestedShares");
+  const requestedPrice = requiredNumber(terms, "requestedPrice");
+  const cumulativeShares = requiredNumber(terms, "filledShares");
+  const cumulativeUsd = requiredNumber(terms, "filledUsd");
+  const feeUsd = requiredNumber(terms, "feeUsd");
+  if (config.app.global.copyPriceMode === "leader_limit") {
+    if (Math.abs(requestedShares - sizing.finalShares) > 1e-8 || Math.abs(requestedPrice - (activity.price ?? NaN)) > 1e-8) {
+      throw new Error("Re-execution sizing/order terms differ");
+    }
+  } else {
+    const evidence = terms.quoteEvidence;
+    if (!evidence || typeof evidence !== "object") throw new Error("Guarded replay requires stored quote evidence");
+    const quoteEvidence = evidence as Record<string, unknown>;
+    if (!Array.isArray(quoteEvidence.levels)) throw new Error("Guarded replay quote levels are required");
+    const tickSize = requiredNumber(quoteEvidence, "tickSize");
+    const minOrderShares = requiredNumber(quoteEvidence, "minOrderShares");
+    const feeRate = requiredNumber(quoteEvidence, "feeRate");
+    const feeExponent = requiredNumber(quoteEvidence, "feeExponent");
+    const leaderPrice = requiredNumber(terms, "leaderPrice");
+    const prepared = prepareGuardedOrderTerms({ side, leaderPrice, targetUsd: sizing.finalUsd,
+      targetShares: sizing.finalShares, minOrderUsd: config.app.global.risk.minOrderUsd,
+      absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+    if (!prepared.allow || prepared.orderPrice === null) throw new Error("Stored quote evidence cannot produce a guarded order");
+    const quote = quoteExecutableOrderBook(quoteEvidence.levels as OrderBookLevelLike[], side,
+      prepared.orderShares, prepared.orderPrice, minOrderShares,
+      side === "BUY" ? Math.round(prepared.orderUsd * 100) / 100 : undefined);
+    const guarded = prepareExecutableGuardedOrder({ side, leaderPrice,
+      executablePrice: quote.fullyFillable ? quote.averagePrice : quote.bestPrice,
+      targetUsd: sizing.finalUsd, targetShares: sizing.finalShares,
+      minOrderUsd: config.app.global.risk.minOrderUsd,
+      absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+    if (!quote.fullyFillable || !quote.meetsMinOrderSize || !guarded.allow || guarded.orderPrice === null ||
+      Math.abs(requestedPrice - guarded.orderPrice) > 1e-8 || Math.abs(requestedShares - guarded.orderShares) > 1e-8 ||
+      optionalFinite(terms, "quoteBestPrice") !== quote.averagePrice || optionalFinite(terms, "guardedTickSize") !== tickSize ||
+      optionalFinite(terms, "guardedFeeRate") !== feeRate || optionalFinite(terms, "guardedFeeExponent") !== feeExponent) {
+      throw new Error("Guarded quote/order metadata differs during re-execution");
+    }
+  }
+  const deltaShares = cumulativeShares - group.cumulativeFilledShares;
+  const deltaUsd = cumulativeUsd - group.cumulativeFilledUsd;
+  if (deltaShares <= 0 || deltaUsd < 0 || cumulativeShares - requestedShares > 1e-8 || feeUsd < 0) {
+    throw new Error("Invalid accounting evidence: cumulative fill bounds");
+  }
+  const executionPrice = optionalFinite(terms, "price") ?? requestedPrice;
+  if (Math.abs(deltaUsd - deltaShares * executionPrice) > 1e-6) {
+    throw new Error("Execution-price evidence does not match the cumulative fill delta");
+  }
+  const leaderPrice = optionalFinite(terms, "leaderPrice");
+  const executablePrice = optionalFinite(terms, "executablePrice");
+  const slippagePct = optionalFinite(terms, "slippagePct");
+  if (leaderPrice !== undefined && Math.abs(leaderPrice - (activity.price ?? NaN)) > 1e-8) {
+    throw new Error("Stored leader price differs from raw activity");
+  }
+  if (leaderPrice !== undefined && executablePrice !== undefined && slippagePct !== undefined) {
+    const recomputedSlippage = calculateCopySlippageLossPct(side, leaderPrice, executablePrice);
+    if (recomputedSlippage === null || Math.abs(recomputedSlippage - slippagePct) > 1e-6) {
+      throw new Error("Stored execution slippage differs");
+    }
+  }
+  const key = stateKey(activity.leaderId!, activity.asset);
+  const current = positions.get(key) ?? { leaderId: activity.leaderId!, tokenId: activity.asset, shares: 0, avgEntryPrice: 0 };
+  if (side === "BUY") {
+    const cost = deltaUsd + feeUsd;
+    const nextShares = current.shares + deltaShares;
+    current.avgEntryPrice = (current.shares * current.avgEntryPrice + cost) / nextShares;
+    current.shares = nextShares;
+    positions.set(key, current);
+    if (config.app.global.previewMode) cash.value -= cost;
+  } else {
+    if (deltaShares - current.shares > 1e-8) throw new Error("Invalid accounting evidence: oversell");
+    const proceeds = deltaUsd - feeUsd;
+    const cost = deltaShares * current.avgEntryPrice;
+    current.shares -= deltaShares;
+    if (config.app.global.previewMode) cash.value += proceeds;
+    realized.value += proceeds - cost;
+    if (current.shares <= 1e-12) positions.delete(key); else positions.set(key, current);
+  }
+  group.cumulativeFilledShares = cumulativeShares;
+  group.cumulativeFilledUsd = cumulativeUsd;
+  const first = !group.copied;
+  group.copied = true;
+  return { copiedBuy: first && side === "BUY" ? 1 : 0, copiedSell: first && side === "SELL" ? 1 : 0 };
+}
+
+function validateAndApplyRedeem(
+  decision: DecisionOccurrence,
+  group: ReplayDecisionGroup,
+  config: RuntimeConfig,
+  positions: Map<string, ReplayPosition>,
+  cash: { value: number },
+  realized: { value: number },
+  markets: Map<string, string>
+): void {
+  if (decision.reasonCode !== "redeem_settled") throw new Error("Re-execution REDEEM reason differs");
+  const terms = decisionTerms(decision);
+  const leaderId = requiredString(terms, "leaderId");
+  const settlementSource = requiredString(terms, "settlementSource");
+  const payout = requiredNumber(terms, "grossPayoutUsd");
+  const cost = requiredNumber(terms, "costBasisUsd");
+  const realizedPnl = requiredNumber(terms, "realizedPnlUsd");
+  if (Math.abs(realizedPnl - (payout - cost)) > 1e-6) {
+    throw new Error("Settlement realized PnL evidence differs");
+  }
+  requireEvidenceValue(terms, "preview", config.app.global.previewMode, "REDEEM");
+  const payloads = group.observations.map((observation) => JSON.parse(observation.payloadJson) as Record<string, unknown>);
+  if (settlementSource === "condition_resolution") {
+    const conditionId = requiredString(terms, "conditionId");
+    if (payloads.length !== 1 || !["REDEEM", "AUTO_SETTLEMENT"].includes(String(payloads[0]!.type)) ||
+      payloads[0]!.conditionId !== conditionId) {
+      throw new Error("Condition settlement decision is not bound to its immutable raw event");
+    }
+    const winnerTokenIds = terms.winnerTokenIds;
+    if (!Array.isArray(winnerTokenIds) || winnerTokenIds.some((token) => typeof token !== "string")) {
+      throw new Error("Outcome evidence requires winnerTokenIds");
+    }
+    const winners = new Set(winnerTokenIds as string[]);
+    let actualCost = 0, actualPayout = 0, closedPositions = 0;
+    for (const [key, position] of [...positions]) {
+      if (position.leaderId !== leaderId || markets.get(position.tokenId) !== conditionId) continue;
+      actualCost += position.shares * position.avgEntryPrice;
+      if (winners.has(position.tokenId)) actualPayout += position.shares;
+      closedPositions++;
+      positions.delete(key);
+    }
+    if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
+      throw new Error("Outcome evidence accounting differs");
+    }
+    requireEvidenceValue(terms, "tokenId", conditionId, "condition REDEEM");
+    requireEvidenceValue(terms, "size", round(actualPayout), "condition REDEEM");
+    requireEvidenceValue(terms, "price", closedPositions, "condition REDEEM");
+  } else if (["leader_redeem", "token_resolution", "token_settlement", "onchain_redeemable"].includes(settlementSource)) {
+    const tokenId = requiredString(terms, "tokenId");
+    const payoutPerShare = requiredNumber(terms, "payoutPerShare");
+    const sourceMatches = settlementSource === "leader_redeem"
+      ? payloads.length === 1 && payloads[0]!.type === "REDEEM" && payloads[0]!.asset === tokenId
+      : settlementSource === "onchain_redeemable"
+        ? payloads.length > 0 && payloads.every((payload) => payload.type === "ONCHAIN_REDEEMABLE") &&
+          payloads.some((payload) => payload.tokenId === tokenId) &&
+          payloads.every((payload) => payload.conditionId === terms.conditionId)
+        : payloads.length === 1 && payloads[0]!.type === "TOKEN_SETTLEMENT" && payloads[0]!.tokenId === tokenId;
+    if (!sourceMatches) throw new Error("Token settlement decision is not bound to its immutable raw event");
+    const key = stateKey(leaderId, tokenId);
+    const position = positions.get(key);
+    if (!position) throw new Error("Settlement attempts to close a missing position");
+    const actualCost = position.shares * position.avgEntryPrice;
+    const actualPayout = position.shares * payoutPerShare;
+    if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
+      throw new Error("Settlement accounting evidence differs");
+    }
+    requireEvidenceValue(terms, "size", round(actualPayout), "token REDEEM");
+    requireEvidenceValue(terms, "price", position.shares, "token REDEEM");
+    positions.delete(key);
+  } else {
+    throw new Error(`Unsupported immutable settlement source: ${settlementSource}`);
+  }
+  if (config.app.global.previewMode) cash.value += payout;
+  realized.value += payout - cost;
+}
+
+function linkedDecisionDigest(rows: StoredDecision[]): string {
+  return createHash("sha256").update(rows.map((row) => [
+    row.linkOrder, row.observationId, row.decisionId, row.rawEventId,
+    row.action, row.reasonCode, normalizedPayloadJson(JSON.parse(row.exactTermsJson)),
+  ].join("\n")).join("\n---\n")).digest("hex");
+}
+
+export function replayEvidence(dbPath: string, experimentId: string): ReplayEvidenceSummary {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const experiment = db.prepare(`SELECT canonical_config_json AS configJson, sealed_at AS sealedAt,
+      start_state_json AS startStateJson, schema_version AS schemaVersion FROM experiments WHERE experiment_id=?`).get(experimentId) as
+      { configJson: string; sealedAt: number | null; startStateJson: string; schemaVersion: number } | undefined;
+    if (!experiment || experiment.sealedAt === null) throw new Error("Deterministic replay requires sealed experiment evidence");
+    if (experiment.schemaVersion < 7) throw new Error("Legacy experiment lacks explicit decision observation links");
+    const config = JSON.parse(experiment.configJson) as RuntimeConfig;
+    const start = JSON.parse(experiment.startStateJson) as ExperimentStateSnapshot;
+    const cash = { value: start.cashUsd };
+    const realized = { value: start.realizedPnlUsd };
+    const positions = new Map(start.positions.map((position) => [stateKey(position.leaderId, position.tokenId), { ...position }]));
+    const evidence = loadEvidence(db, experimentId);
+    const observations = evidence.raw.flatMap((raw) => raw.observations);
+    const observationById = new Map(observations.map((observation) => [observation.observationId, observation]));
+    const occurrences = decisionOccurrences(evidence.decisions);
+    const groups = new Map<string, ReplayDecisionGroup>();
+    for (const decision of occurrences) {
+      const key = observationContextKey(decision.observationIds);
+      if (!groups.has(key)) {
+        const context = decision.observationIds.map((observationId) => observationById.get(observationId));
+        if (context.some((observation) => !observation)) throw new Error("Replay decision context lacks raw evidence");
+        groups.set(key, { key, observations: context as RawObservationEvidence[],
+          cumulativeFilledShares: 0, cumulativeFilledUsd: 0, copied: false });
+      }
+    }
+    for (const observation of observations) {
+      const linked = occurrences.filter((decision) => decision.observationIds.includes(observation.observationId));
+      const actions = linked.map((decision) => decision.action);
+      if (!actions.includes("DETECT") || !actions.some((action) => ["SKIP", "COPY", "SELL", "REDEEM"].includes(action))) {
+        throw new Error(`Replay observation ${observation.observationId} lacks a complete DETECT-to-terminal chain`);
+      }
+      const skipDecisions = linked.filter((decision) => decision.action === "SKIP");
+      const hasEconomicTerminal = actions.some((action) => ["COPY", "SELL", "REDEEM"].includes(action));
+      const isTransientOrderSkip = (decision: DecisionOccurrence): boolean => {
+        const reason = decisionTerms(decision).reason;
+        return typeof reason === "string" && (reason.startsWith("GTC pending (") || reason === "order submitted — no fill");
+      };
+      if (hasEconomicTerminal && skipDecisions.some((decision) =>
+        decision.reasonCode !== "already_seen" && !isTransientOrderSkip(decision))) {
+        throw new Error("Re-execution decision set mismatch: economic terminal mixed with a non-dedup SKIP");
+      }
+    }
+    const markets = new Map((db.prepare("SELECT token_id AS tokenId, condition_id AS conditionId FROM token_markets").all() as
+      Array<{ tokenId: string; conditionId: string }>).map((market) => [market.tokenId, market.conditionId]));
+    let detectedBuy = 0, detectedSell = 0, copiedBuy = 0, copiedSell = 0;
+    for (const decision of occurrences) {
+      const group = groups.get(observationContextKey(decision.observationIds))!;
+      if (decision.action === "DETECT") {
+        if (group.activity) throw new Error("Replay observation context has more than one DETECT");
+        const detected = validateDetect(decision, group, config, positions, cash.value);
+        detectedBuy += detected.detectedBuy;
+        detectedSell += detected.detectedSell;
+      } else if (decision.action === "SKIP") {
+        validateSkip(decision, group, config);
+      } else if (decision.action === "COPY" || decision.action === "SELL") {
+        const copied = validateAndApplyFill(decision, group, config, positions, cash, realized);
+        copiedBuy += copied.copiedBuy;
+        copiedSell += copied.copiedSell;
+      } else if (decision.action === "REDEEM") {
+        validateAndApplyRedeem(decision, group, config, positions, cash, realized, markets);
+      } else {
+        throw new Error(`Unsupported replay decision action: ${decision.action}`);
+      }
+    }
+    return {
+      decisionDigest: linkedDecisionDigest(evidence.decisions),
+      cashUsd: round(cash.value),
+      realizedPnlUsd: round(realized.value),
+      positions: [...positions.values()].map((position) => ({ ...position,
+        shares: round(position.shares), avgEntryPrice: round(position.avgEntryPrice) }))
+        .sort((a, b) => stateKey(a.leaderId, a.tokenId).localeCompare(stateKey(b.leaderId, b.tokenId))),
+      coverage: { buyPct: pct(copiedBuy, detectedBuy), sellPct: pct(copiedSell, detectedSell),
+        totalPct: pct(copiedBuy + copiedSell, detectedBuy + detectedSell) },
+    };
+  } finally { db.close(); }
+}
+
 export function captureStoredEvidenceBaseline(dbPath: string, experimentId: string): ReplayEvidenceSummary {
   const derived = replayEvidence(dbPath, experimentId);
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
@@ -621,13 +1115,25 @@ export function captureStoredEvidenceBaseline(dbPath: string, experimentId: stri
 }
 
 export interface ReplayVerificationResult { match: boolean; expected: ReplayEvidenceSummary; actual: ReplayEvidenceSummary; mismatches: string[] }
+function replayPositionsMatch(actual: ReplayPosition[], expected: ReplayPosition[]): boolean {
+  return actual.length === expected.length && actual.every((position, index) => {
+    const comparison = expected[index];
+    return comparison !== undefined && position.leaderId === comparison.leaderId && position.tokenId === comparison.tokenId
+      && Math.abs(position.shares - comparison.shares) <= 1e-8
+      && Math.abs(position.avgEntryPrice - comparison.avgEntryPrice) <= 1e-8;
+  });
+}
 export function verifyExperimentReplay(manifestPath: string, options: ArchiveVerificationOptions): ReplayVerificationResult {
   const archive = verifyExperimentArchive(manifestPath, options);
   if (!archive.valid) throw new Error(`Archive trust verification failed: ${archive.errors.join("; ")}`);
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { experimentId: string; files: { path: string }[]; replayBaseline: ReplayEvidenceSummary };
   const snapshotPath = resolve(dirname(manifestPath), manifest.files[0]!.path);
   const actual = replayEvidence(snapshotPath, manifest.experimentId); const expected = manifest.replayBaseline;
-  const mismatches = (["decisionDigest", "cashUsd", "positions", "realizedPnlUsd", "coverage"] as const)
-    .filter((key) => normalizedPayloadJson(actual[key]) !== normalizedPayloadJson(expected[key]));
+  const mismatches: string[] = [];
+  if (actual.decisionDigest !== expected.decisionDigest) mismatches.push("decisionDigest");
+  if (Math.abs(actual.cashUsd - expected.cashUsd) > 1e-6) mismatches.push("cashUsd");
+  if (!replayPositionsMatch(actual.positions, expected.positions)) mismatches.push("positions");
+  if (Math.abs(actual.realizedPnlUsd - expected.realizedPnlUsd) > 1e-6) mismatches.push("realizedPnlUsd");
+  if (normalizedPayloadJson(actual.coverage) !== normalizedPayloadJson(expected.coverage)) mismatches.push("coverage");
   return { match: mismatches.length === 0, expected, actual, mismatches };
 }
