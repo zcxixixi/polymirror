@@ -24,6 +24,28 @@ import {
 import { assertLiveTradingAllowed, assertLiveTradingForAccounts } from "../engine/risk.js";
 import { migrateExistingPreviewToLiveDb } from "../engine/mode-transition.js";
 import { applyProxyFromYaml } from "../util/proxy.js";
+import { readRuntimeProvenance } from "../experiments/provenance.js";
+
+function startAccountExperiment(
+  accountId: string,
+  config: RuntimeConfig,
+  store: StateStore
+): void {
+  const provenance = readRuntimeProvenance();
+  store.startOrResumeExperiment({
+    accountId,
+    candidateAddresses: config.app.leaders
+      .filter((leader) => leader.enabled && leader.address)
+      .map((leader) => leader.address!),
+    config,
+    ...provenance,
+    trustClass: store.getActiveExperiment(accountId)
+      ? store.getActiveExperiment(accountId)!.trustClass
+      : store.hasLegacyEvidence()
+        ? "legacy"
+        : "candidate",
+  });
+}
 
 export interface AccountApiContext {
   accountId: string;
@@ -85,6 +107,7 @@ export class AccountManager {
       }
 
       const store = new StateStore(def.dbPath);
+      startAccountExperiment(def.id, config, store);
       runtimes.push({
         id: def.id,
         label: def.label,
@@ -220,6 +243,10 @@ export class AccountManager {
         }
       }
       throw error;
+    }
+
+    for (const runtime of stagedRuntimes.values()) {
+      startAccountExperiment(runtime.id, runtime.config, runtime.store);
     }
 
     const previousRuntimes = this.runtimes;

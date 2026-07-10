@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { readPreviewAccountReport } from "../src/sim/preview-report.js";
 import { StateStore } from "../src/state/store.js";
+import { previewRuntimeConfig } from "./helpers/fixtures.js";
 
 let dir: string;
 let dbPath: string;
@@ -22,6 +23,36 @@ afterEach(() => {
 });
 
 describe("readPreviewAccountReport", () => {
+  it("exposes active experiment provenance", () => {
+    const config = previewRuntimeConfig();
+    const experiment = store.startOrResumeExperiment({
+      accountId: "candidate-a",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-report",
+      imageDigest: "sha256:image-report",
+      lockfileHash: "lock-report",
+      trustClass: "candidate",
+    }, 1000);
+
+    const report = readPreviewAccountReport({
+      accountId: "candidate-a",
+      dbPath,
+      copyPriceMode: "executable_guarded",
+      startingCapitalUsd: 200,
+    });
+
+    expect(report.provenance).toEqual({
+      experimentId: experiment.experimentId,
+      configHash: experiment.configHash,
+      gitSha: "git-report",
+      imageDigest: "sha256:image-report",
+      lockfileHash: "lock-report",
+      schemaVersion: 2,
+      trustClass: "candidate",
+    });
+  });
+
   it("keeps a fresh zero-sample strategy in collecting state", () => {
     const report = readPreviewAccountReport({
       accountId: "fresh-goal",

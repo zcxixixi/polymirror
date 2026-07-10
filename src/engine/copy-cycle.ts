@@ -66,6 +66,7 @@ interface QueuedTrade {
   leaderId: string;
   activity: Activity;
   sourceTradeKeys: string[];
+  rawEventIds?: string[];
 }
 
 const SETTLEMENT_CHECK_INTERVAL_MS = 60_000;
@@ -194,6 +195,7 @@ export async function runCopyCycle(
   telegram?: TelegramNotifier,
   options: { pollActivityCache?: PollActivityCache } = {}
 ): Promise<CopyCycleResult> {
+  store.setDecisionRawEventIds([]);
   const registry = new LeaderRegistry(config.app.leaders);
   const executor = new ClobExecutor(config.wallet, config.app.global);
   const risk = new RiskGate(config.app.global, store);
@@ -296,6 +298,7 @@ export async function runCopyCycle(
     options.pollActivityCache
   );
   const rawQueue: QueuedTrade[] = [];
+  const rawEventIdBySourceKey = new Map<string, string>();
 
   for (const result of pollResults) {
     if (result.error) {
@@ -303,10 +306,21 @@ export async function runCopyCycle(
     }
     fetched += result.fetched;
     for (const activity of result.candidates) {
+      const sourceKey = tradeEventKey(activity);
+      const rawEvent = store.getActiveExperiment()
+        ? store.recordRawEvent({
+            sourceId: sourceKey,
+            payload: activity,
+            sourceTimestamp: activity.timestamp,
+            observedTimestamp: Date.now(),
+          })
+        : undefined;
+      if (rawEvent) rawEventIdBySourceKey.set(sourceKey, rawEvent.rawEventId);
       rawQueue.push({
         leaderId: result.leaderId,
         activity,
-        sourceTradeKeys: [tradeEventKey(activity)],
+        sourceTradeKeys: [sourceKey],
+        rawEventIds: rawEvent ? [rawEvent.rawEventId] : [],
       });
     }
   }
@@ -319,6 +333,9 @@ export async function runCopyCycle(
     leaderId: a.leaderId,
     activity: a.activity,
     sourceTradeKeys: a.sourceTradeKeys,
+    rawEventIds: a.sourceTradeKeys
+      .map((key) => rawEventIdBySourceKey.get(key))
+      .filter((id): id is string => Boolean(id)),
   }));
 
   const buyWindow = config.app.global.buyDedupWindowMs;
@@ -337,7 +354,8 @@ export async function runCopyCycle(
     }
   }
 
-  for (const { leaderId, activity, sourceTradeKeys } of queue) {
+  for (const { leaderId, activity, sourceTradeKeys, rawEventIds } of queue) {
+    store.setDecisionRawEventIds(rawEventIds ?? []);
     const leader = registry.getById(leaderId);
     if (!leader || !leader.enabled) continue;
 
@@ -478,7 +496,11 @@ export async function runCopyCycle(
       continue;
     }
 
-    if (!activity.asset || !activity.side) continue;
+    if (!activity.asset || !activity.side) {
+      skipped++;
+      skip(store, leaderId, activity, "unsupported or incomplete activity", preview);
+      continue;
+    }
 
     if (geoblockMsg) {
       skipped++;
@@ -1089,6 +1111,7 @@ export async function runCopyCycle(
     );
     copied++;
   }
+  store.setDecisionRawEventIds([]);
 
   healthSnapshot.pendingOrders = store.countPendingOrders();
   return { fetched, copied, skipped, pendingFilled, errors, walletDrifts, pendingOrders };

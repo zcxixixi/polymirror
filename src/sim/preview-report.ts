@@ -185,6 +185,17 @@ export interface PreviewAccountReport {
   goalMetrics?: PreviewGoalMetrics;
   stabilityGoal?: StabilityGoalAssessment;
   profitabilityGate?: ProfitabilityGateAssessment;
+  provenance?: PreviewExperimentProvenance;
+}
+
+export interface PreviewExperimentProvenance {
+  experimentId: string;
+  configHash: string;
+  gitSha: string;
+  imageDigest: string;
+  lockfileHash: string;
+  schemaVersion: number;
+  trustClass: string;
 }
 
 export interface ReadPreviewAccountReportOptions {
@@ -833,6 +844,17 @@ export function readPreviewAccountReport(
     const hasTokenMarkets = tableExists(db, "token_markets");
     const hasPendingOrders = tableExists(db, "pending_orders");
     const hasLiveOrderIntents = tableExists(db, "live_order_intents");
+    const provenance = tableExists(db, "experiments")
+      ? db.prepare(
+          `SELECT experiment_id AS experimentId, config_hash AS configHash,
+                  git_sha AS gitSha, image_digest AS imageDigest,
+                  lockfile_hash AS lockfileHash, schema_version AS schemaVersion,
+                  trust_class AS trustClass
+           FROM experiments
+           WHERE account_id = ? AND ended_at IS NULL
+           ORDER BY started_at DESC LIMIT 1`
+        ).get(options.accountId) as PreviewExperimentProvenance | undefined
+      : undefined;
     const hasSlippageTelemetry =
       hasAuditLog &&
       columnExists(db, "audit_log", "leader_price") &&
@@ -1084,6 +1106,7 @@ export function readPreviewAccountReport(
       copyQuality,
       performance,
       goalMetrics,
+      provenance,
     };
     return {
       ...report,

@@ -55,6 +55,72 @@ afterEach(() => {
 });
 
 describe("runCopyCycle", () => {
+  it("persists the raw event before linking terminal copy decisions", async () => {
+    const activity = testActivity({ transactionHash: "0xlineage", timestamp: 123 });
+    const config = previewRuntimeConfig();
+    store.startOrResumeExperiment({
+      accountId: "candidate-a",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    });
+    mockPollLeaders.mockResolvedValue([
+      { leaderId: "whale", fetched: 1, candidates: [activity] },
+    ]);
+
+    await runCopyCycle(config, store);
+    await runCopyCycle(config, store);
+
+    expect(store.listRawEvents()).toEqual([
+      expect.objectContaining({
+        sourceId: tradeEventKey(activity),
+        sourceTimestamp: 123,
+        payload: expect.objectContaining({ transactionHash: "0xlineage" }),
+      }),
+    ]);
+    const decisions = store.listDecisions();
+    expect(decisions.map((decision) => decision.action)).toEqual(
+      expect.arrayContaining(["DETECT", "COPY", "SKIP"])
+    );
+    expect(new Set(decisions.map((decision) => decision.rawEventId)).size).toBe(1);
+    expect(decisions.find((decision) => decision.action === "COPY")).toMatchObject({
+      reasonCode: "copy_executed",
+      exactTerms: { side: "BUY", price: 0.5, size: 10, reason: "10% of $50.00 = $5.00" },
+    });
+    expect(decisions.find((decision) => decision.action === "SKIP")?.reasonCode)
+      .toBe("already_seen");
+  });
+
+  it("links an incomplete raw activity to a terminal skip", async () => {
+    const activity: Activity = { type: "TRADE", timestamp: 456, transactionHash: "0xincomplete" };
+    const config = previewRuntimeConfig();
+    store.startOrResumeExperiment({
+      accountId: "candidate-a",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    });
+    mockPollLeaders.mockResolvedValue([
+      { leaderId: "whale", fetched: 1, candidates: [activity] },
+    ]);
+
+    await runCopyCycle(config, store);
+
+    expect(store.listRawEvents()).toHaveLength(1);
+    expect(store.listDecisions()).toEqual([
+      expect.objectContaining({
+        action: "SKIP",
+        reasonCode: "unsupported_or_incomplete_activity",
+      }),
+    ]);
+  });
+
   it("copies a preview trade from mocked Data API poll", async () => {
     const activity = testActivity();
     const config = previewRuntimeConfig();

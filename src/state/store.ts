@@ -3,9 +3,24 @@ import { createHash } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CopyPriceMode } from "../config/types.js";
+import {
+  canonicalRedactedConfig,
+  configSha256,
+  newExperimentId,
+  type ExperimentManifestInput,
+  type ExperimentManifestRow,
+} from "../experiments/manifest.js";
+import {
+  normalizedPayloadJson,
+  payloadSha256,
+  type DecisionAction,
+  type DecisionRow,
+  type RawEventRow,
+} from "../experiments/provenance.js";
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
+export const STATE_SCHEMA_VERSION = 2;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 
@@ -293,6 +308,7 @@ function copyPriceModeCompatibility(
 
 export class StateStore {
   private db: Database.Database;
+  private decisionRawEventIds: string[] = [];
 
   constructor(path = DEFAULT_DB) {
     const dir = dirname(path);
@@ -412,8 +428,266 @@ export class StateStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS schema_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS experiments (
+        experiment_id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        candidate_addresses_json TEXT NOT NULL,
+        canonical_config_json TEXT NOT NULL,
+        config_hash TEXT NOT NULL,
+        git_sha TEXT NOT NULL,
+        image_digest TEXT NOT NULL,
+        lockfile_hash TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        sealed_at INTEGER,
+        trust_class TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
+        ON experiments(account_id) WHERE ended_at IS NULL;
+      CREATE TRIGGER IF NOT EXISTS experiments_no_delete
+        BEFORE DELETE ON experiments BEGIN SELECT RAISE(ABORT, 'experiments are append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS experiments_immutable_core
+        BEFORE UPDATE ON experiments
+        WHEN NEW.experiment_id <> OLD.experiment_id
+          OR NEW.account_id <> OLD.account_id
+          OR NEW.candidate_addresses_json <> OLD.candidate_addresses_json
+          OR NEW.canonical_config_json <> OLD.canonical_config_json
+          OR NEW.config_hash <> OLD.config_hash
+          OR NEW.git_sha <> OLD.git_sha
+          OR NEW.image_digest <> OLD.image_digest
+          OR NEW.lockfile_hash <> OLD.lockfile_hash
+          OR NEW.schema_version <> OLD.schema_version
+          OR NEW.started_at <> OLD.started_at
+          OR NEW.trust_class <> OLD.trust_class
+        BEGIN SELECT RAISE(ABORT, 'experiment manifest is immutable'); END;
+      CREATE TABLE IF NOT EXISTS raw_events (
+        raw_event_id TEXT PRIMARY KEY,
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        source_id TEXT,
+        payload_hash TEXT NOT NULL,
+        normalized_payload_json TEXT NOT NULL,
+        source_timestamp INTEGER NOT NULL,
+        observed_timestamp INTEGER NOT NULL,
+        UNIQUE(experiment_id, source_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_raw_events_experiment ON raw_events(experiment_id, observed_timestamp);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_events_payload_fallback
+        ON raw_events(experiment_id, payload_hash) WHERE source_id IS NULL;
+      CREATE TRIGGER IF NOT EXISTS raw_events_no_update
+        BEFORE UPDATE ON raw_events BEGIN SELECT RAISE(ABORT, 'raw events are immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS raw_events_no_delete
+        BEFORE DELETE ON raw_events BEGIN SELECT RAISE(ABORT, 'raw events are append-only'); END;
+      CREATE TABLE IF NOT EXISTS decisions (
+        decision_id TEXT PRIMARY KEY,
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        raw_event_id TEXT NOT NULL REFERENCES raw_events(raw_event_id),
+        action TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        exact_terms_json TEXT NOT NULL,
+        decided_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_decisions_raw_event ON decisions(raw_event_id, decided_at);
+      CREATE TRIGGER IF NOT EXISTS decisions_no_update
+        BEFORE UPDATE ON decisions BEGIN SELECT RAISE(ABORT, 'decisions are immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS decisions_no_delete
+        BEFORE DELETE ON decisions BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;
     `);
+    this.db.prepare(
+      `INSERT INTO schema_metadata (key, value) VALUES ('schema_version', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run(String(STATE_SCHEMA_VERSION));
     this.migrate();
+  }
+
+  startOrResumeExperiment(input: ExperimentManifestInput, now = Date.now()): ExperimentManifestRow {
+    const hash = configSha256(input.config);
+    return this.db.transaction(() => {
+      const active = this.db.prepare(
+        "SELECT experiment_id AS experimentId, config_hash AS configHash FROM experiments WHERE account_id = ? AND ended_at IS NULL"
+      ).get(input.accountId) as { experimentId: string; configHash: string } | undefined;
+      if (active?.configHash === hash) return this.getExperiment(active.experimentId)!;
+      if (active) {
+        this.db.prepare("UPDATE experiments SET ended_at = ? WHERE experiment_id = ?")
+          .run(now, active.experimentId);
+      }
+      const experimentId = newExperimentId(input.accountId, hash);
+      this.db.prepare(
+        `INSERT INTO experiments
+         (experiment_id, account_id, candidate_addresses_json, canonical_config_json,
+          config_hash, git_sha, image_digest, lockfile_hash, schema_version,
+          started_at, trust_class)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        experimentId,
+        input.accountId,
+        JSON.stringify([...input.candidateAddresses].sort()),
+        canonicalRedactedConfig(input.config),
+        hash,
+        input.gitSha,
+        input.imageDigest,
+        input.lockfileHash,
+        STATE_SCHEMA_VERSION,
+        now,
+        input.trustClass
+      );
+      return this.getExperiment(experimentId)!;
+    })();
+  }
+
+  getExperiment(experimentId: string): ExperimentManifestRow | undefined {
+    const row = this.db.prepare(
+      `SELECT experiment_id AS experimentId, account_id AS accountId,
+              candidate_addresses_json AS candidateAddressesJson,
+              canonical_config_json AS canonicalConfigJson, config_hash AS configHash,
+              git_sha AS gitSha, image_digest AS imageDigest, lockfile_hash AS lockfileHash,
+              schema_version AS schemaVersion, started_at AS startedAt, ended_at AS endedAt,
+              sealed_at AS sealedAt, trust_class AS trustClass
+       FROM experiments WHERE experiment_id = ?`
+    ).get(experimentId) as (Omit<ExperimentManifestRow, "candidateAddresses"> & { candidateAddressesJson: string }) | undefined;
+    if (!row) return undefined;
+    const { candidateAddressesJson, ...rest } = row;
+    return { ...rest, candidateAddresses: JSON.parse(candidateAddressesJson) as string[] };
+  }
+
+  getActiveExperiment(accountId?: string): ExperimentManifestRow | undefined {
+    const row = this.db.prepare(
+      `SELECT experiment_id AS experimentId FROM experiments
+       WHERE ended_at IS NULL AND (? IS NULL OR account_id = ?) ORDER BY started_at DESC LIMIT 1`
+    ).get(accountId ?? null, accountId ?? null) as { experimentId: string } | undefined;
+    return row ? this.getExperiment(row.experimentId) : undefined;
+  }
+
+  listExperiments(): ExperimentManifestRow[] {
+    const ids = this.db.prepare(
+      "SELECT experiment_id AS experimentId FROM experiments ORDER BY started_at, experiment_id"
+    ).all() as { experimentId: string }[];
+    return ids.map((row) => this.getExperiment(row.experimentId)!);
+  }
+
+  recordRawEvent(input: {
+    sourceId?: string;
+    payload: unknown;
+    sourceTimestamp: number;
+    observedTimestamp?: number;
+    experimentId?: string;
+  }): RawEventRow {
+    const experiment = input.experimentId
+      ? this.getExperiment(input.experimentId)
+      : this.getActiveExperiment();
+    if (!experiment) throw new Error("Cannot record raw event without an active experiment");
+    const payloadHash = payloadSha256(input.payload);
+    const sourceId = input.sourceId?.trim() || null;
+    const identity = sourceId ? `source:${sourceId}` : `payload:${payloadHash}`;
+    const rawEventId = createHash("sha256")
+      .update(`${experiment.experimentId}\n${identity}`)
+      .digest("hex");
+    this.db.prepare(
+      `INSERT OR IGNORE INTO raw_events
+       (raw_event_id, experiment_id, source_id, payload_hash, normalized_payload_json,
+        source_timestamp, observed_timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      rawEventId,
+      experiment.experimentId,
+      sourceId,
+      payloadHash,
+      normalizedPayloadJson(input.payload),
+      input.sourceTimestamp,
+      input.observedTimestamp ?? Date.now()
+    );
+    const row = sourceId
+      ? this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND source_id = ?")
+          .get(experiment.experimentId, sourceId) as { rawEventId: string }
+      : this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND payload_hash = ?")
+          .get(experiment.experimentId, payloadHash) as { rawEventId: string };
+    return this.getRawEvent(row.rawEventId)!;
+  }
+
+  private getRawEvent(rawEventId: string): RawEventRow | undefined {
+    const row = this.db.prepare(
+      `SELECT raw_event_id AS rawEventId, experiment_id AS experimentId, source_id AS sourceId,
+              payload_hash AS payloadHash, normalized_payload_json AS payloadJson,
+              source_timestamp AS sourceTimestamp, observed_timestamp AS observedTimestamp
+       FROM raw_events WHERE raw_event_id = ?`
+    ).get(rawEventId) as (Omit<RawEventRow, "payload"> & { payloadJson: string }) | undefined;
+    if (!row) return undefined;
+    const { payloadJson, ...rest } = row;
+    return { ...rest, payload: JSON.parse(payloadJson) };
+  }
+
+  listRawEvents(): RawEventRow[] {
+    const ids = this.db.prepare(
+      "SELECT raw_event_id AS rawEventId FROM raw_events ORDER BY observed_timestamp, raw_event_id"
+    ).all() as { rawEventId: string }[];
+    return ids.map((row) => this.getRawEvent(row.rawEventId)!);
+  }
+
+  recordDecision(input: {
+    rawEventId: string;
+    action: DecisionAction;
+    reasonCode: string;
+    exactTerms: Record<string, unknown>;
+    decidedAt?: number;
+  }): DecisionRow {
+    const raw = this.getRawEvent(input.rawEventId);
+    if (!raw) throw new Error(`Raw event not found: ${input.rawEventId}`);
+    const exactTermsJson = normalizedPayloadJson(input.exactTerms);
+    const decisionId = createHash("sha256")
+      .update([raw.experimentId, raw.rawEventId, input.action, input.reasonCode, exactTermsJson].join("\n"))
+      .digest("hex");
+    this.db.prepare(
+      `INSERT OR IGNORE INTO decisions
+       (decision_id, experiment_id, raw_event_id, action, reason_code, exact_terms_json, decided_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      decisionId,
+      raw.experimentId,
+      raw.rawEventId,
+      input.action,
+      input.reasonCode,
+      exactTermsJson,
+      input.decidedAt ?? Date.now()
+    );
+    return this.getDecision(decisionId)!;
+  }
+
+  private getDecision(decisionId: string): DecisionRow | undefined {
+    const row = this.db.prepare(
+      `SELECT decision_id AS decisionId, experiment_id AS experimentId,
+              raw_event_id AS rawEventId, action, reason_code AS reasonCode,
+              exact_terms_json AS exactTermsJson, decided_at AS decidedAt
+       FROM decisions WHERE decision_id = ?`
+    ).get(decisionId) as (Omit<DecisionRow, "exactTerms" | "action"> & { action: DecisionAction; exactTermsJson: string }) | undefined;
+    if (!row) return undefined;
+    const { exactTermsJson, ...rest } = row;
+    return { ...rest, exactTerms: JSON.parse(exactTermsJson) as Record<string, unknown> };
+  }
+
+  listDecisions(): DecisionRow[] {
+    const ids = this.db.prepare(
+      "SELECT decision_id AS decisionId FROM decisions ORDER BY decided_at, decision_id"
+    ).all() as { decisionId: string }[];
+    return ids.map((row) => this.getDecision(row.decisionId)!);
+  }
+
+  setDecisionRawEventIds(rawEventIds: string[]): void {
+    this.decisionRawEventIds = [...new Set(rawEventIds)];
+  }
+
+  private rawEventIdsForSourceKeys(sourceKeys: string[]): string[] {
+    if (sourceKeys.length === 0) return [];
+    const stmt = this.db.prepare(
+      "SELECT raw_event_id AS rawEventId FROM raw_events WHERE source_id = ? ORDER BY observed_timestamp DESC LIMIT 1"
+    );
+    return uniqueTradeKeys(sourceKeys).flatMap((key) => {
+      const row = stmt.get(key) as { rawEventId: string } | undefined;
+      return row ? [row.rawEventId] : [];
+    });
   }
 
   private migrate(): void {
@@ -491,6 +765,10 @@ export class StateStore {
 
   getCopyPriceModeCompatibility(requested: CopyPriceMode): CopyPriceModeCompatibilityResult {
     return copyPriceModeCompatibility(this.db, requested);
+  }
+
+  hasLegacyEvidence(): boolean {
+    return legacyCopyPriceModeState(this.db);
   }
 
   static getCopyPriceModeCompatibilityForPath(
@@ -1295,7 +1573,14 @@ export class StateStore {
       staleSkipAudit,
     } = entry;
 
-    this.db.transaction(() => {
+    const previousDecisionRawEventIds = this.decisionRawEventIds;
+    if (this.decisionRawEventIds.length === 0 && orderId) {
+      const pending = this.db.prepare(
+        "SELECT trade_key AS tradeKey FROM pending_orders WHERE order_id = ?"
+      ).get(orderId) as { tradeKey: string } | undefined;
+      if (pending) this.decisionRawEventIds = this.rawEventIdsForSourceKeys([pending.tradeKey]);
+    }
+    const apply = this.db.transaction(() => {
       if (fill && fill.delta > 0) {
         const reportedUsd = fill.delta * fill.price;
         const feeUsd = fill.feeUsd ?? 0;
@@ -1389,7 +1674,12 @@ export class StateStore {
             orderId
           );
       }
-    })();
+    });
+    try {
+      apply();
+    } finally {
+      this.decisionRawEventIds = previousDecisionRawEventIds;
+    }
   }
 
   /** Record a successful copy trade atomically (dedup, position, volume, audit). */
@@ -1430,7 +1720,11 @@ export class StateStore {
       market,
     } = entry;
     const keys = tradeKeys ?? (tradeKey ? [tradeKey] : []);
-    this.db.transaction(() => {
+    const previousDecisionRawEventIds = this.decisionRawEventIds;
+    if (this.decisionRawEventIds.length === 0) {
+      this.decisionRawEventIds = this.rawEventIdsForSourceKeys(keys);
+    }
+    const apply = this.db.transaction(() => {
       for (const key of keys) {
         this.markSeen(key, leaderId);
       }
@@ -1467,7 +1761,12 @@ export class StateStore {
         reason: auditReason,
         preview,
       });
-    })();
+    });
+    try {
+      apply();
+    } finally {
+      this.decisionRawEventIds = previousDecisionRawEventIds;
+    }
   }
 
   /**
@@ -1653,6 +1952,42 @@ export class StateStore {
         entry.reason ?? null,
         entry.preview ? 1 : 0
       );
+    const decisionAction: DecisionAction | null = entry.action === "ERROR"
+      ? null
+      : entry.action === "COPY" && entry.side === "SELL"
+        ? "SELL"
+        : entry.action;
+    if (decisionAction) {
+      const reasonCode = decisionAction === "DETECT"
+        ? "detected"
+        : decisionAction === "COPY"
+          ? "copy_executed"
+          : decisionAction === "SELL"
+            ? "sell_executed"
+            : decisionAction === "REDEEM"
+              ? "redeem_settled"
+              : (entry.reason ?? "unspecified")
+                  .trim()
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, "_")
+                  .replace(/^_+|_+$/g, "") || "unspecified";
+      const exactTerms: Record<string, unknown> = {
+        leaderId: entry.leaderId ?? null,
+        tokenId: entry.tokenId ?? null,
+        side: entry.side ?? null,
+        size: entry.size ?? null,
+        price: entry.price ?? null,
+        leaderPrice: entry.leaderPrice ?? null,
+        executablePrice: entry.executablePrice ?? null,
+        slippagePct: entry.slippagePct ?? null,
+        feeUsd: entry.feeUsd ?? 0,
+        reason: entry.reason ?? null,
+        preview: entry.preview,
+      };
+      for (const rawEventId of this.decisionRawEventIds) {
+        this.recordDecision({ rawEventId, action: decisionAction, reasonCode, exactTerms });
+      }
+    }
   }
 
   getDailyVolumeUsd(): number {

@@ -46,7 +46,8 @@ function writeConfig(
   pollIntervalMs: number,
   healthPort: number,
   proxy: Record<string, unknown>,
-  accounts: Record<string, unknown>[]
+  accounts: Record<string, unknown>[],
+  maxOrderUsd = 20
 ): void {
   writeFileSync(
     "config.yaml",
@@ -68,7 +69,7 @@ function writeConfig(
             starting_capital_usd: 200,
             max_daily_volume_usd: 200,
             max_open_markets: 10,
-            max_order_usd: 20,
+            max_order_usd: maxOrderUsd,
             min_order_usd: 1,
             slippage_tolerance: 0.03,
             max_position_per_token_usd: 0,
@@ -185,6 +186,43 @@ describe("AccountManager.reloadConfig", () => {
     } finally {
       manager.closeAll();
       setProxyConfig(proxyBefore, proxySourceBefore);
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts, resumes, and rotates the account experiment from decision config", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-account-experiment-"));
+    process.chdir(dir);
+    process.env.POLYMARKET_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.POLYMARKET_ADDRESS = TEST_WALLET;
+    resolveLeaderAddressesSpy.mockImplementation(async (leaders: LeaderConfig[]) => leaders);
+    writeConfig(1_000, 8_080, { mode: "none" }, [
+      account("candidate", "Original label", { id: "leader", address: LEADER_A }),
+    ]);
+
+    const manager = await AccountManager.create("config.yaml");
+    try {
+      const first = manager.require("candidate").store.getActiveExperiment("candidate");
+      expect(first).toMatchObject({ accountId: "candidate", trustClass: "candidate" });
+
+      writeConfig(1_000, 8_080, { mode: "none" }, [
+        account("candidate", "Changed label", { id: "leader", address: LEADER_A }),
+      ]);
+      await manager.reloadConfig();
+      expect(manager.require("candidate").store.getActiveExperiment("candidate")?.experimentId)
+        .toBe(first?.experimentId);
+
+      writeConfig(1_000, 8_080, { mode: "none" }, [
+        account("candidate", "Changed label", { id: "leader", address: LEADER_A }),
+      ], 19);
+      await manager.reloadConfig();
+      const rows = manager.require("candidate").store.listExperiments();
+      expect(rows).toHaveLength(2);
+      expect(rows[0]?.endedAt).not.toBeNull();
+      expect(rows[1]?.experimentId).not.toBe(first?.experimentId);
+    } finally {
+      manager.closeAll();
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
