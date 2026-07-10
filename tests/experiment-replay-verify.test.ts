@@ -455,6 +455,44 @@ describe("sealed deterministic replay", () => {
     expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
   });
 
+  it("keeps the guarded requested limit distinct from immediate and later fill prices", async () => {
+    const dbPath = join(dir, "guarded-partial-prices.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.previewMode = false;
+    config.app.global.copyPriceMode = "executable_guarded";
+    config.app.global.risk.slippageTolerance = 0.02;
+    config.app.leaders[0]!.strategy = { type: "FIXED", copySize: 1 };
+    const exp = store.startOrResumeExperiment({ accountId: "candidate-guarded-prices", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    const raw = store.recordRawEvent({ sourceId: "guarded-prices", payload: { leaderId: "whale", type: "TRADE",
+      side: "BUY", asset: "token-a", price: 0.5, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1, observedTimestamp: 1 });
+    store.setDecisionObservationRefs([store.latestObservationRef(raw.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
+      size: 10, price: 0.5, preview: false });
+    const quoteTerms = { orderType: "GTC", requestedPrice: 0.52, requestedShares: 1.93,
+      quoteBestPrice: 0.51, guardedTickSize: 0.01, guardedFeeRate: 0, guardedFeeExponent: 0,
+      quoteEvidence: { levels: [{ price: "0.51", size: "10" }], tickSize: 0.01,
+        minOrderShares: 1, feeRate: 0, feeExponent: 0 } };
+    store.recordLiveOrderAccepted({ tradeKeys: ["guarded-prices"], leaderId: "whale", tokenId: "token-a",
+      side: "BUY", price: 0.51, leaderPrice: 0.5, executablePrice: 0.51, slippagePct: 2,
+      orderSize: 1.93, filledShares: 1, filledUsd: 0.51, auditReason: "Fixed $1.00",
+      orderId: "guarded-partial", pendingRemaining: 0.93, trackPendingGtc: true, decisionTerms: quoteTerms });
+    store.setDecisionRawEventIds([]);
+    expect(store.listPendingOrders()[0]).toMatchObject({ price: 0.52, size: 1.93 });
+    store.commitPendingOrderProgress({ orderId: "guarded-partial", matchedFilledShares: 1.93,
+      matchedFilledUsd: 0.9936, fill: { leaderId: "whale", tokenId: "token-a", side: "BUY",
+        delta: 0.93, price: 0.52, leaderPrice: 0.5, executablePrice: 0.52, slippagePct: 4,
+        auditReason: "Fixed $1.00; pending fill", preview: false }, remove: true });
+    store.close();
+
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "guarded-partial-prices-archive") });
+    const replay = verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath });
+    expect(replay.match, JSON.stringify(replay, null, 2)).toBe(true);
+  });
+
   it("detects when stored outcomes diverge from the decision evidence", async () => {
     const dbPath = join(dir, "diverged.db");
     const store = new StateStore(dbPath);

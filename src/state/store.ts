@@ -2178,11 +2178,11 @@ export class StateStore {
           preview: fill.preview,
           exactTerms: pendingLineage
             ? {
-                ...this.parseDecisionTerms(pendingLineage.decisionTermsJson),
                 orderId,
                 orderType: "GTC",
                 requestedPrice: pendingLineage.price,
                 requestedShares: pendingLineage.size,
+                ...this.parseDecisionTerms(pendingLineage.decisionTermsJson),
                 filledShares: matchedFilledShares,
                 filledUsd: matchedFilledUsd ?? fill.delta * fill.price,
                 matchedFeeUsd: matchedFeeUsd ?? fill.feeUsd ?? 0,
@@ -2405,6 +2405,14 @@ export class StateStore {
       requestedPrice: price,
       requestedShares: orderSize,
     };
+    const persistedRequestedPrice = typeof persistedDecisionTerms.requestedPrice === "number" &&
+      Number.isFinite(persistedDecisionTerms.requestedPrice)
+      ? persistedDecisionTerms.requestedPrice
+      : price;
+    const persistedRequestedShares = typeof persistedDecisionTerms.requestedShares === "number" &&
+      Number.isFinite(persistedDecisionTerms.requestedShares)
+      ? persistedDecisionTerms.requestedShares
+      : orderSize;
 
     const apply = this.db.transaction(() => {
       for (const key of [...new Set(tradeKeys)]) {
@@ -2441,8 +2449,8 @@ export class StateStore {
             leaderId,
             tokenId,
             side,
-            price,
-            orderSize,
+            persistedRequestedPrice,
+            persistedRequestedShares,
             filledShares,
             filledUsd,
             feeUsd,
