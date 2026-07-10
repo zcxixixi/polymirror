@@ -1,5 +1,9 @@
 import type { RuntimeConfig } from "../config/types.js";
-import type { PendingOrderRow, StateStore } from "../state/store.js";
+import {
+  FILL_RECONCILIATION_WINDOW_MS,
+  type PendingOrderRow,
+  type StateStore,
+} from "../state/store.js";
 import type { RiskGate } from "../engine/risk.js";
 import { ClobExecutor } from "../executor/clob.js";
 import { logInfo, logError } from "../notify/logger.js";
@@ -87,6 +91,10 @@ async function processPendingOrderRow(
 ): Promise<RowProcessResult> {
   const { executor, store, preview, isStale, telegram } = opts;
   const empty: RowProcessResult = { resolved: 0, filled: 0, cancelledStale: 0, errors: [] };
+  const reconciliationExpired =
+    row.reconciliationOnly &&
+    row.reconciliationStartedAt !== null &&
+    Date.now() - row.reconciliationStartedAt >= FILL_RECONCILIATION_WINDOW_MS;
 
   try {
     const statusResult = await executor.getOrderStatus(row.orderId, row.tokenId);
@@ -99,6 +107,13 @@ async function processPendingOrderRow(
       };
     }
     if (statusResult.kind === "not_found") {
+      if (reconciliationExpired) {
+        store.retirePendingReconciliation(
+          row,
+          "closed order reconciliation window ended without additional confirmed evidence"
+        );
+        return { ...empty, resolved: 1 };
+      }
       return {
         ...empty,
         errors: [
@@ -136,21 +151,22 @@ async function processPendingOrderRow(
       : row.feeUsd;
     const deltaFeeUsd = Math.max(0, matchedFeeUsd - row.feeUsd);
     const fill = buildFillPayload(row, delta, deltaUsd, deltaFeeUsd, preview);
-    const terminal =
-      status.terminal ||
-      (status.status === "CONFIRMED_CLOSED" && matched >= row.size - 1e-8);
+    const terminal = status.terminal || status.status === "CONFIRMED_CLOSED";
     const filled = fill ? 1 : 0;
 
     if (terminal) {
       const confirmedComplete = matched >= row.size - 1e-8;
+      const retireClosedReconciliation = reconciliationExpired;
       store.commitPendingOrderProgress({
         orderId: row.orderId,
         matchedFilledShares: matched,
         matchedFilledUsd,
         matchedFeeUsd,
         fill,
-        remove: confirmedComplete,
-        reconciliationOnly: !confirmedComplete,
+        remove: confirmedComplete || retireClosedReconciliation,
+        reconciliationOnly: !confirmedComplete && !retireClosedReconciliation,
+        reconciliationStartedAt:
+          row.reconciliationStartedAt ?? (!confirmedComplete ? Date.now() : undefined),
       });
       if (fill) {
         logInfo("Pending order fill applied", {
@@ -182,6 +198,7 @@ async function processPendingOrderRow(
           fill,
           remove: false,
           reconciliationOnly: true,
+          reconciliationStartedAt: row.reconciliationStartedAt ?? Date.now(),
           staleSkipAudit: {
             leaderId: row.leaderId,
             tokenId: row.tokenId,

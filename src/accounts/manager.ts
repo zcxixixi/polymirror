@@ -294,6 +294,8 @@ export class AccountManager {
         openCostUsd: positionSummary.openCostUsd,
         openPositions: positionSummary.openPositions,
         pendingOrders: rt.store.listPendingOrders().length,
+        reconcilingOrders: rt.store.countReconcilingOrders(),
+        quarantinedOrderIntents: rt.store.countQuarantinedLiveOrderIntents(),
       };
     });
   }

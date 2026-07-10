@@ -434,6 +434,45 @@ describe("adoptUntrackedOpenOrders", () => {
     expect(store.listLiveOrderIntents({ includeReconciliation: true })).toHaveLength(0);
   });
 
+  it("does not adopt a future compatible fill for an expired quarantined intent", async () => {
+    const createdAt = Date.now() - 25 * 60 * 60_000;
+    const intentId = store.recordLiveOrderIntent({
+      tradeKeys: ["source-old"],
+      leaderId: "whale",
+      tokenId: "tok-shared",
+      side: "BUY",
+      price: 0.5,
+      orderSize: 10,
+      auditReason: "old uncertain submit",
+    });
+    store.setLiveOrderIntentTimestamps(intentId, createdAt);
+    mockListOpenOrders.mockResolvedValue([]);
+    mockListRecentCompletedFills.mockResolvedValue({
+      kind: "ok",
+      fills: [{
+        orderId: "manual-future-order",
+        tokenId: "tok-shared",
+        side: "BUY",
+        averagePrice: 0.49,
+        shares: 10,
+        usd: 4.9,
+        feeUsd: 0,
+        cashDeltaUsd: -4.9,
+        matchedAt: Date.now(),
+      }],
+    });
+
+    const executor = new ClobExecutor({} as never, {} as never);
+    const result = await adoptUntrackedOpenOrders(executor, store);
+
+    expect(result.adopted).toBe(0);
+    expect(mockListRecentCompletedFills).not.toHaveBeenCalled();
+    expect(store.getPosition("whale", "tok-shared")).toBe(0);
+    expect(store.hasSeen("source-old")).toBe(true);
+    expect(store.listLiveOrderIntents()).toHaveLength(0);
+    expect(store.listLiveOrderIntents({ includeReconciliation: true })).toHaveLength(1);
+  });
+
   it("skips orders already tracked", async () => {
     store.upsertPendingOrder({
       orderId: "clob-known",

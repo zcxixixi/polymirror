@@ -150,6 +150,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -385,6 +386,68 @@ describe("runCopyCycle pending reconciliation", () => {
     await runCopyCycle(liveConfig(false), store);
     expect(store.getPosition("whale", "tok-cancelled-late-fill")).toBe(4);
     expect(store.listAuditLog({ action: "COPY" }).items).toHaveLength(1);
+  });
+
+  it("applies a final closed-order delta once and retires the reconciliation tombstone", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.parse("2026-07-10T00:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    store.upsertPendingOrder({
+      orderId: "ord-closed-partial-final",
+      leaderId: "whale",
+      tokenId: "tok-closed-partial-final",
+      side: "BUY",
+      price: 0.5,
+      size: 10,
+      filledShares: 0,
+      filledUsd: 0,
+      tradeKey: "k-closed-partial-final",
+      reasoning: "fixed",
+    });
+    mockGetOrderStatus
+      .mockResolvedValueOnce({
+        kind: "ok",
+        status: { sizeMatched: 0, originalSize: 10, status: "CANCELLED", terminal: true },
+      })
+      .mockResolvedValueOnce({
+        kind: "ok",
+        status: {
+          sizeMatched: 4,
+          originalSize: 0,
+          status: "CONFIRMED_CLOSED",
+          terminal: false,
+          filledUsd: 1.96,
+          feeUsd: 0.04,
+        },
+      })
+      .mockResolvedValueOnce({
+        kind: "ok",
+        status: {
+          sizeMatched: 6,
+          originalSize: 0,
+          status: "CONFIRMED_CLOSED",
+          terminal: false,
+          filledUsd: 2.94,
+          feeUsd: 0.06,
+        },
+      });
+
+    await runCopyCycle(liveConfig(false), store);
+    expect(store.countReconcilingOrders()).toBe(1);
+    vi.setSystemTime(startedAt + 60 * 60_000);
+    await runCopyCycle(liveConfig(false), store);
+    expect(store.getPosition("whale", "tok-closed-partial-final")).toBe(4);
+
+    vi.setSystemTime(startedAt + 25 * 60 * 60_000);
+    await runCopyCycle(liveConfig(false), store);
+    await runCopyCycle(liveConfig(false), store);
+
+    expect(store.getPosition("whale", "tok-closed-partial-final")).toBe(6);
+    expect(store.listPendingOrders({ includeReconciliation: true })).toHaveLength(0);
+    expect(store.countReconcilingOrders()).toBe(0);
+    expect(mockGetOrderStatus).toHaveBeenCalledTimes(3);
+    expect(store.listAuditLog({ action: "COPY" }).items).toHaveLength(2);
+    vi.useRealTimers();
   });
 
   it("keeps a stale-cancelled GTC reconciliation tombstone", async () => {

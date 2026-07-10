@@ -67,6 +67,7 @@ function matchesCompletedFill(
     return false;
   }
   if (fill.matchedAt < intent.createdAt - COMPLETED_FILL_CLOCK_SKEW_MS) return false;
+  if (fill.matchedAt > intent.reconciliationUntil) return false;
   const shareTolerance = Math.max(INTENT_SIZE_TOLERANCE, intent.size * 0.05);
   if (fill.shares > intent.size + shareTolerance) return false;
 
@@ -120,6 +121,8 @@ export async function adoptUntrackedOpenOrders(
     store.listPendingOrders({ includeReconciliation: true }).map((r) => r.orderId)
   );
   const intents = store.listLiveOrderIntents({ includeReconciliation: true });
+  const now = Date.now();
+  const recoveryIntents = intents.filter((intent) => now <= intent.reconciliationUntil);
   const claimedIntentIds = new Set<string>();
   const reservedOrderIds = new Set<string>([
     ...pendingIds,
@@ -141,7 +144,7 @@ export async function adoptUntrackedOpenOrders(
       );
     }
 
-    const intent = findMatchingIntent(order, intents, claimedIntentIds);
+    const intent = findMatchingIntent(order, recoveryIntents, claimedIntentIds);
     if (intent) {
       const pendingRemaining = Math.max(
         0,
@@ -211,10 +214,13 @@ export async function adoptUntrackedOpenOrders(
     });
   }
 
-  const unmatchedIntents = intents.filter(
+  const unmatchedIntents = recoveryIntents.filter(
     (intent) => !claimedIntentIds.has(intent.intentId)
   );
-  if (unmatchedIntents.length === 0) return { adopted, warnings };
+  if (unmatchedIntents.length === 0) {
+    warnings.push(...quarantineStaleIntents(store, intents, claimedIntentIds, now));
+    return { adopted, warnings };
+  }
 
   const earliestIntentAt = Math.min(...unmatchedIntents.map((intent) => intent.createdAt));
   const fillLookup = await executor.listRecentCompletedFills(
