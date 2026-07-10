@@ -233,8 +233,8 @@ describe("AccountManager.reloadConfig", () => {
     process.chdir(dir);
     process.env.POLYMARKET_PRIVATE_KEY = TEST_PRIVATE_KEY;
     process.env.POLYMARKET_ADDRESS = TEST_WALLET;
-    process.env.POLYMIRROR_GIT_SHA = "git-atomic";
-    process.env.POLYMIRROR_IMAGE_DIGEST = "image-atomic";
+    process.env.POLYMIRROR_GIT_SHA = "a".repeat(40);
+    process.env.POLYMIRROR_IMAGE_DIGEST = `sha256:${"b".repeat(64)}`;
     resolveLeaderAddressesSpy.mockImplementation(async (leaders: LeaderConfig[]) => leaders);
     writeConfig(1_000, 8_080, { mode: "none" }, [
       account("first", "First", { id: "first-leader", address: LEADER_A }),

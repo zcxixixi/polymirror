@@ -14,6 +14,22 @@ export interface RuntimeProvenance {
   lockfileHash: string;
 }
 
+const GIT_SHA_PATTERN = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
+const IMAGE_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/i;
+
+function validateOptionalProvenance(
+  name: "POLYMIRROR_GIT_SHA" | "POLYMIRROR_IMAGE_DIGEST",
+  value: string | undefined,
+  pattern: RegExp
+): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  if (!pattern.test(normalized)) {
+    throw new Error(`${name} has an invalid immutable identifier format`);
+  }
+  return normalized.toLowerCase();
+}
+
 function checkoutGitSha(): string {
   try {
     return execFileSync("git", ["rev-parse", "HEAD"], {
@@ -26,9 +42,20 @@ function checkoutGitSha(): string {
 }
 
 export function readRuntimeProvenance(): RuntimeProvenance {
+  const injectedGitSha = validateOptionalProvenance(
+    "POLYMIRROR_GIT_SHA",
+    process.env.POLYMIRROR_GIT_SHA,
+    GIT_SHA_PATTERN
+  );
+  const checkoutSha = injectedGitSha ? undefined : checkoutGitSha();
   return {
-    gitSha: process.env.POLYMIRROR_GIT_SHA?.trim() || checkoutGitSha(),
-    imageDigest: process.env.POLYMIRROR_IMAGE_DIGEST?.trim() || "unknown",
+    gitSha: injectedGitSha
+      ?? (GIT_SHA_PATTERN.test(checkoutSha ?? "") ? checkoutSha!.toLowerCase() : "unknown"),
+    imageDigest: validateOptionalProvenance(
+      "POLYMIRROR_IMAGE_DIGEST",
+      process.env.POLYMIRROR_IMAGE_DIGEST,
+      IMAGE_DIGEST_PATTERN
+    ) ?? "unknown",
     lockfileHash: sha256File("package-lock.json"),
   };
 }
@@ -37,8 +64,8 @@ export function provenanceTrustClass(
   requested: ExperimentTrustClass,
   provenance: RuntimeProvenance
 ): ExperimentTrustClass {
-  const complete = provenance.gitSha !== "unknown"
-    && provenance.imageDigest !== "unknown"
+  const complete = GIT_SHA_PATTERN.test(provenance.gitSha)
+    && IMAGE_DIGEST_PATTERN.test(provenance.imageDigest)
     && /^[a-f0-9]{64}$/i.test(provenance.lockfileHash);
   if (!complete) return requested === "legacy" ? "legacy" : "partial";
   return requested;

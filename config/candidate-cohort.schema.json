@@ -52,6 +52,7 @@
     "arm": {
       "type": "object",
       "additionalProperties": false,
+      "x-crossFieldConstraints": ["minPrice <= maxPrice"],
       "properties": {
         "fixedUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 },
         "maxPositionUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 50 },

@@ -5,7 +5,6 @@ import { readNormalizedConfigDocument } from "../src/config/write.js";
 import { toMultiDocument } from "../src/config/document.js";
 import {
   buildCandidateExperimentConfig,
-  type CandidateCohortInput,
 } from "../src/experiments/candidate-cohort.js";
 
 function usage(): never {
@@ -24,7 +23,7 @@ if (outputPath === basePath) throw new Error("output must not replace the base c
 if (existsSync(outputPath)) throw new Error(`output already exists: ${outputPath}`);
 
 const base = readNormalizedConfigDocument(basePath);
-const cohort = JSON.parse(readFileSync(cohortPath, "utf8")) as CandidateCohortInput;
+const cohort: unknown = JSON.parse(readFileSync(cohortPath, "utf8"));
 const generated = buildCandidateExperimentConfig(base.defaultsGlobal, cohort);
 const payload = stringifyYaml(toMultiDocument(generated), { lineWidth: 0 });
 const tempPath = `${outputPath}.tmp-${process.pid}`;

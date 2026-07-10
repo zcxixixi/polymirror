@@ -46,3 +46,18 @@ npx tsx scripts/build-candidate-experiments.mts config.yaml cohort.json /tmp/pol
 ```
 
 Validate the generated file through the normal config loader and built container before any transactional preview deployment.
+
+### Candidate image provenance
+
+Candidate cohorts must be built and started from a clean checkout with immutable
+runtime provenance. The deployment helper computes the checked-out Git SHA,
+builds the current source and dashboard from both lockfiles, inspects the built
+image ID, validates Compose interpolation, and starts the already-built image:
+
+```bash
+./scripts/deploy-candidate-preview.sh
+```
+
+Do not use a registry tag, branch name, or a digest guessed before the build as
+provenance. `docker-compose.yml` deliberately refuses to configure or start when
+`POLYMIRROR_GIT_SHA` or `POLYMIRROR_IMAGE_DIGEST` is absent.

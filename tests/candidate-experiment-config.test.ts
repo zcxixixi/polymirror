@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { globalYamlSchema } from "../src/config/document.js";
 import {
   buildCandidateExperimentConfig,
+  candidateCohortSchema,
   type CandidateCohortInput,
 } from "../src/experiments/candidate-cohort.js";
 
@@ -90,7 +92,7 @@ describe("buildCandidateExperimentConfig", () => {
           },
         })
       )
-    ).toThrow(/fixedUsd.*10/i);
+    ).toThrow(/less than or equal to 10/i);
   });
 
   it("keeps incomplete candidates disabled instead of silently running them", () => {
@@ -101,5 +103,58 @@ describe("buildCandidateExperimentConfig", () => {
 
     expect(result.accounts.every((account) => account.enabled === false)).toBe(true);
     expect(result.accounts.every((account) => account.leaders[0]?.enabled === false)).toBe(true);
+  });
+
+  it("rejects unknown and misspelled cohort fields before generation", () => {
+    expect(() =>
+      buildCandidateExperimentConfig(defaults(), {
+        ...cohort(),
+        arms: { standard: { fixedUSD: 3 } },
+      })
+    ).toThrow(/unrecognized key.*fixedUSD/i);
+
+    expect(() =>
+      buildCandidateExperimentConfig(defaults(), {
+        ...cohort(),
+        candidate: [],
+      })
+    ).toThrow(/unrecognized key.*candidate/i);
+  });
+
+  it("runtime schema rejects invalid types, ranges, ordering, and duplicate identities", () => {
+    expect(() => candidateCohortSchema.parse({ ...cohort(), cohortId: 123 })).toThrow();
+    expect(() => candidateCohortSchema.parse({ ...cohort(), cohortId: "x".repeat(25) })).toThrow();
+    expect(() => candidateCohortSchema.parse({
+      ...cohort(),
+      arms: { standard: { minPrice: 0.8, maxPrice: 0.2 } },
+    })).toThrow(/minPrice.*maxPrice/i);
+    expect(() => candidateCohortSchema.parse({
+      ...cohort(),
+      candidates: [
+        { id: "one", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119" },
+        { id: "two", address: "0xEC47CB4E0A4F4E375D9787DEBF7C874214F21119" },
+      ],
+    })).toThrow(/duplicate candidate address/i);
+  });
+
+  it("keeps runtime and published JSON Schema fields aligned", () => {
+    const published = JSON.parse(
+      readFileSync("config/candidate-cohort.schema.json", "utf8")
+    ) as {
+      properties: Record<string, unknown>;
+      $defs: { arm: { properties: Record<string, unknown>; "x-crossFieldConstraints": string[] } };
+    };
+    expect(Object.keys(published.properties).sort()).toEqual(["arms", "candidates", "cohortId"]);
+    expect(Object.keys(published.$defs.arm.properties).sort()).toEqual([
+      "dailyLossCapPct",
+      "fixedUsd",
+      "maxDailyVolumeUsd",
+      "maxOpenMarkets",
+      "maxPositionUsd",
+      "maxPrice",
+      "minPrice",
+      "slippageTolerance",
+    ]);
+    expect(published.$defs.arm["x-crossFieldConstraints"]).toContain("minPrice <= maxPrice");
   });
 });

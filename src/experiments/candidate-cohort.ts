@@ -4,29 +4,71 @@ import {
   type GlobalYaml,
   type NormalizedConfigDocument,
 } from "../config/document.js";
+import { z } from "zod";
 
-export type CandidateArmName = "conservative" | "standard" | "aggressive";
+export const candidateArmNames = ["conservative", "standard", "aggressive"] as const;
+export type CandidateArmName = (typeof candidateArmNames)[number];
 
-export interface CandidateArmInput {
-  fixedUsd?: number;
-  maxPositionUsd?: number;
-  maxDailyVolumeUsd?: number;
-  maxOpenMarkets?: number;
-  dailyLossCapPct?: number;
-  slippageTolerance?: number;
-  minPrice?: number;
-  maxPrice?: number;
-}
+const idSchema = z.string().min(1).regex(/^[A-Za-z0-9_-]+$/);
+const candidateArmSchema = z.object({
+  fixedUsd: z.number().positive().max(10).optional(),
+  maxPositionUsd: z.number().positive().max(50).optional(),
+  maxDailyVolumeUsd: z.number().positive().max(200).optional(),
+  maxOpenMarkets: z.number().int().min(1).max(30).optional(),
+  dailyLossCapPct: z.number().positive().max(15).optional(),
+  slippageTolerance: z.number().positive().max(0.05).optional(),
+  minPrice: z.number().min(0).max(1).optional(),
+  maxPrice: z.number().min(0).max(1).optional(),
+}).strict().superRefine((arm, context) => {
+  if (arm.minPrice !== undefined && arm.maxPrice !== undefined && arm.minPrice > arm.maxPrice) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "minPrice must be less than or equal to maxPrice",
+      path: ["minPrice"],
+    });
+  }
+});
 
-export interface CandidateCohortInput {
-  cohortId: string;
-  candidates: Array<{
-    id: string;
-    address?: string;
-    username?: string;
-  }>;
-  arms?: Partial<Record<CandidateArmName, CandidateArmInput>>;
-}
+export const candidateCohortSchema = z.object({
+  cohortId: idSchema.max(24),
+  candidates: z.array(z.object({
+    id: idSchema.max(20),
+    address: z.string().regex(/^0x[A-Fa-f0-9]{40}$/).optional(),
+    username: z.string().min(1).optional(),
+  }).strict()).min(1).max(10),
+  arms: z.object({
+    conservative: candidateArmSchema.optional(),
+    standard: candidateArmSchema.optional(),
+    aggressive: candidateArmSchema.optional(),
+  }).strict().optional(),
+}).strict().superRefine((cohort, context) => {
+  const ids = new Set<string>();
+  const addresses = new Set<string>();
+  for (const [index, candidate] of cohort.candidates.entries()) {
+    if (ids.has(candidate.id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `duplicate candidate id: ${candidate.id}`,
+        path: ["candidates", index, "id"],
+      });
+    }
+    ids.add(candidate.id);
+    if (candidate.address) {
+      const address = candidate.address.toLowerCase();
+      if (addresses.has(address)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate candidate address: ${address}`,
+          path: ["candidates", index, "address"],
+        });
+      }
+      addresses.add(address);
+    }
+  }
+});
+
+export type CandidateArmInput = z.infer<typeof candidateArmSchema>;
+export type CandidateCohortInput = z.infer<typeof candidateCohortSchema>;
 
 interface ResolvedArm {
   fixedUsd: number;
@@ -39,7 +81,7 @@ interface ResolvedArm {
   maxPrice: number;
 }
 
-const ARM_ORDER: CandidateArmName[] = ["conservative", "standard", "aggressive"];
+const ARM_ORDER: readonly CandidateArmName[] = candidateArmNames;
 const ARM_DEFAULTS: Record<CandidateArmName, ResolvedArm> = {
   conservative: {
     fixedUsd: 1,
@@ -107,8 +149,9 @@ function resolveArm(name: CandidateArmName, override?: CandidateArmInput): Resol
 
 export function buildCandidateExperimentConfig(
   defaults: GlobalYaml,
-  input: CandidateCohortInput
+  candidateInput: unknown
 ): NormalizedConfigDocument {
+  const input = candidateCohortSchema.parse(candidateInput);
   assertId("cohortId", input.cohortId);
   if (input.candidates.length === 0) throw new Error("at least one candidate is required");
   if (input.candidates.length * ARM_ORDER.length > 30) {

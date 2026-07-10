@@ -1,6 +1,28 @@
 # syntax=docker/dockerfile:1
 
+FROM node:24-bookworm-slim AS builder
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY dashboard/package.json dashboard/package-lock.json ./dashboard/
+RUN npm ci \
+  && npm ci --prefix dashboard
+
+COPY tsconfig.json ./
+COPY src ./src
+COPY scripts ./scripts
+COPY dashboard ./dashboard
+RUN npm run build
+
 FROM node:24-bookworm-slim AS runner
+
+ARG POLYMIRROR_GIT_SHA
+LABEL org.opencontainers.image.revision=$POLYMIRROR_GIT_SHA
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
@@ -15,7 +37,7 @@ COPY scripts ./scripts
 RUN npm ci --omit=dev \
   && npm cache clean --force
 
-COPY dist ./dist
+COPY --from=builder /app/dist ./dist
 
 RUN mkdir -p data
 
