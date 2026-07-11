@@ -51,6 +51,9 @@
     "yaml": "^2.4.0",
     "zod": "^3.23.0"
   },
+  "overrides": {
+    "ws": "8.21.0"
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.0.0",
