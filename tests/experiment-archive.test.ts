@@ -107,9 +107,54 @@ describe("experiment evidence archive", () => {
     const db = new Database(dbPath, { readonly: true });
     expect(db.prepare("SELECT sealed_at AS sealedAt, archive_status AS status FROM experiments").get())
       .toMatchObject({ sealedAt: null, status: "FAILED" });
-    expect(db.prepare("SELECT verification_status AS status FROM experiment_archives").get())
+    expect(db.prepare("SELECT verification_status AS status FROM experiment_archive_attempts").get())
       .toMatchObject({ status: "FAILED" });
+    expect(db.prepare("SELECT verification_status AS status FROM experiment_archives").get()).toBeUndefined();
     db.close();
+  });
+
+  it("preserves failed archive attempts and allows a later verified retry", async () => {
+    const dbPath = join(dir, "retry.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const experiment = store.startOrResumeExperiment({ accountId: "retry", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    store.close();
+
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId,
+      archiveDir: join(dir, "retry-failed"), onPublished: ({ snapshotPath }) => appendFileSync(snapshotPath, "corrupt") }))
+      .rejects.toThrow(/verification|checksum/i);
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId,
+      archiveDir: join(dir, "retry-success"), sealedAt: 500 });
+
+    expect(verifyExperimentArchive(archived.manifestPath, { sourceDbPath: dbPath }).valid).toBe(true);
+    const db = new Database(dbPath, { readonly: true });
+    expect(db.prepare("SELECT verification_status AS status FROM experiment_archive_attempts").all())
+      .toEqual(expect.arrayContaining([{ status: "FAILED" }, { status: "VERIFIED" }]));
+    expect(db.prepare("SELECT verification_status AS status FROM experiment_archives").all())
+      .toEqual([{ status: "VERIFIED" }]);
+    db.close();
+  });
+
+  it("archives the rotation-time end state instead of the later global account state", async () => {
+    const dbPath = join(dir, "rotated-end.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig(); config.app.global.risk.startingCapitalUsd = 10;
+    const input = { accountId: "rotated-end", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" as const };
+    const first = store.startOrResumeExperiment(input, 100);
+    const changed = structuredClone(config); changed.app.global.risk.maxOrderUsd -= 1;
+    store.startOrResumeExperiment({ ...input, config: changed }, 200);
+    store.adjustCash(-3, 10);
+    store.close();
+
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: first.experimentId,
+      archiveDir: join(dir, "rotated-end-archive"), sealedAt: 300 });
+    const snapshot = new Database(archived.snapshotPath, { readonly: true });
+    const row = snapshot.prepare("SELECT end_state_json AS endStateJson FROM experiments WHERE experiment_id=?")
+      .get(first.experimentId) as { endStateJson: string };
+    expect(JSON.parse(row.endStateJson)).toMatchObject({ cashUsd: 10 });
+    snapshot.close();
   });
 
   it("freezes new observations for an existing raw event while PREPARING", async () => {

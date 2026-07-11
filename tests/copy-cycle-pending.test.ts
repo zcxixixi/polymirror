@@ -607,6 +607,40 @@ describe("runCopyCycle pending reconciliation", () => {
     expect(mockPlaceLimitOrder).toHaveBeenCalledTimes(1);
   });
 
+  it("persists an exact accepted order id for confirmed-fill reconciliation", async () => {
+    const activity = testActivity({
+      transactionHash: "0xacceptedpending",
+      asset: "tok-accepted-pending",
+      side: "BUY",
+      size: 100,
+      price: 0.5,
+    });
+    mockPollLeaders.mockResolvedValue([{ leaderId: "whale", fetched: 1, candidates: [activity] }]);
+    mockPlaceLimitOrder.mockResolvedValue({
+      preview: false,
+      orderId: "ord-accepted-pending",
+      error: "Order accepted; fill confirmation pending",
+      filledShares: 0,
+      filledUsd: 0,
+      orderStatus: "MATCHED",
+      pendingRemaining: 0,
+    });
+
+    const result = await runCopyCycle(liveConfig(true), store);
+
+    expect(result.copied).toBe(0);
+    expect(store.listPendingOrders()).toEqual([
+      expect.objectContaining({
+        orderId: "ord-accepted-pending",
+        tokenId: activity.asset,
+        filledShares: 0,
+      }),
+    ]);
+    expect(store.hasSeen(tradeEventKey(activity))).toBe(true);
+    expect(store.listLiveOrderIntents()).toHaveLength(0);
+    expect(store.getPosition("whale", activity.asset!)).toBe(0);
+  });
+
   it("keeps an unconfirmed partial response unbooked when the order id is missing", async () => {
     const activity = testActivity({
       transactionHash: "0xpartialfill",

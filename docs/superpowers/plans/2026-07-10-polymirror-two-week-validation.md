@@ -8,15 +8,15 @@
 
 **Tech Stack:** TypeScript, Node.js 24, Vitest, better-sqlite3, YAML, Docker Compose, AWS SSM.
 
-## Current Checkpoint (2026-07-10)
+## Current Checkpoint (2026-07-11)
 
 - Active branch: `codex/polymirror-stability-checkpoint-20260710`.
-- Completed commits: `4534f17` (atomic config reload), `b27b6c0` (fee-aware recoverable fills), `07f3076` (confirmed fill evidence), and `2a58772` (isolated preview Candidate cohorts).
-- Task 1 and Task 2 implementation are complete and covered by the full test suite. A fresh independent re-review of `b27b6c0..07f3076` remains required because the previous reviewer session closed without a final verdict.
-- The Candidate cohort generator is implemented and locally smoke-tested, but no new cohort has been deployed. Historical PolyCop addresses remain a watchlist until their current leaderboard and copyability evidence is refreshed: `0xa1795199a227f8d68134f30bf26314a9918c9629`, `0x94016dfa721784b6ab42dd8c9a3a69b5a2b7ad7f`, `0x66f3b58702fa50aff254b4f84de82fe63a13787c`, `0x34b0d22d39b71562a2c8d31823cc83185b533c56`, `0x21168b1447aea2cdd4746cea893b38c50876eb8f`, and `0xe977b6270e1d6740117b4a56cc7595e4c9e4700f`.
-- Next critical path: complete Task 3 and Task 4 lineage/replay work, obtain a clean whole-branch review, refresh Candidate evidence, then perform a transactional preview-only deployment.
-- Last confirmed server snapshot: Docker healthy, `/health` OK, `previewMode=true`, kill switch off, no pending orders, no wallet drift, and no last error. Refresh this snapshot before any deployment.
-- Fresh local verification at this checkpoint: `npm test` passed 63 files / 344 tests; `npm run lint` and `npm run build` passed. The dashboard build retains its existing non-fatal chunk-size warning.
+- Task 1 through Task 4 are implemented locally. The evidence schema is v9 and now preserves immutable archive attempts, rotation-time end state, observation occurrences, and deterministic replay inputs.
+- A fresh read-only review found four Important issues. Maker fills are fee-free, uncertain orders now fail closed unless an exact persisted CLOB order ID exists, experiment rotation is blocked by unresolved pending/intents, and failed archive publications can be retried without deleting attempt history. Re-review of these fixes remains required.
+- The server continues its existing nine-account preview-only cohort (`b55`, `justdance/crypto_dance`, and `sports_candle`, each with conservative/standard/aggressive arms). This local branch has not been deployed over it, and no account/config/process was restarted during this checkpoint.
+- Candidate evidence was refreshed from current Polymarket leaderboard/activity data. Historical addresses remain watchlist-only. A new low-category-correlation politics watchlist entry, LinaBell (`0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8`), is not authorized for deployment.
+- Confirmed server snapshot: Docker healthy, `/health` OK, `previewMode=true`, kill switch off, `pendingOrders=0`, `walletDrifts=[]`, `lastError=null`; root filesystem is 49% used. Existing cohort quality still fails the funding gate.
+- Fresh local verification: `npm test` passed 69 files / 436 tests; `npm run lint`, `npm run build`, high-severity audit gate, and `git diff --check` passed. The dashboard retains its existing non-fatal chunk-size warning; dependency audit has no high/critical findings.
 
 ## Global Constraints
 
@@ -83,7 +83,7 @@
 - [x] Add failing tests proving BUY cost includes fees and SELL proceeds subtract fees without changing execution-price telemetry.
 - [x] Implement one shared trade aggregation path for taker and maker order IDs, terminal-status filtering, fee calculation, and actual notional.
 - [x] Extend additive SQLite migrations and transactional store methods for cumulative fill/fee state and intent telemetry.
-- [x] Use actual cumulative fill deltas in pending reconciliation and actual fill telemetry in restart recovery.
+- [x] Use exact persisted order IDs for pending reconciliation; quarantine uncertain submissions instead of economically matching old/manual orders.
 - [x] Add preview fee parameters to guarded order-book snapshots and apply the same fee formula used by the installed Polymarket SDK.
 - [x] Run all focused execution, reconciliation, store, and copy-cycle tests.
 
@@ -107,13 +107,13 @@
 - `raw_events` stores a source ID or deterministic full-payload hash, raw normalized payload, source timestamp, observed timestamp, and experiment ID.
 - `decisions` links each raw event to DETECT/SKIP/COPY/SELL/REDEEM with structured reason code and exact order/quote terms.
 
-- [ ] Add failing tests for canonical redaction/hash stability and immutable manifest rows across hot reload.
-- [ ] Add failing tests that duplicate source events retain one raw row but can link to deterministic decisions without losing source timestamps.
-- [ ] Implement schema-version metadata plus additive manifest/raw-event/decision tables.
-- [ ] Start or resume the active experiment when an account runtime is created; rotate to a new experiment when decision-affecting config changes.
-- [ ] Persist raw events before filters and link every terminal decision to the raw event.
-- [ ] Include experiment ID, config hash, code/image identifiers, schema version, and trust class in quality report output.
-- [ ] Run focused manifest, lineage, report, replay, and copy-cycle tests.
+- [x] Add failing tests for canonical redaction/hash stability and immutable manifest rows across hot reload.
+- [x] Add failing tests that duplicate source events retain one raw row but can link to deterministic decisions without losing source timestamps.
+- [x] Implement schema-version metadata plus additive manifest/raw-event/decision tables.
+- [x] Start or resume the active experiment when an account runtime is created; rotate only when decision-affecting config changes and no order state is unresolved.
+- [x] Persist raw events before filters and link every terminal decision to the raw event.
+- [x] Include experiment ID, config hash, code/image identifiers, schema version, and trust class in quality report output.
+- [x] Run focused manifest, lineage, report, replay, and copy-cycle tests.
 
 ### Task 4: Sealed Evidence, Backup, and Deterministic Replay Gate
 
@@ -131,12 +131,12 @@
 - WAL-safe SQLite backup produces a SHA-256 checksum manifest and seals an experiment before evidence can be pruned.
 - Replay verification consumes only stored manifest, raw events, quote evidence, and outcomes, then compares decision digest, cash, positions, realized PnL, and coverage.
 
-- [ ] Add a failing test that pruning refuses unsealed experiment evidence.
-- [ ] Add a failing test that a backup checksum changes when the source snapshot changes and verifies after restore.
-- [ ] Add a failing deterministic replay test with a known BUY, SELL, and REDEEM sequence.
-- [ ] Implement WAL-safe archive, checksum manifest, seal transition, and prune guard.
-- [ ] Implement replay digest comparison and a CLI report command.
-- [ ] Run archive, replay, prune, cash-reconcile, and preview-report tests.
+- [x] Add a failing test that pruning refuses unsealed experiment evidence.
+- [x] Add a failing test that a backup checksum changes when the source snapshot changes and verifies after restore.
+- [x] Add a failing deterministic replay test with a known BUY, SELL, and REDEEM sequence.
+- [x] Implement WAL-safe archive, checksum manifest, retryable append-only attempt records, seal transition, and prune guard.
+- [x] Implement replay digest comparison and a CLI report command.
+- [x] Run archive, replay, prune, cash-reconcile, and preview-report tests.
 
 ### Task 5: Preview Candidate Matrix and Deployment Gate
 
@@ -153,11 +153,11 @@
 - [x] Add failing tests for 200U isolation, unique IDs, preview-only enforcement, FOK enforcement, and hard exposure/slippage caps.
 - [x] Implement deterministic config generation without modifying the root config.
 - [x] Document Candidate intake, common baseline, promotion, elimination, correlation, and two-week review rules.
-- [ ] Generate the candidate config in a temporary remote path and validate it against the built image.
+- [x] Generate the candidate config in a temporary remote path and validate it against the built image.
 - [x] Run full `npm test`, `npm run lint`, `npm run build`, and `git diff --check`.
 - [ ] Obtain an independent whole-branch review and resolve every Critical/Important finding.
-- [ ] Deploy transactionally with exact config rollback, keeping root preview-only and live probe disabled by default.
-- [ ] Verify `/health`, dashboard, collector, per-experiment manifests, and 60m/6h/24h quality windows.
+- [x] Deploy the current cohort transactionally with exact config rollback, keeping root preview-only and live probe disabled by default.
+- [ ] Verify the new v9 per-experiment manifests only after a separately approved branch deployment; continue 60m/6h/24h/14d checks on the running cohort meanwhile.
 
 ### Task 6: Two-Week Evaluation and Funding Review
 

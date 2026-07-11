@@ -28,11 +28,48 @@ describe("experiment manifest", () => {
     const second = store.startOrResumeExperiment({ accountId: "candidate-a", candidateAddresses: [], config: changed,
       gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" }, 200);
     expect(first.startState).toMatchObject({ cashUsd: 10, positions: [], realizedPnlUsd: 0 });
+    expect(store.getExperiment(first.experimentId)?.endState).toEqual(second.startState);
     expect(second.startState).toMatchObject({
       cashUsd: 8,
       positions: [{ leaderId: "whale", tokenId: "token-a", shares: 4, avgEntryPrice: 0.5 }],
       realizedPnlUsd: 0,
     });
+    store.close();
+  });
+
+  it("refuses experiment rotation while exchange state is unresolved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-experiment-pending-")); dirs.push(dir);
+    const store = new StateStore(join(dir, "state.db"));
+    const config = previewRuntimeConfig();
+    const input = { accountId: "candidate-a", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" as const };
+    const first = store.startOrResumeExperiment(input, 100);
+    store.upsertPendingOrder({ orderId: "pending-1", leaderId: "whale", tokenId: "token-a",
+      side: "BUY", price: 0.5, size: 2, filledShares: 0, tradeKey: "trade-a", reasoning: "test" });
+    const changed = structuredClone(config); changed.app.global.risk.maxOrderUsd -= 1;
+
+    expect(() => store.startOrResumeExperiment({ ...input, config: changed }, 200))
+      .toThrow(/unresolved.*pending/i);
+    expect(store.getActiveExperiment("candidate-a")?.experimentId).toBe(first.experimentId);
+    expect(store.listExperiments()).toHaveLength(1);
+    store.close();
+  });
+
+  it("refuses experiment rotation while a live order intent is unresolved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-experiment-intent-")); dirs.push(dir);
+    const store = new StateStore(join(dir, "state.db"));
+    const config = previewRuntimeConfig();
+    const input = { accountId: "candidate-a", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" as const };
+    const first = store.startOrResumeExperiment(input, 100);
+    store.recordLiveOrderIntent({ tradeKeys: ["trade-a"], leaderId: "whale", tokenId: "token-a",
+      side: "BUY", price: 0.5, orderSize: 2, auditReason: "test" });
+    const changed = structuredClone(config); changed.app.global.risk.maxOrderUsd -= 1;
+
+    expect(() => store.startOrResumeExperiment({ ...input, config: changed }, 200))
+      .toThrow(/unresolved.*intent/i);
+    expect(store.getActiveExperiment("candidate-a")?.experimentId).toBe(first.experimentId);
+    expect(store.listExperiments()).toHaveLength(1);
     store.close();
   });
   it("captures checkout and lockfile provenance when build metadata is not injected", () => {
@@ -117,7 +154,7 @@ describe("experiment manifest", () => {
     reopened.close();
   });
 
-  it("does not publish schema v7 when migration finalization fails", () => {
+  it("does not publish the current schema when migration finalization fails", () => {
     const dir = mkdtempSync(join(tmpdir(), "pm-schema-failure-"));
     dirs.push(dir);
     const path = join(dir, "legacy.db");

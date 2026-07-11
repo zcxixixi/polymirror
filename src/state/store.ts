@@ -23,7 +23,7 @@ import {
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 8;
+export const STATE_SCHEMA_VERSION = 9;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 export interface DecisionObservationRef { rawEventId: string; observationId: number }
@@ -551,6 +551,29 @@ export class StateStore {
         verified_at INTEGER,
         verification_status TEXT NOT NULL DEFAULT 'PENDING_VERIFY'
       );
+      CREATE TABLE IF NOT EXISTS experiment_archive_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        snapshot_sha256 TEXT NOT NULL,
+        manifest_sha256 TEXT NOT NULL,
+        archived_at INTEGER NOT NULL,
+        archive_path TEXT NOT NULL,
+        verified_at INTEGER,
+        verification_status TEXT NOT NULL DEFAULT 'PENDING_VERIFY',
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_experiment_archive_attempts_experiment
+        ON experiment_archive_attempts(experiment_id, archived_at);
+      CREATE TRIGGER IF NOT EXISTS experiment_archive_attempts_no_update
+        BEFORE UPDATE ON experiment_archive_attempts
+        WHEN NOT (OLD.verification_status='PENDING_VERIFY' AND NEW.verification_status IN ('VERIFIED','FAILED')
+          AND NEW.attempt_id=OLD.attempt_id AND NEW.experiment_id=OLD.experiment_id
+          AND NEW.snapshot_sha256=OLD.snapshot_sha256 AND NEW.manifest_sha256=OLD.manifest_sha256
+          AND NEW.archived_at=OLD.archived_at AND NEW.archive_path=OLD.archive_path)
+        BEGIN SELECT RAISE(ABORT, 'experiment archive attempts are immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS experiment_archive_attempts_no_delete
+        BEFORE DELETE ON experiment_archive_attempts
+        BEGIN SELECT RAISE(ABORT, 'experiment archive attempts are append-only'); END;
       CREATE TRIGGER IF NOT EXISTS experiment_archives_no_update
         BEFORE UPDATE ON experiment_archives
         WHEN NOT (OLD.verification_status='PENDING_VERIFY' AND NEW.verification_status IN ('VERIFIED','FAILED')
@@ -643,6 +666,19 @@ export class StateStore {
           AND NEW.experiment_id=OLD.experiment_id AND NEW.snapshot_sha256=OLD.snapshot_sha256
           AND NEW.manifest_sha256=OLD.manifest_sha256 AND NEW.archive_path=OLD.archive_path)
         BEGIN SELECT RAISE(ABORT, 'experiment archive records are immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_archives_no_delete;
+        CREATE TRIGGER experiment_archives_no_delete BEFORE DELETE ON experiment_archives
+        BEGIN SELECT RAISE(ABORT, 'experiment archive records are append-only'); END;
+        DROP TRIGGER IF EXISTS experiment_archive_attempts_no_update;
+        CREATE TRIGGER experiment_archive_attempts_no_update BEFORE UPDATE ON experiment_archive_attempts
+        WHEN NOT (OLD.verification_status='PENDING_VERIFY' AND NEW.verification_status IN ('VERIFIED','FAILED')
+          AND NEW.attempt_id=OLD.attempt_id AND NEW.experiment_id=OLD.experiment_id
+          AND NEW.snapshot_sha256=OLD.snapshot_sha256 AND NEW.manifest_sha256=OLD.manifest_sha256
+          AND NEW.archived_at=OLD.archived_at AND NEW.archive_path=OLD.archive_path)
+        BEGIN SELECT RAISE(ABORT, 'experiment archive attempts are immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_archive_attempts_no_delete;
+        CREATE TRIGGER experiment_archive_attempts_no_delete BEFORE DELETE ON experiment_archive_attempts
+        BEGIN SELECT RAISE(ABORT, 'experiment archive attempts are append-only'); END;
         DROP INDEX IF EXISTS idx_experiments_active_account;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_active_account
           ON experiments(account_id) WHERE state = 'ACTIVE' AND ended_at IS NULL;
@@ -670,7 +706,15 @@ export class StateStore {
   }
 
   private reconcileOrphanPreparedExperiments(now = Date.now()): void {
-    this.db.prepare("UPDATE experiments SET archive_status='FAILED', archive_error='interrupted archive preparation', end_state_json=NULL WHERE archive_status='PREPARING' AND sealed_at IS NULL").run();
+    this.db.prepare(`UPDATE experiment_archive_attempts
+      SET verification_status='FAILED', error='interrupted archive preparation'
+      WHERE verification_status='PENDING_VERIFY'
+        AND experiment_id IN (SELECT experiment_id FROM experiments WHERE archive_status='PREPARING' AND sealed_at IS NULL)`)
+      .run();
+    this.db.prepare(`UPDATE experiments SET archive_status='FAILED',
+      archive_error='interrupted archive preparation',
+      end_state_json=CASE WHEN state='ACTIVE' THEN NULL ELSE end_state_json END
+      WHERE archive_status='PREPARING' AND sealed_at IS NULL`).run();
     const rows = this.db.prepare(
       "SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId FROM experiments WHERE state = 'PREPARED'"
     ).all() as { experimentId: string; previousExperimentId: string | null }[];
@@ -698,14 +742,25 @@ export class StateStore {
         && active.schemaVersion === STATE_SCHEMA_VERSION
         && active.trustClass === input.trustClass;
       if (sameIdentity) return active!;
+      if (active) {
+        const pending = this.db.prepare("SELECT COUNT(*) AS count FROM pending_orders").get() as { count: number };
+        if (pending.count > 0) {
+          throw new Error(`experiment rotation blocked by ${pending.count} unresolved pending order(s)`);
+        }
+        const intents = this.db.prepare("SELECT COUNT(*) AS count FROM live_order_intents").get() as { count: number };
+        if (intents.count > 0) {
+          throw new Error(`experiment rotation blocked by ${intents.count} unresolved live order intent(s)`);
+        }
+      }
+      const transitionState = this.captureExperimentState(
+        input.config.app.global.risk.startingCapitalUsd
+      );
       if (active && !preparing) {
-        this.db.prepare("UPDATE experiments SET ended_at = ? WHERE experiment_id = ?")
-          .run(now, active.experimentId);
-        this.db.prepare("UPDATE experiments SET state = 'ENDED' WHERE experiment_id = ?")
-          .run(active.experimentId);
+        this.db.prepare(
+          "UPDATE experiments SET state = 'ENDED', ended_at = ?, end_state_json = ? WHERE experiment_id = ?"
+        ).run(now, normalizedPayloadJson(transitionState), active.experimentId);
       }
       const experimentId = newExperimentId(input.accountId, hash);
-      const startState = this.captureExperimentState(input.config.app.global.risk.startingCapitalUsd);
       this.db.prepare(
         `INSERT INTO experiments
          (experiment_id, account_id, candidate_addresses_json, canonical_config_json,
@@ -726,7 +781,7 @@ export class StateStore {
         input.trustClass,
         preparing ? "PREPARED" : "ACTIVE",
         active?.experimentId ?? null,
-        normalizedPayloadJson(startState)
+        normalizedPayloadJson(transitionState)
       );
       return this.getExperiment(experimentId)!;
     })();
@@ -780,12 +835,16 @@ export class StateStore {
     this.db.transaction(() => {
       for (const experimentId of experimentIds) {
         const row = this.db.prepare(
-          "SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId FROM experiments WHERE experiment_id = ? AND state = 'PREPARED'"
-        ).get(experimentId) as { experimentId: string; previousExperimentId: string | null } | undefined;
+          `SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId,
+                  start_state_json AS startStateJson
+           FROM experiments WHERE experiment_id = ? AND state = 'PREPARED'`
+        ).get(experimentId) as { experimentId: string; previousExperimentId: string | null; startStateJson: string } | undefined;
         if (!row) continue;
         if (row.previousExperimentId) {
-          this.db.prepare("UPDATE experiments SET state = 'ENDED', ended_at = ? WHERE experiment_id = ? AND state = 'ACTIVE'")
-            .run(now, row.previousExperimentId);
+          this.db.prepare(
+            `UPDATE experiments SET state = 'ENDED', ended_at = ?, end_state_json = ?
+             WHERE experiment_id = ? AND state = 'ACTIVE'`
+          ).run(now, row.startStateJson, row.previousExperimentId);
         }
         this.db.prepare("UPDATE experiments SET state = 'ACTIVE' WHERE experiment_id = ? AND state = 'PREPARED'")
           .run(row.experimentId);
@@ -1121,6 +1180,19 @@ export class StateStore {
     if (!archiveCols.some((column) => column.name === "archive_path")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN archive_path TEXT");
     if (!archiveCols.some((column) => column.name === "verified_at")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verified_at INTEGER");
     if (!archiveCols.some((column) => column.name === "verification_status")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'PENDING_VERIFY'");
+    // Schema v9 keeps every publication as an append-only attempt while the
+    // one-row experiment_archives table remains the verified trust anchor.
+    this.db.exec(`
+      INSERT OR IGNORE INTO experiment_archive_attempts
+        (attempt_id, experiment_id, snapshot_sha256, manifest_sha256, archived_at,
+         archive_path, verified_at, verification_status, error)
+      SELECT 'legacy:' || experiment_id || ':' || archived_at,
+             experiment_id, snapshot_sha256, manifest_sha256, archived_at,
+             COALESCE(archive_path, ''), verified_at, verification_status, NULL
+      FROM experiment_archives;
+      DROP TRIGGER IF EXISTS experiment_archives_no_delete;
+      DELETE FROM experiment_archives WHERE verification_status <> 'VERIFIED';
+    `);
     const decisionCols = this.db.prepare("PRAGMA table_info(decisions)").all() as { name: string }[];
     if (!decisionCols.some((column) => column.name === "decision_order")) {
       this.db.exec("ALTER TABLE decisions ADD COLUMN decision_order INTEGER");

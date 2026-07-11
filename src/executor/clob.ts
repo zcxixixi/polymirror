@@ -5,11 +5,7 @@ import {
   roundToTick,
   toOrderType,
 } from "./orderbook.js";
-import {
-  createTradingBackend,
-  type CompletedOrderFill,
-  type TradingBackend,
-} from "./trading-backend.js";
+import { createTradingBackend, type CompletedOrderFill, type TradingBackend } from "./trading-backend.js";
 import { logError, logInfo } from "../notify/logger.js";
 import { OrderType } from "@polymarket/client";
 import { calculatePlatformFeeUsd } from "./fees.js";
@@ -195,12 +191,9 @@ export class ClobExecutor {
           makingAmount: submitted.makingAmount,
           status: submitted.status,
         };
-        let orderId = submitted.orderId ?? extractOrderIdFromPostResponse(submitted.raw);
+        const orderId = submitted.orderId ?? extractOrderIdFromPostResponse(submitted.raw);
 
         if (!orderId) {
-          const recovered = await this.findMatchingOpenOrder(req, price);
-          if (recovered) return recovered;
-
           const responseFill = parseImmediateFill(immediate, req.side, price);
 
           logError("Order response missing order id", {
@@ -263,28 +256,15 @@ export class ClobExecutor {
         };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (attempt < retries) {
-          const recovered = await this.findMatchingOpenOrder(req, price);
-          if (recovered) return recovered;
-          logError("Order submit failed with uncertain outcome", {
-            token: req.tokenId.slice(0, 12),
-            error: msg,
-          });
-          return {
-            preview: false,
-            executionPrice: price,
-            error: "submit failed with uncertain outcome - will not retry",
-            orderStatus: msg,
-            filledShares: 0,
-            filledUsd: 0,
-            pendingRemaining: 0,
-          };
-        }
-        logError("Order failed", { token: req.tokenId.slice(0, 12), error: msg });
+        logError("Order submit failed with uncertain outcome", {
+          token: req.tokenId.slice(0, 12),
+          error: msg,
+        });
         return {
           preview: false,
           executionPrice: price,
-          error: msg,
+          error: "submit failed with uncertain outcome - will not retry",
+          orderStatus: msg,
           filledShares: 0,
           filledUsd: 0,
           pendingRemaining: 0,
@@ -325,14 +305,6 @@ export class ClobExecutor {
     }
   }
 
-  /** After a failed submit, look for a matching resting order on CLOB (timeout / lost response). */
-  async recoverOrderAfterFailure(
-    req: PlaceOrderRequest,
-    expectedPrice?: number
-  ): Promise<PlaceOrderResult | null> {
-    return this.findMatchingOpenOrder(req, expectedPrice);
-  }
-
   /** List all open orders on CLOB (live only). */
   async listOpenOrders(): Promise<
     Array<{ orderId: string; tokenId: string; side: string; price: number; size: number }>
@@ -360,78 +332,6 @@ export class ClobExecutor {
       logError("List recent completed fills failed", { error: message });
       return { kind: "transient", message };
     }
-  }
-
-  private async findMatchingOpenOrder(
-    req: PlaceOrderRequest,
-    expectedPrice?: number
-  ): Promise<PlaceOrderResult | null> {
-    try {
-      let matchPrice = expectedPrice;
-      let priceTol = 0.0001;
-      if (matchPrice === undefined) {
-        const meta = await fetchOrderBookMeta(
-          this.wallet.clobUrl,
-          this.wallet.chainId,
-          req.tokenId
-        );
-        if (meta) {
-          const tick = parseFloat(meta.tickSize);
-          matchPrice = roundToTick(req.price, tick);
-          priceTol = Math.max(tick / 2, 0.0001);
-        } else {
-          matchPrice = req.price;
-        }
-      }
-
-      const open = await this.backend.listOpenOrders({ tokenId: req.tokenId });
-      if (open.length === 0) return null;
-
-      const side = req.side;
-      for (const row of open) {
-        const { orderId, side: orderSide, price, size: originalSize } = row;
-        if (!orderId) continue;
-        if (orderSide !== side) continue;
-        if (Math.abs(price - matchPrice) > priceTol) continue;
-        if (originalSize <= 0) continue;
-        if (Math.abs(originalSize - req.size) > 0.05) continue;
-
-        const statusResult = await this.getOrderStatus(orderId, req.tokenId);
-        if (statusResult.kind !== "ok") continue;
-
-        const { sizeMatched, status } = statusResult.status;
-        const filledShares = Math.min(sizeMatched, req.size);
-        const reportedUsd = statusResult.status.filledUsd;
-        const filledUsd = reportedUsd !== undefined && reportedUsd > 0 && sizeMatched > 0
-          ? reportedUsd * (filledShares / sizeMatched)
-          : filledShares * matchPrice;
-        const remaining = Math.max(
-          0,
-          roundFillAmount(req.size - filledShares)
-        );
-        logInfo("Recovered open order after submit failure", {
-          orderId: orderId.slice(0, 12),
-          token: req.tokenId.slice(0, 12),
-          status,
-        });
-        return {
-          preview: false,
-          orderId,
-          executionPrice: averageFillPrice(filledShares, filledUsd, matchPrice),
-          filledShares,
-          filledUsd: Math.round(filledUsd * 100_000_000) / 100_000_000,
-          feeUsd: statusResult.status.feeUsd,
-          orderStatus: `${status} (recovered)`,
-          pendingRemaining: remaining,
-        };
-      }
-    } catch (e) {
-      logError("Open order recovery failed", {
-        token: req.tokenId.slice(0, 12),
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
-    return null;
   }
 
   private async resolveFill(

@@ -71,10 +71,14 @@ function atomicPublishJson(path: string, value: unknown): void {
   renameSync(temporary, path);
 }
 
-function storedState(db: Database.Database, experimentId: string): { configJson: string; sealedAt: number | null; archiveStatus: string } {
+function storedState(db: Database.Database, experimentId: string): {
+  configJson: string; sealedAt: number | null; archiveStatus: string;
+  state: string; endStateJson: string | null;
+} {
   const row = db.prepare(`SELECT canonical_config_json AS configJson, sealed_at AS sealedAt,
-    archive_status AS archiveStatus FROM experiments WHERE experiment_id=?`).get(experimentId) as
-    { configJson: string; sealedAt: number | null; archiveStatus: string } | undefined;
+    archive_status AS archiveStatus, state, end_state_json AS endStateJson
+    FROM experiments WHERE experiment_id=?`).get(experimentId) as
+    { configJson: string; sealedAt: number | null; archiveStatus: string; state: string; endStateJson: string | null } | undefined;
   if (!row) throw new Error(`Experiment not found: ${experimentId}`);
   return row;
 }
@@ -92,11 +96,14 @@ export async function archiveExperimentEvidence(options: {
   const sealedAt = options.sealedAt ?? Date.now();
   const sourceDb = new Database(source);
   let sourceSealed = false;
+  let attemptId: string | undefined;
+  let originalEndStateJson: string | null = null;
   try {
     sourceDb.pragma("busy_timeout = 5000");
     sourceDb.transaction(() => {
       const row = storedState(sourceDb, options.experimentId);
       if (row.sealedAt !== null || row.archiveStatus === "SEALED") throw new Error("Experiment is already sealed");
+      originalEndStateJson = row.endStateJson;
       const config = JSON.parse(row.configJson) as { app?: { global?: { risk?: { startingCapitalUsd?: number } } } };
       const initial = config.app?.global?.risk?.startingCapitalUsd;
       if (typeof initial !== "number" || !Number.isFinite(initial)) throw new Error("Experiment config has invalid starting capital");
@@ -104,9 +111,12 @@ export async function archiveExperimentEvidence(options: {
       const positions = sourceDb.prepare(`SELECT leader_id AS leaderId, token_id AS tokenId, shares,
         avg_entry_price AS avgEntryPrice FROM positions WHERE ABS(shares)>1e-12 ORDER BY leader_id, token_id`).all();
       const pnl = sourceDb.prepare("SELECT COALESCE(SUM(realized_pnl),0) AS realizedPnlUsd FROM daily_stats").get() as { realizedPnlUsd: number };
-      const endState = { cashUsd: cash?.cashUsd ?? initial, positions, realizedPnlUsd: pnl.realizedPnlUsd };
+      const endState = row.state === "ENDED"
+        ? row.endStateJson
+        : JSON.stringify({ cashUsd: cash?.cashUsd ?? initial, positions, realizedPnlUsd: pnl.realizedPnlUsd });
+      if (!endState) throw new Error("Ended experiment is missing its captured end state");
       sourceDb.prepare(`UPDATE experiments SET archive_status='PREPARING', archive_error=NULL,
-        end_state_json=? WHERE experiment_id=? AND sealed_at IS NULL`).run(JSON.stringify(endState), options.experimentId);
+        end_state_json=? WHERE experiment_id=? AND sealed_at IS NULL`).run(endState, options.experimentId);
     })();
 
     const snapshotPath = join(archiveDir, "evidence.sqlite");
@@ -128,48 +138,59 @@ export async function archiveExperimentEvidence(options: {
     atomicPublishJson(manifestPath, manifest);
     const manifestHash = sha256(manifestPath);
     const canonicalManifest = realpathSync(manifestPath);
+    attemptId = sha256Bytes(`${options.experimentId}\n${sealedAt}\n${canonicalManifest}\n${manifestHash}`);
 
     sourceDb.transaction(() => {
       const row = storedState(sourceDb, options.experimentId);
       if (row.archiveStatus !== "PREPARING" || row.sealedAt !== null) throw new Error("Archive preparation lost ownership");
-      sourceDb.prepare(`INSERT INTO experiment_archives
-        (experiment_id, snapshot_sha256, manifest_sha256, archived_at, archive_path, verified_at, verification_status)
-        VALUES (?, ?, ?, ?, ?, NULL, 'PENDING_VERIFY')`)
-        .run(options.experimentId, file.sha256, manifestHash, sealedAt, canonicalManifest);
+      sourceDb.prepare(`INSERT INTO experiment_archive_attempts
+        (attempt_id, experiment_id, snapshot_sha256, manifest_sha256, archived_at,
+         archive_path, verified_at, verification_status, error)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, 'PENDING_VERIFY', NULL)`)
+        .run(attemptId, options.experimentId, file.sha256, manifestHash, sealedAt, canonicalManifest);
     })();
     options.onPublished?.({ manifestPath: canonicalManifest, snapshotPath: realpathSync(snapshotPath) });
-    const published = verifyArchiveAgainstSource(manifestPath, { sourceDbPath: source }, true);
+    const published = verifyArchiveAgainstSource(manifestPath, { sourceDbPath: source }, attemptId);
     if (!published.valid) throw new Error(`Published archive failed anchored verification: ${published.errors.join(", ")}`);
     sourceDb.transaction(() => {
       if (realpathSync(manifestPath) !== canonicalManifest || sha256(manifestPath) !== manifestHash || sha256(snapshotPath) !== file.sha256) {
         throw new Error("Published archive changed before finalization");
       }
-      const anchor = sourceDb.prepare("SELECT verification_status AS status FROM experiment_archives WHERE experiment_id=?")
-        .get(options.experimentId) as { status: string } | undefined;
+      const anchor = sourceDb.prepare("SELECT verification_status AS status FROM experiment_archive_attempts WHERE attempt_id=?")
+        .get(attemptId) as { status: string } | undefined;
       if (anchor?.status !== "PENDING_VERIFY") throw new Error("Archive anchor is not pending verification");
       sourceDb.prepare(`UPDATE experiments SET sealed_at=?, ended_at=COALESCE(ended_at, ?),
         state='ENDED', archive_status='SEALED', archive_error=NULL WHERE experiment_id=? AND archive_status='PREPARING'`)
         .run(sealedAt, sealedAt, options.experimentId);
-      sourceDb.prepare(`UPDATE experiment_archives SET verification_status='VERIFIED', verified_at=?
-        WHERE experiment_id=? AND verification_status='PENDING_VERIFY'`).run(Date.now(), options.experimentId);
+      const verifiedAt = Date.now();
+      sourceDb.prepare(`UPDATE experiment_archive_attempts SET verification_status='VERIFIED', verified_at=?
+        WHERE attempt_id=? AND verification_status='PENDING_VERIFY'`).run(verifiedAt, attemptId);
+      sourceDb.prepare(`INSERT INTO experiment_archives
+        (experiment_id, snapshot_sha256, manifest_sha256, archived_at, archive_path, verified_at, verification_status)
+        VALUES (?, ?, ?, ?, ?, ?, 'VERIFIED')`)
+        .run(options.experimentId, file.sha256, manifestHash, sealedAt, canonicalManifest, verifiedAt);
     })();
     sourceSealed = true;
     return { ...manifest, manifestPath: canonicalManifest, snapshotPath: realpathSync(snapshotPath) };
   } catch (error) {
     if (!sourceSealed) {
       try {
-        sourceDb.prepare(`UPDATE experiment_archives SET verification_status='FAILED'
-          WHERE experiment_id=? AND verification_status='PENDING_VERIFY'`).run(options.experimentId);
+        if (attemptId) {
+          sourceDb.prepare(`UPDATE experiment_archive_attempts
+            SET verification_status='FAILED', error=?
+            WHERE attempt_id=? AND verification_status='PENDING_VERIFY'`)
+            .run(error instanceof Error ? error.message : String(error), attemptId);
+        }
         sourceDb.prepare(`UPDATE experiments SET archive_status='FAILED', archive_error=?,
-          end_state_json=NULL WHERE experiment_id=? AND sealed_at IS NULL`)
-          .run(error instanceof Error ? error.message : String(error), options.experimentId);
+          end_state_json=? WHERE experiment_id=? AND sealed_at IS NULL`)
+          .run(error instanceof Error ? error.message : String(error), originalEndStateJson, options.experimentId);
       } catch { /* original error remains authoritative */ }
     }
     throw error;
   } finally { sourceDb.close(); }
 }
 
-function verifyArchiveAgainstSource(manifestPath: string, options: ArchiveVerificationOptions, allowPending: boolean): { valid: boolean; errors: string[] } {
+function verifyArchiveAgainstSource(manifestPath: string, options: ArchiveVerificationOptions, pendingAttemptId?: string): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   try {
     const canonicalManifest = safeExistingFile(manifestPath);
@@ -181,17 +202,25 @@ function verifyArchiveAgainstSource(manifestPath: string, options: ArchiveVerifi
     if (sha256(artifact) !== file.sha256) errors.push(`${file.path}: checksum mismatch`);
     const db = new Database(source, { readonly: true, fileMustExist: true });
     try {
-      const anchor = db.prepare(`SELECT snapshot_sha256 AS snapshotSha256, manifest_sha256 AS manifestSha256,
-        archive_path AS archivePath, verification_status AS verificationStatus, verified_at AS verifiedAt,
-        e.sealed_at AS sourceSealedAt, e.archive_status AS sourceArchiveStatus
-        FROM experiment_archives a JOIN experiments e ON e.experiment_id=a.experiment_id
-        WHERE a.experiment_id=?`).get(manifest.experimentId) as
+      const anchor = db.prepare(pendingAttemptId
+        ? `SELECT snapshot_sha256 AS snapshotSha256, manifest_sha256 AS manifestSha256,
+             archive_path AS archivePath, verification_status AS verificationStatus, verified_at AS verifiedAt,
+             e.sealed_at AS sourceSealedAt, e.archive_status AS sourceArchiveStatus
+           FROM experiment_archive_attempts a JOIN experiments e ON e.experiment_id=a.experiment_id
+           WHERE a.attempt_id=? AND a.experiment_id=?`
+        : `SELECT snapshot_sha256 AS snapshotSha256, manifest_sha256 AS manifestSha256,
+             archive_path AS archivePath, verification_status AS verificationStatus, verified_at AS verifiedAt,
+             e.sealed_at AS sourceSealedAt, e.archive_status AS sourceArchiveStatus
+           FROM experiment_archives a JOIN experiments e ON e.experiment_id=a.experiment_id
+           WHERE a.experiment_id=?`).get(...(pendingAttemptId
+          ? [pendingAttemptId, manifest.experimentId]
+          : [manifest.experimentId])) as
         { snapshotSha256: string; manifestSha256: string; archivePath: string | null; verificationStatus: string;
           verifiedAt: number | null; sourceSealedAt: number | null; sourceArchiveStatus: string } | undefined;
-      const acceptedStatus = allowPending ? anchor?.verificationStatus === "PENDING_VERIFY" : anchor?.verificationStatus === "VERIFIED";
-      if (!anchor || !acceptedStatus || (!allowPending && anchor.verifiedAt === null)) errors.push("missing verified source archive anchor");
+      const acceptedStatus = pendingAttemptId ? anchor?.verificationStatus === "PENDING_VERIFY" : anchor?.verificationStatus === "VERIFIED";
+      if (!anchor || !acceptedStatus || (!pendingAttemptId && anchor.verifiedAt === null)) errors.push("missing verified source archive anchor");
       else {
-        if (allowPending) {
+        if (pendingAttemptId) {
           if (anchor.sourceArchiveStatus !== "PREPARING" || anchor.sourceSealedAt !== null) errors.push("source experiment is not pending archive verification");
         } else if (anchor.sourceArchiveStatus !== "SEALED" || anchor.sourceSealedAt !== manifest.sealedAt) errors.push("source experiment is not sealed at the anchored timestamp");
         if (anchor.archivePath !== canonicalManifest) errors.push("archive canonical path does not match source anchor");
@@ -204,7 +233,7 @@ function verifyArchiveAgainstSource(manifestPath: string, options: ArchiveVerifi
 }
 
 export function verifyExperimentArchive(manifestPath: string, options: ArchiveVerificationOptions): { valid: boolean; errors: string[] } {
-  return verifyArchiveAgainstSource(manifestPath, options, false);
+  return verifyArchiveAgainstSource(manifestPath, options);
 }
 
 export function restoreExperimentArchive(manifestPath: string, destinationPath: string, options?: ArchiveVerificationOptions): { valid: boolean; errors: string[] } {

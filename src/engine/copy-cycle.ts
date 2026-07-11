@@ -1058,42 +1058,62 @@ export async function runCopyCycle(
     orderResult = await executor.placeLimitOrder(orderReq);
 
     if (orderResult.error) {
-      const recovered = await executor.recoverOrderAfterFailure(orderReq);
-      if (recovered) {
-        orderResult = recovered;
-      } else {
-        errors.push(`${leaderId}: ${orderResult.error}`);
-        store.audit({
+      if (!preview && orderResult.orderId && liveOrderIntentId) {
+        store.recordLiveOrderAccepted({
+          tradeKeys,
           leaderId,
-          action: "ERROR",
           tokenId: activity.asset,
           side: activity.side,
-          size: orderShares,
-          price: orderPrice,
+          price: orderResult.executionPrice ?? orderPrice,
           leaderPrice: executionAudit?.leaderPrice,
           executablePrice: executionAudit?.executablePrice,
           slippagePct: executionAudit?.slippagePct,
-          reason: orderResult.error,
-          preview,
+          orderSize: orderShares,
+          filledShares: 0,
+          filledUsd: 0,
+          feeUsd: 0,
+          auditReason: `${sizing.reasoning}; awaiting confirmed fill evidence`,
+          orderId: orderResult.orderId,
+          pendingRemaining: orderShares,
+          trackPendingGtc: true,
+          market,
+          intentId: liveOrderIntentId,
+          decisionTerms: {
+            orderType: config.app.global.execution.orderType,
+            requestedPrice: orderPrice,
+            requestedShares: orderShares,
+            orderId: orderResult.orderId,
+            orderStatus: orderResult.orderStatus ?? null,
+            awaitingConfirmedFill: true,
+            quoteBestPrice: observedExecutablePrice,
+            guardedTickSize: guardedTickSize ?? null,
+            guardedFeeRate,
+            guardedFeeExponent,
+            quoteEvidence: guardedQuoteEvidence,
+          },
         });
-        if (isDefiniteOrderRejection(orderResult.error)) {
-          store.markSeenMany(tradeKeys, leaderId);
-          if (liveOrderIntentId) store.deleteLiveOrderIntent(liveOrderIntentId);
-        }
-        telegram?.error(`${leaderId} ${activity.side} ${orderResult.error}`);
-        continue;
+        healthSnapshot.pendingOrders = store.countPendingOrders();
       }
-    }
-
-    if (!orderResult.orderId && !orderResult.preview) {
-      const needsOrderId =
-        orderResult.pendingRemaining > 0 || orderResult.filledShares <= 0;
-      if (needsOrderId) {
-        const recovered = await executor.recoverOrderAfterFailure(orderReq);
-        if (recovered?.orderId) {
-          orderResult = recovered;
-        }
+      errors.push(`${leaderId}: ${orderResult.error}`);
+      store.audit({
+        leaderId,
+        action: "ERROR",
+        tokenId: activity.asset,
+        side: activity.side,
+        size: orderShares,
+        price: orderPrice,
+        leaderPrice: executionAudit?.leaderPrice,
+        executablePrice: executionAudit?.executablePrice,
+        slippagePct: executionAudit?.slippagePct,
+        reason: orderResult.error,
+        preview,
+      });
+      if (isDefiniteOrderRejection(orderResult.error)) {
+        store.markSeenMany(tradeKeys, leaderId);
+        if (liveOrderIntentId) store.deleteLiveOrderIntent(liveOrderIntentId);
       }
+      telegram?.error(`${leaderId} ${activity.side} ${orderResult.error}`);
+      continue;
     }
 
     const executionPrice = orderResult.executionPrice ?? orderPrice;

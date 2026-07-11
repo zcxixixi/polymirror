@@ -124,7 +124,7 @@ describe("ClobExecutor", () => {
     expect(isDefiniteOrderRejection(result.error!)).toBe(false);
   });
 
-  it("recovers matching open orders after a submit exception", async () => {
+  it("does not claim a matching pre-existing order after a submit exception", async () => {
     mockSubmitOrder.mockRejectedValueOnce(new Error("network timeout"));
     mockListOpenOrders.mockResolvedValueOnce([
       {
@@ -159,10 +159,10 @@ describe("ClobExecutor", () => {
     });
 
     expect(mockSubmitOrder).toHaveBeenCalledTimes(1);
-    expect(result.orderId).toBe("ord-recovered");
-    expect(result.executionPrice).toBe(0.45);
-    expect(result.filledUsd).toBe(0.225);
-    expect(result.pendingRemaining).toBe(1.5);
+    expect(result.orderId).toBeUndefined();
+    expect(result.error).toContain("uncertain outcome");
+    expect(mockListOpenOrders).not.toHaveBeenCalled();
+    expect(mockGetOrderStatus).not.toHaveBeenCalled();
   });
 
   it("rejects a guarded request if the market tick changed after quoting", async () => {
