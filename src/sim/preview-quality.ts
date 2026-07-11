@@ -155,6 +155,12 @@ function issue(
   return { code, severity, label, detail };
 }
 
+function countBySide(
+  rows: { side: string | null; count: number }[]
+): Record<string, number> {
+  return Object.fromEntries(rows.map((row) => [row.side ?? "", row.count]));
+}
+
 function emptySideCounts(): PreviewSideCounts {
   return { buy: 0, sell: 0, totalTrades: 0 };
 }
@@ -276,55 +282,43 @@ function sinceWhere(sinceMs?: number): { sql: string; params: unknown[] } {
     : { sql: "", params: [] };
 }
 
-interface PreviewCopyPathAuditRow {
-  tokenId: string;
-  action: string;
-  reason: string;
-  side: string;
-  count: number;
-  lastTs: number;
-}
-
-function readCopyPathAuditRows(
-  db: Database.Database,
-  sinceMs?: number
-): PreviewCopyPathAuditRow[] {
-  const since = sinceWhere(sinceMs);
-  return db
-    .prepare(
-      `SELECT COALESCE(token_id, '') AS tokenId,
-              action,
-              COALESCE(reason, '') AS reason,
-              COALESCE(side, '') AS side,
-              COUNT(*) AS count,
-              MAX(ts) AS lastTs
-       FROM audit_log
-       WHERE action IN ('DETECT', 'COPY', 'SKIP')
-       ${since.sql}
-       GROUP BY token_id, action, reason, side`
-    )
-    .all(...since.params) as PreviewCopyPathAuditRow[];
-}
-
 function readActionSideCounts(
-  rows: readonly PreviewCopyPathAuditRow[],
-  action: "DETECT" | "COPY"
+  db: Database.Database,
+  action: "DETECT" | "COPY",
+  sinceMs?: number
 ): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const row of rows) {
-    if (row.action !== action) continue;
-    counts[row.side] = (counts[row.side] ?? 0) + row.count;
-  }
-  return counts;
+  const since = sinceWhere(sinceMs);
+  const rows = db
+    .prepare(
+      `SELECT COALESCE(side, '') AS side, COUNT(*) AS count
+       FROM audit_log
+       WHERE action = ?
+       ${since.sql}
+       GROUP BY side`
+    )
+    .all(action, ...since.params) as { side: string | null; count: number }[];
+  return countBySide(rows);
 }
 
 function readSkipDiagnostics(
-  rows: readonly PreviewCopyPathAuditRow[]
+  db: Database.Database,
+  sinceMs?: number
 ): {
   skips: PreviewQualitySkips;
   deduped: PreviewSideCounts;
   sideSkips: { buy: PreviewCopyGapSkipped; sell: PreviewCopyGapSkipped };
 } {
+  const since = sinceWhere(sinceMs);
+  const rows = db
+    .prepare(
+      `SELECT COALESCE(reason, '') AS reason, COALESCE(side, '') AS side, COUNT(*) AS count
+       FROM audit_log
+       WHERE action = 'SKIP'
+       ${since.sql}
+       GROUP BY reason, side`
+    )
+    .all(...since.params) as { reason: string; side: string | null; count: number }[];
+
   const result: PreviewQualitySkips = {
     parameterFiltered: 0,
     cashBlocked: 0,
@@ -338,7 +332,6 @@ function readSkipDiagnostics(
   const sideSkips = { buy: emptyGapSkipped(), sell: emptyGapSkipped() };
 
   for (const row of rows) {
-    if (row.action !== "SKIP") continue;
     if (reasonMatchesParameterFilter(row.reason)) result.parameterFiltered += row.count;
     if (reasonMatchesCash(row.reason)) result.cashBlocked += row.count;
     if (reasonMatchesExposure(row.reason)) result.exposureBlocked += row.count;
@@ -358,10 +351,32 @@ function readSkipDiagnostics(
 }
 
 function readTopUnclassifiedCopyGapTokens(
-  rows: readonly PreviewCopyPathAuditRow[],
+  db: Database.Database,
   side: "BUY" | "SELL",
+  sinceMs: number | undefined,
   limit: number
 ): PreviewCopyGapUnclassifiedToken[] {
+  const since = sinceWhere(sinceMs);
+  const rows = db
+    .prepare(
+      `SELECT COALESCE(token_id, '') AS tokenId,
+              action,
+              COALESCE(reason, '') AS reason,
+              COUNT(*) AS count,
+              MAX(ts) AS lastTs
+       FROM audit_log
+       WHERE side = ?
+       ${since.sql}
+       GROUP BY token_id, action, reason`
+    )
+    .all(side, ...since.params) as {
+      tokenId: string;
+      action: string;
+      reason: string;
+      count: number;
+      lastTs: number;
+    }[];
+
   const byToken = new Map<
     string,
     {
@@ -375,7 +390,7 @@ function readTopUnclassifiedCopyGapTokens(
   >();
 
   for (const row of rows) {
-    if (row.side !== side || !row.tokenId) continue;
+    if (!row.tokenId) continue;
     const acc =
       byToken.get(row.tokenId) ??
       {
@@ -704,9 +719,8 @@ export function buildPreviewCopyQuality(
     );
   }
 
-  const copyPathRows = readCopyPathAuditRows(options.db, options.sinceMs);
-  const detectedCounts = readActionSideCounts(copyPathRows, "DETECT");
-  const copiedCounts = readActionSideCounts(copyPathRows, "COPY");
+  const detectedCounts = readActionSideCounts(options.db, "DETECT", options.sinceMs);
+  const copiedCounts = readActionSideCounts(options.db, "COPY", options.sinceMs);
   const detected: PreviewDetectedCounts = {
     buy: detectedCounts.BUY ?? 0,
     sell: detectedCounts.SELL ?? 0,
@@ -718,7 +732,7 @@ export function buildPreviewCopyQuality(
     sell: copiedCounts.SELL ?? 0,
     totalTrades: (copiedCounts.BUY ?? 0) + (copiedCounts.SELL ?? 0),
   };
-  const { skips, deduped, sideSkips } = readSkipDiagnostics(copyPathRows);
+  const { skips, deduped, sideSkips } = readSkipDiagnostics(options.db, options.sinceMs);
   const { redeem, marketPnl } = readRedeemAndMarketPnl(
     options.db,
     options.hasTokenMarkets,
@@ -752,14 +766,14 @@ export function buildPreviewCopyQuality(
       deduped.buy,
       copied.buy,
       sideSkips.buy,
-      readTopUnclassifiedCopyGapTokens(copyPathRows, "BUY", limit)
+      readTopUnclassifiedCopyGapTokens(options.db, "BUY", options.sinceMs, limit)
     ),
     sell: copyGapSide(
       detected.sell,
       deduped.sell,
       copied.sell,
       sideSkips.sell,
-      readTopUnclassifiedCopyGapTokens(copyPathRows, "SELL", limit)
+      readTopUnclassifiedCopyGapTokens(options.db, "SELL", options.sinceMs, limit)
     ),
   };
   const notes: string[] = [];
