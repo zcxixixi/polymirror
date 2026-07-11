@@ -107,6 +107,23 @@ async function processPendingOrderRow(
       };
     }
     if (statusResult.kind === "not_found") {
+      if (!row.reconciliationOnly) {
+        store.commitPendingOrderProgress({
+          orderId: row.orderId,
+          matchedFilledShares: row.filledShares,
+          matchedFilledUsd: row.filledUsd,
+          matchedFeeUsd: row.feeUsd,
+          remove: false,
+          reconciliationOnly: true,
+          reconciliationStartedAt: row.reconciliationStartedAt ?? Date.now(),
+        });
+        return {
+          ...empty,
+          errors: [
+            `pending ${row.orderId.slice(0, 12)}: confirmation unavailable after order left open book`,
+          ],
+        };
+      }
       if (reconciliationExpired) {
         store.retirePendingReconciliation(
           row,

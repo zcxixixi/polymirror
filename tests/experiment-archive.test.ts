@@ -157,6 +157,33 @@ describe("experiment evidence archive", () => {
     snapshot.close();
   });
 
+  it("refuses to seal an active experiment with unresolved exchange state", async () => {
+    const dbPath = join(dir, "unresolved.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const experiment = store.startOrResumeExperiment({ accountId: "unresolved", candidateAddresses: [], config,
+      gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
+    store.upsertPendingOrder({ orderId: "pending-1", leaderId: "whale", tokenId: "token-a",
+      side: "BUY", price: 0.5, size: 2, filledShares: 0, tradeKey: "trade-a", reasoning: "test" });
+    store.close();
+
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId,
+      archiveDir: join(dir, "unresolved-archive") })).rejects.toThrow(/unresolved pending order/i);
+
+    const reopened = new StateStore(dbPath);
+    reopened.removePendingOrder("pending-1");
+    reopened.recordLiveOrderIntent({ tradeKeys: ["trade-b"], leaderId: "whale", tokenId: "token-b",
+      side: "BUY", price: 0.5, orderSize: 2, auditReason: "test" });
+    reopened.close();
+    await expect(archiveExperimentEvidence({ dbPath, experimentId: experiment.experimentId,
+      archiveDir: join(dir, "unresolved-intent-archive") })).rejects.toThrow(/unresolved live order intent/i);
+
+    const db = new Database(dbPath, { readonly: true });
+    expect(db.prepare("SELECT sealed_at AS sealedAt, archive_status AS status FROM experiments").get())
+      .toMatchObject({ sealedAt: null, status: "FAILED" });
+    db.close();
+  });
+
   it("freezes new observations for an existing raw event while PREPARING", async () => {
     const dbPath = join(dir, "freeze.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
     config.app.leaders[0]!.filters = { minPrice: 0.6 };

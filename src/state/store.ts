@@ -752,13 +752,21 @@ export class StateStore {
           throw new Error(`experiment rotation blocked by ${intents.count} unresolved live order intent(s)`);
         }
       }
-      const transitionState = this.captureExperimentState(
+      const newStartState = this.captureExperimentState(
         input.config.app.global.risk.startingCapitalUsd
       );
       if (active && !preparing) {
+        const previousConfig = JSON.parse(active.canonicalConfigJson) as {
+          app?: { global?: { risk?: { startingCapitalUsd?: number } } };
+        };
+        const previousInitial = previousConfig.app?.global?.risk?.startingCapitalUsd;
+        if (typeof previousInitial !== "number" || !Number.isFinite(previousInitial)) {
+          throw new Error("active experiment has invalid starting capital");
+        }
+        const oldEndState = this.captureExperimentState(previousInitial);
         this.db.prepare(
           "UPDATE experiments SET state = 'ENDED', ended_at = ?, end_state_json = ? WHERE experiment_id = ?"
-        ).run(now, normalizedPayloadJson(transitionState), active.experimentId);
+        ).run(now, normalizedPayloadJson(oldEndState), active.experimentId);
       }
       const experimentId = newExperimentId(input.accountId, hash);
       this.db.prepare(
@@ -781,7 +789,7 @@ export class StateStore {
         input.trustClass,
         preparing ? "PREPARED" : "ACTIVE",
         active?.experimentId ?? null,
-        normalizedPayloadJson(transitionState)
+        normalizedPayloadJson(newStartState)
       );
       return this.getExperiment(experimentId)!;
     })();
@@ -835,16 +843,26 @@ export class StateStore {
     this.db.transaction(() => {
       for (const experimentId of experimentIds) {
         const row = this.db.prepare(
-          `SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId,
-                  start_state_json AS startStateJson
+          `SELECT experiment_id AS experimentId, previous_experiment_id AS previousExperimentId
            FROM experiments WHERE experiment_id = ? AND state = 'PREPARED'`
-        ).get(experimentId) as { experimentId: string; previousExperimentId: string | null; startStateJson: string } | undefined;
+        ).get(experimentId) as { experimentId: string; previousExperimentId: string | null } | undefined;
         if (!row) continue;
         if (row.previousExperimentId) {
+          const previous = this.db.prepare(
+            "SELECT canonical_config_json AS configJson FROM experiments WHERE experiment_id = ?"
+          ).get(row.previousExperimentId) as { configJson: string } | undefined;
+          const previousConfig = JSON.parse(previous?.configJson ?? "null") as {
+            app?: { global?: { risk?: { startingCapitalUsd?: number } } };
+          } | null;
+          const previousInitial = previousConfig?.app?.global?.risk?.startingCapitalUsd;
+          if (typeof previousInitial !== "number" || !Number.isFinite(previousInitial)) {
+            throw new Error("previous experiment has invalid starting capital");
+          }
+          const oldEndState = this.captureExperimentState(previousInitial);
           this.db.prepare(
             `UPDATE experiments SET state = 'ENDED', ended_at = ?, end_state_json = ?
              WHERE experiment_id = ? AND state = 'ACTIVE'`
-          ).run(now, row.startStateJson, row.previousExperimentId);
+          ).run(now, normalizedPayloadJson(oldEndState), row.previousExperimentId);
         }
         this.db.prepare("UPDATE experiments SET state = 'ACTIVE' WHERE experiment_id = ? AND state = 'PREPARED'")
           .run(row.experimentId);

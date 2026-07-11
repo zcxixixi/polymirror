@@ -72,6 +72,22 @@ describe("experiment manifest", () => {
     expect(store.listExperiments()).toHaveLength(1);
     store.close();
   });
+
+  it("captures the old experiment end with its own starting capital", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pm-experiment-capital-")); dirs.push(dir);
+    const store = new StateStore(join(dir, "state.db"));
+    const config = previewRuntimeConfig(); config.app.global.risk.startingCapitalUsd = 200;
+    const input = { accountId: "candidate-a", candidateAddresses: [], config,
+      gitSha: "git-a", imageDigest: "image-a", lockfileHash: "lock-a", trustClass: "candidate" as const };
+    const first = store.startOrResumeExperiment(input, 100);
+    const changed = structuredClone(config); changed.app.global.risk.startingCapitalUsd = 100;
+
+    const second = store.startOrResumeExperiment({ ...input, config: changed }, 200);
+
+    expect(store.getExperiment(first.experimentId)?.endState?.cashUsd).toBe(200);
+    expect(second.startState.cashUsd).toBe(100);
+    store.close();
+  });
   it("captures checkout and lockfile provenance when build metadata is not injected", () => {
     const previousGitSha = process.env.POLYMIRROR_GIT_SHA;
     const previousImageDigest = process.env.POLYMIRROR_IMAGE_DIGEST;

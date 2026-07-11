@@ -323,7 +323,10 @@ describe("runCopyCycle pending reconciliation", () => {
     );
   });
 
-  it("retains pending state when an order disappears before confirmed trades arrive", async () => {
+  it("retires a missing order after a bounded confirmed-fill reconciliation window", async () => {
+    vi.useFakeTimers();
+    const now = Date.parse("2026-07-11T00:00:00.000Z");
+    vi.setSystemTime(now);
     store.upsertPendingOrder({
       orderId: "ord-live-disappeared",
       leaderId: "whale",
@@ -340,8 +343,16 @@ describe("runCopyCycle pending reconciliation", () => {
 
     const result = await runCopyCycle(liveConfig(false), store);
 
-    expect(store.listPendingOrders()).toHaveLength(1);
+    expect(store.listPendingOrders()).toHaveLength(0);
+    expect(store.listPendingOrders({ includeReconciliation: true })).toEqual([
+      expect.objectContaining({ reconciliationOnly: true, reconciliationStartedAt: now }),
+    ]);
     expect(result.errors.some((error) => error.includes("confirmation unavailable"))).toBe(true);
+
+    vi.setSystemTime(now + 25 * 60 * 60_000);
+    const retired = await runCopyCycle(liveConfig(false), store);
+    expect(retired.pendingFilled).toBe(0);
+    expect(store.listPendingOrders({ includeReconciliation: true })).toHaveLength(0);
   });
 
   it("moves cancelled GTC orders to reconciliation without losing delayed confirmed fills", async () => {

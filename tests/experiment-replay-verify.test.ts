@@ -577,6 +577,9 @@ describe("sealed deterministic replay", () => {
         auditReason: "Fixed $1.50; pending fill", preview: false }, remove: false,
       reconciliationOnly: true, staleSkipAudit: { leaderId: "whale", tokenId: "token", side: "BUY",
         size: 2, price: 0.5, preview: false } });
+    // The cancellation evidence remains append-only, but sealing waits until the
+    // bounded confirmed-fill reconciliation tombstone has been retired.
+    store.removePendingOrder("stale-order");
     store.close();
     const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
       archiveDir: join(dir, "partial-stale-cancel-archive") });

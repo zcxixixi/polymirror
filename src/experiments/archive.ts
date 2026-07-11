@@ -103,6 +103,10 @@ export async function archiveExperimentEvidence(options: {
     sourceDb.transaction(() => {
       const row = storedState(sourceDb, options.experimentId);
       if (row.sealedAt !== null || row.archiveStatus === "SEALED") throw new Error("Experiment is already sealed");
+      const pending = sourceDb.prepare("SELECT COUNT(*) AS count FROM pending_orders").get() as { count: number };
+      if (pending.count > 0) throw new Error(`cannot seal with ${pending.count} unresolved pending order(s)`);
+      const intents = sourceDb.prepare("SELECT COUNT(*) AS count FROM live_order_intents").get() as { count: number };
+      if (intents.count > 0) throw new Error(`cannot seal with ${intents.count} unresolved live order intent(s)`);
       originalEndStateJson = row.endStateJson;
       const config = JSON.parse(row.configJson) as { app?: { global?: { risk?: { startingCapitalUsd?: number } } } };
       const initial = config.app?.global?.risk?.startingCapitalUsd;

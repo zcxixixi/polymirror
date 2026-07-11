@@ -12,11 +12,11 @@
 
 - Active branch: `codex/polymirror-stability-checkpoint-20260710`.
 - Task 1 through Task 4 are implemented locally. The evidence schema is v9 and now preserves immutable archive attempts, rotation-time end state, observation occurrences, and deterministic replay inputs.
-- A fresh read-only review found four Important issues. Maker fills are fee-free, uncertain orders now fail closed unless an exact persisted CLOB order ID exists, experiment rotation is blocked by unresolved pending/intents, and failed archive publications can be retried without deleting attempt history. Re-review of these fixes remains required.
+- A fresh read-only review and targeted re-review are clean: all Critical/Important findings are closed. Maker fills are fee-free; uncertain orders fail closed unless an exact persisted CLOB order ID exists; missing orders enter a bounded 24h reconciliation tombstone; rotation and sealing reject unresolved pending/intents; rotation uses the old manifest's capital for old end state; failed archive publications can be retried without deleting attempt history.
 - The server continues its existing nine-account preview-only cohort (`b55`, `justdance/crypto_dance`, and `sports_candle`, each with conservative/standard/aggressive arms). This local branch has not been deployed over it, and no account/config/process was restarted during this checkpoint.
 - Candidate evidence was refreshed from current Polymarket leaderboard/activity data. Historical addresses remain watchlist-only. A new low-category-correlation politics watchlist entry, LinaBell (`0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8`), is not authorized for deployment.
 - Confirmed server snapshot: Docker healthy, `/health` OK, `previewMode=true`, kill switch off, `pendingOrders=0`, `walletDrifts=[]`, `lastError=null`; root filesystem is 49% used. Existing cohort quality still fails the funding gate.
-- Fresh local verification: `npm test` passed 69 files / 436 tests; `npm run lint`, `npm run build`, high-severity audit gate, and `git diff --check` passed. The dashboard retains its existing non-fatal chunk-size warning; dependency audit has no high/critical findings.
+- Fresh local verification: `npm test` passed 69 files / 438 tests; `npm run lint`, `npm run build`, high-severity audit gate, and `git diff --check` passed. The dashboard retains its existing non-fatal chunk-size warning; dependency audit has no high/critical findings.
 
 ## Global Constraints
 
@@ -155,7 +155,7 @@
 - [x] Document Candidate intake, common baseline, promotion, elimination, correlation, and two-week review rules.
 - [x] Generate the candidate config in a temporary remote path and validate it against the built image.
 - [x] Run full `npm test`, `npm run lint`, `npm run build`, and `git diff --check`.
-- [ ] Obtain an independent whole-branch review and resolve every Critical/Important finding.
+- [x] Obtain an independent whole-branch review and resolve every Critical/Important finding.
 - [x] Deploy the current cohort transactionally with exact config rollback, keeping root preview-only and live probe disabled by default.
 - [ ] Verify the new v9 per-experiment manifests only after a separately approved branch deployment; continue 60m/6h/24h/14d checks on the running cohort meanwhile.
 
