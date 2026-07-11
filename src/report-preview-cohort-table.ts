@@ -1,11 +1,8 @@
 #!/usr/bin/env node
 import Database from "better-sqlite3";
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -20,19 +17,10 @@ import {
   formatCohortQualityMarkdown,
   type CohortQualityTableOptions,
 } from "./sim/cohort-quality-table.js";
+import { resolveCohortTableAccounts } from "./sim/cohort-table-accounts.js";
 import { readPreviewAccountReport } from "./sim/preview-report.js";
 
 const RECENT_WINDOW_MS = 24 * 60 * 60_000;
-
-function discoverAccounts(dataDir: string): string[] {
-  if (!existsSync(dataDir)) return [];
-  return readdirSync(dataDir)
-    .filter((accountId) => {
-      const dir = join(dataDir, accountId);
-      return statSync(dir).isDirectory() && existsSync(join(dir, "preview.db"));
-    })
-    .sort();
-}
 
 function loadConfig(path: string): NormalizedConfigDocument | undefined {
   try {
@@ -107,7 +95,7 @@ const dataDir = process.env.REPORT_DATA_DIR ?? "data/accounts";
 const outDir = process.env.REPORT_OUT_DIR ?? "reports/preview-live";
 const config = loadConfig(process.env.CONFIG_PATH ?? "config.yaml");
 const fallbackCapital = Number(process.env.REPORT_STARTING_CAPITAL_USD ?? 200);
-const accountIds = discoverAccounts(dataDir);
+const accountIds = resolveCohortTableAccounts(dataDir, process.env.REPORT_ACCOUNTS);
 const labels: Record<string, string> = {};
 const controlStates: Record<string, string> = {};
 const settlementFailures: Record<string, number> = {};

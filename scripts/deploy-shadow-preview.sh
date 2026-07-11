@@ -270,7 +270,8 @@ fi
 
 # Validate the exact mounted document through the built application. This also
 # proves that the generated YAML enables exactly the Candidates approved above.
-docker run --rm \
+# The same validated 12-account roster is the collector's fail-closed scope.
+SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
   --env-file "$POLYMIRROR_ENV_FILE" \
   -v "$SHADOW_CONFIG:/app/config.yaml:ro" \
   -v "$SHADOW_APPROVED_COHORT:/app/approved-cohort.json:ro" \
@@ -278,6 +279,7 @@ docker run --rm \
   node --input-type=module -e '
     const { readFileSync } = await import("node:fs");
     const { loadMultiAccountConfig } = await import("./dist/config/load.js");
+    const { serializeRequiredReportAccounts } = await import("./dist/sim/cohort-table-accounts.js");
     const loaded = loadMultiAccountConfig("/app/config.yaml");
     const approved = JSON.parse(readFileSync("/app/approved-cohort.json", "utf8"));
     const addresses = new Map(approved.candidates.map((row) => [row.id, {
@@ -335,8 +337,13 @@ docker run --rm \
       throw new Error("unexpected account in quality12 config");
     }
     if (copyEnabled === 0) throw new Error("no approved Candidate is copy-enabled");
-    console.log(`validated ${loaded.accounts.length} preview accounts; ${copyEnabled} copy-enabled arms`);
-  '
+    process.stdout.write(serializeRequiredReportAccounts(
+      loaded.accounts.map((account) => account.id),
+      12
+    ));
+  ')"
+export SHADOW_REPORT_ACCOUNTS
+echo "validated 12 preview accounts for collector scope"
 
 docker compose -p "$project" -f "$compose_file" config >/dev/null
 existing_running="$(docker compose -p "$project" -f "$compose_file" \

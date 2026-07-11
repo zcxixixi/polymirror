@@ -69,6 +69,7 @@ services:
       - CONFIG_PATH=/app/config.yaml
       - REPORT_DATA_DIR=/app/data/accounts
       - REPORT_OUT_DIR=/app/reports/preview-live
+      - REPORT_ACCOUNTS=${SHADOW_REPORT_ACCOUNTS:?SHADOW_REPORT_ACCOUNTS is required}
       - REPORT_STARTING_CAPITAL_USD=200
       - REPORT_WINDOW_MINUTES=1440
       - REPORT_COLLECT_INTERVAL_MINUTES=60

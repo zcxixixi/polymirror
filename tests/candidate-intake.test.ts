@@ -7,11 +7,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  ActivityType,
+  type Activity as SdkActivity,
+  type Page,
+} from "@polymarket/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CandidateCohortInput } from "../src/experiments/candidate-cohort.js";
 import {
+  fetchFilteredCandidateActivity,
   persistCandidateIntakeRefresh,
   refreshCandidateIntake,
+  type CandidateActivityRequest,
   type CandidateIntakeFetcher,
 } from "../src/experiments/candidate-intake.js";
 
@@ -99,6 +106,205 @@ function sha256(value: string): string {
 }
 
 describe("refreshCandidateIntake", () => {
+  it("archives every filtered SDK page, then deduplicates and sorts derived rows", async () => {
+    const address = oneCandidateSeed().candidates[0]!.address;
+    const trade = {
+      wallet: address,
+      type: ActivityType.TRADE,
+      side: "BUY",
+      timestamp: Math.floor((CAPTURED_MS - 60_000) / 1000),
+      transactionHash: "0xtrade",
+      conditionId: "condition-trade",
+      amount: 2,
+    } as SdkActivity;
+    const duplicateTrade = {
+      amount: 2,
+      conditionId: "condition-trade",
+      transactionHash: "0xtrade",
+      timestamp: trade.timestamp,
+      side: "BUY",
+      type: ActivityType.TRADE,
+      wallet: address,
+    } as SdkActivity;
+    const olderTrade = {
+      ...trade,
+      timestamp: Math.floor((CAPTURED_MS - 120_000) / 1000),
+      transactionHash: "0xolder",
+    } as SdkActivity;
+    const redeem = {
+      wallet: address,
+      type: ActivityType.REDEEM,
+      timestamp: Math.floor((CAPTURED_MS - 30_000) / 1000),
+      transactionHash: "0xredeem",
+      conditionId: "condition-redeem",
+    } as SdkActivity;
+    const pageSets = new Map<string, Array<Page<SdkActivity[]>>>([
+      [ActivityType.TRADE, [
+        {
+          items: [duplicateTrade],
+          hasMore: true,
+          nextCursor: "trade-page-2" as never,
+          totalCount: 3,
+        },
+        { items: [olderTrade, trade], hasMore: false, totalCount: 3 },
+      ]],
+      [ActivityType.REDEEM, [
+        { items: [redeem], hasMore: false, totalCount: 1 },
+      ]],
+    ]);
+    const listActivity = vi.fn((request: CandidateActivityRequest) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const page of pageSets.get(String(request.type?.[0])) ?? []) yield page;
+      },
+    }));
+    const client = { listActivity };
+    const window = {
+      capturedAt: CAPTURED_AT,
+      sinceMs: CAPTURED_MS - 24 * 60 * 60 * 1000,
+      untilMs: CAPTURED_MS,
+    };
+
+    const result = await fetchFilteredCandidateActivity(client, address, window);
+
+    expect(listActivity).toHaveBeenCalledTimes(2);
+    expect(listActivity.mock.calls.map(([request]) => request.type)).toEqual([
+      [ActivityType.TRADE],
+      [ActivityType.REDEEM],
+    ]);
+    for (const [request] of listActivity.mock.calls) {
+      expect(request.type).toHaveLength(1);
+      expect(request).toMatchObject({
+        user: address,
+        pageSize: 500,
+        start: Math.floor(window.sinceMs / 1000),
+        end: Math.ceil(window.untilMs / 1000),
+        sortBy: "TIMESTAMP",
+        sortDirection: "DESC",
+      });
+    }
+    expect(result.requests.map(({ activityType }) => activityType)).toEqual([
+      ActivityType.TRADE,
+      ActivityType.REDEEM,
+    ]);
+    expect(result.requests[0]?.pages).toHaveLength(2);
+    expect(result.requests[0]?.pages[0]).toEqual({
+      items: [duplicateTrade],
+      hasMore: true,
+      nextCursor: "trade-page-2",
+      totalCount: 3,
+    });
+    expect(result.items.map((row) => row.transactionHash)).toEqual([
+      "0xredeem",
+      "0xtrade",
+      "0xolder",
+    ]);
+  });
+
+  it("uses all rows beyond the first 500 and preserves official REDEEM conditions", async () => {
+    const address = oneCandidateSeed().candidates[0]!.address;
+    const trades = Array.from({ length: 501 }, (_, index) => ({
+      wallet: address,
+      type: ActivityType.TRADE,
+      side: index < 2 ? "SELL" : "BUY",
+      timestamp: Math.floor((CAPTURED_MS - (index + 1) * 1_000) / 1000),
+      transactionHash: `0xtrade${index}`,
+      conditionId: `condition-${index % 5}`,
+      amount: "2",
+    } as SdkActivity));
+    const redeem = {
+      wallet: address,
+      type: ActivityType.REDEEM,
+      timestamp: Math.floor((CAPTURED_MS - 500) / 1000),
+      transactionHash: "0xredeem",
+      conditionId: "redeem-only-condition",
+      amount: "3",
+    } as SdkActivity;
+    const listActivity = vi.fn((request: CandidateActivityRequest) => ({
+      async *[Symbol.asyncIterator]() {
+        if (request.type?.[0] === ActivityType.TRADE) {
+          yield {
+            items: trades.slice(0, 500),
+            hasMore: true,
+            nextCursor: "trade-page-2" as never,
+            totalCount: 501,
+          };
+          yield { items: trades.slice(500), hasMore: false, totalCount: 501 };
+          return;
+        }
+        yield { items: [redeem], hasMore: false, totalCount: 1 };
+      },
+    }));
+    const window = {
+      capturedAt: CAPTURED_AT,
+      sinceMs: CAPTURED_MS - 24 * 60 * 60 * 1000,
+      untilMs: CAPTURED_MS,
+    };
+    const rawActivity = await fetchFilteredCandidateActivity(
+      { listActivity },
+      address,
+      window
+    );
+    const result = await refreshCandidateIntake(
+      oneCandidateSeed(),
+      {
+        async fetchActivity() {
+          return rawActivity;
+        },
+        async fetchLeaderboard(candidateAddress) {
+          return { items: [{ wallet: candidateAddress, pnl: 123 }] };
+        },
+      },
+      { capturedAt: CAPTURED_AT }
+    );
+
+    expect(rawActivity.requests[0]?.pages.map((page) => page.items.length)).toEqual([500, 1]);
+    expect(rawActivity.items).toHaveLength(502);
+    expect(result.artifacts[0]?.evidence.metrics).toEqual({
+      trades24h: 501,
+      sellOrRedeem24h: 3,
+      distinctConditions24h: 6,
+      medianTicketUsd: 2,
+      p90TicketUsd: 2,
+    });
+    expect(result.artifacts[0]?.evidence.approved).toBe(true);
+  });
+
+  it("fails closed and seals the error when a filtered SDK paginator rejects", async () => {
+    const address = oneCandidateSeed().candidates[0]!.address;
+    const client = {
+      listActivity(request: CandidateActivityRequest) {
+        return {
+          async *[Symbol.asyncIterator]() {
+            if (request.type?.[0] === ActivityType.TRADE) {
+              throw new TypeError("Expected activity.outcomeIndex to be present");
+            }
+            yield { items: [], hasMore: false };
+          },
+        };
+      },
+    };
+    const result = await refreshCandidateIntake(
+      oneCandidateSeed(),
+      {
+        fetchActivity(candidateAddress, window) {
+          return fetchFilteredCandidateActivity(client, candidateAddress, window);
+        },
+        async fetchLeaderboard(candidateAddress) {
+          return { items: [{ wallet: candidateAddress, pnl: 123 }] };
+        },
+      },
+      { capturedAt: CAPTURED_AT }
+    );
+
+    expect(result.artifacts[0]?.evidence.rawResponses.activity).toBeNull();
+    expect(result.artifacts[0]?.evidence.apiErrors).toEqual([
+      "activity: Expected activity.outcomeIndex to be present",
+    ]);
+    expect(result.artifacts[0]?.evidence.gates.apiNoErrors).toBe(false);
+    expect(result.artifacts[0]?.evidence.approved).toBe(false);
+    expect(result.approvedCohort.candidates[0]?.freshIntakePassed).toBe(false);
+  });
+
   it("approves the exact quality12 roster only when every hard gate passes", async () => {
     const seed = quality12Seed();
     const original = JSON.stringify(seed);

@@ -10,12 +10,20 @@ import {
 } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import {
+  ActivityType,
+  type Activity as SdkActivity,
+  type Page,
+  type PublicClient,
+} from "@polymarket/client";
+import {
   candidateCohortSchema,
   type CandidateCohortInput,
 } from "./candidate-cohort.js";
 import { normalizedPayloadJson, payloadSha256 } from "./provenance.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+export type CandidateActivityRequest = Parameters<PublicClient["listActivity"]>[0];
 
 export const candidateIntakeThresholds = Object.freeze({
   minTrades24h: 20,
@@ -34,6 +42,81 @@ export interface CandidateIntakeWindow {
 export interface CandidateIntakeFetcher {
   fetchActivity(address: string, window: CandidateIntakeWindow): Promise<unknown>;
   fetchLeaderboard(address: string, window: CandidateIntakeWindow): Promise<unknown>;
+}
+
+export interface FilteredCandidateActivityResponse {
+  source: "@polymarket/client:listActivity";
+  window: { start: number; end: number };
+  requests: Array<{
+    activityType: ActivityType.TRADE | ActivityType.REDEEM;
+    request: CandidateActivityRequest;
+    pages: Array<{
+      items: SdkActivity[];
+      hasMore: boolean;
+      nextCursor: Page<SdkActivity[]>["nextCursor"] | null;
+      totalCount: number | null;
+    }>;
+  }>;
+  items: SdkActivity[];
+}
+
+export interface CandidateActivityClient {
+  listActivity(request: CandidateActivityRequest): AsyncIterable<Page<SdkActivity[]>>;
+}
+
+function mergeCandidateActivityRows(groups: readonly (readonly SdkActivity[])[]): SdkActivity[] {
+  const unique = new Map<string, { canonical: string; row: SdkActivity }>();
+  for (const row of groups.flat()) {
+    const canonical = normalizedPayloadJson(row);
+    if (!unique.has(canonical)) unique.set(canonical, { canonical, row });
+  }
+  return [...unique.values()]
+    .sort((a, b) => (
+      Number(b.row.timestamp) - Number(a.row.timestamp)
+      || String(a.row.type).localeCompare(String(b.row.type))
+      || a.canonical.localeCompare(b.canonical)
+    ))
+    .map(({ row }) => row);
+}
+
+export async function fetchFilteredCandidateActivity(
+  client: CandidateActivityClient,
+  address: string,
+  window: CandidateIntakeWindow
+): Promise<FilteredCandidateActivityResponse> {
+  const requestBase = {
+    user: address,
+    pageSize: 500,
+    start: Math.floor(window.sinceMs / 1000),
+    end: Math.ceil(window.untilMs / 1000),
+    sortBy: "TIMESTAMP" as const,
+    sortDirection: "DESC" as const,
+  };
+  const requests: FilteredCandidateActivityResponse["requests"] = [];
+  const groups: SdkActivity[][] = [];
+  for (const activityType of [ActivityType.TRADE, ActivityType.REDEEM] as const) {
+    const request: CandidateActivityRequest = { ...requestBase, type: [activityType] };
+    const pages: FilteredCandidateActivityResponse["requests"][number]["pages"] = [];
+    for await (const page of client.listActivity(request)) {
+      pages.push({
+        items: page.items,
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor ?? null,
+        totalCount: page.totalCount ?? null,
+      });
+    }
+    requests.push({ activityType, request, pages });
+    groups.push(pages.flatMap((page) => page.items));
+  }
+  return {
+    source: "@polymarket/client:listActivity",
+    window: {
+      start: requestBase.start,
+      end: requestBase.end,
+    },
+    requests,
+    items: mergeCandidateActivityRows(groups),
+  };
 }
 
 export interface CandidateIntakeMetrics {

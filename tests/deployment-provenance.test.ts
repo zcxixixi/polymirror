@@ -2,8 +2,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readRuntimeProvenance } from "../src/experiments/provenance.js";
+import { serializeRequiredReportAccounts } from "../src/sim/cohort-table-accounts.js";
 
 describe("Candidate deployment provenance", () => {
+  it("serializes exactly 12 shadow report accounts and rejects an incomplete roster", () => {
+    const accountIds = Array.from({ length: 12 }, (_, index) => `quality12-${index}`);
+
+    expect(serializeRequiredReportAccounts(accountIds, 12)).toBe(accountIds.join(","));
+    expect(() => serializeRequiredReportAccounts(accountIds.slice(0, 11), 12)).toThrow(
+      /requires exactly 12 unique account ids/
+    );
+  });
+
   it("rejects malformed injected Git SHAs and image digests", () => {
     const oldGitSha = process.env.POLYMIRROR_GIT_SHA;
     const oldImageDigest = process.env.POLYMIRROR_IMAGE_DIGEST;
@@ -127,6 +137,9 @@ describe("Candidate deployment provenance", () => {
     expect(compose).toContain("polymirror-shadow-collector:");
     expect(compose).toContain("REPORT_COLLECT_INTERVAL_MINUTES=60");
     expect(compose).toContain("REPORT_WINDOW_MINUTES=1440");
+    expect(compose).toContain(
+      "REPORT_ACCOUNTS=${SHADOW_REPORT_ACCOUNTS:?SHADOW_REPORT_ACCOUNTS is required}"
+    );
     expect(compose).toContain("/app/data:ro");
     expect(compose).toMatch(/depends_on:\s+polymirror-shadow:\s+condition: service_healthy/s);
     expect(compose).toMatch(/polymirror-shadow:[\s\S]*healthcheck:[\s\S]*lastPollAt/);
@@ -172,6 +185,8 @@ describe("Candidate deployment provenance", () => {
     expect(deploy).toContain("0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8");
     expect(deploy).toContain("0x714a685b5454ea4d52979563bbafa77b8168ab2f");
     expect(deploy).toContain("loaded.accounts.length !== 12");
+    expect(deploy).toContain("serializeRequiredReportAccounts");
+    expect(deploy).toContain("export SHADOW_REPORT_ACCOUNTS");
     expect(deploy).toContain("no approved Candidate is copy-enabled");
     expect(deploy).toContain("org.opencontainers.image.revision");
     expect(deploy).toContain("image revision does not match HEAD");

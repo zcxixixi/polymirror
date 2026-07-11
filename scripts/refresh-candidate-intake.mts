@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  fetchFilteredCandidateActivity,
   persistCandidateIntakeRefresh,
   refreshCandidateIntake,
   type CandidateIntakeFetcher,
-  type CandidateIntakeWindow,
 } from "../src/experiments/candidate-intake.js";
 import { getPublicClient } from "../src/sdk/public-client.js";
 
@@ -25,32 +25,9 @@ const seed: unknown = JSON.parse(readFileSync(seedPath, "utf8"));
 const capturedAt = new Date().toISOString();
 const client = await getPublicClient();
 
-function sdkWindow(window: CandidateIntakeWindow): { start: number; end: number } {
-  return {
-    start: Math.floor(window.sinceMs / 1000),
-    end: Math.ceil(window.untilMs / 1000),
-  };
-}
-
 const fetcher: CandidateIntakeFetcher = {
   async fetchActivity(address, window) {
-    const request = {
-      user: address,
-      pageSize: 500,
-      ...sdkWindow(window),
-      sortBy: "TIMESTAMP" as const,
-      sortDirection: "DESC" as const,
-    };
-    const pages = [];
-    for await (const page of client.listActivity(request)) {
-      pages.push({
-        items: page.items,
-        hasMore: page.hasMore,
-        nextCursor: page.nextCursor ?? null,
-        totalCount: page.totalCount ?? null,
-      });
-    }
-    return { source: "@polymarket/client:listActivity", request, pages };
+    return fetchFilteredCandidateActivity(client, address, window);
   },
 
   async fetchLeaderboard(address) {
