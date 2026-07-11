@@ -64,6 +64,22 @@ export interface AccountRuntime {
   health: AccountHealthSlice;
 }
 
+export function sampleAccountDbFootprint(
+  health: AccountHealthSlice,
+  dbSizeBytes: number,
+  sampledAt = Date.now()
+): void {
+  const dbSizeSamples = health.dbSizeSamples ?? [];
+  health.dbSizeBytes = dbSizeBytes;
+  health.dbGrowthBytesPerHour = recordRollingByteRate(
+    dbSizeSamples,
+    { bytes: dbSizeBytes, sampledAt },
+    "increase"
+  );
+  health.dbSizeSampleAt = sampledAt;
+  health.dbSizeSamples = dbSizeSamples;
+}
+
 export function updateAccountHealthAfterPoll(
   health: AccountHealthSlice,
   result: CopyCycleResult,
@@ -93,7 +109,6 @@ export function updateAccountHealthAfterPoll(
     dbSizeBytes: health.dbSizeBytes ?? 0,
   };
   const sampledAt = resolvedDiagnostics.sampledAt ?? Date.now();
-  const dbSizeSamples = health.dbSizeSamples ?? [];
   health.lastPollAt = Date.now();
   health.lastPollResult = result;
   health.killSwitchActive = killSwitchActive;
@@ -107,12 +122,5 @@ export function updateAccountHealthAfterPoll(
   health.liquidationEquityUsd = resolvedDiagnostics.liquidationEquityUsd;
   health.liquidationDrawdownPct = resolvedDiagnostics.liquidationDrawdownPct;
   health.quoteCoveragePct = resolvedDiagnostics.quoteCoveragePct;
-  health.dbSizeBytes = resolvedDiagnostics.dbSizeBytes;
-  health.dbGrowthBytesPerHour = recordRollingByteRate(
-    dbSizeSamples,
-    { bytes: resolvedDiagnostics.dbSizeBytes, sampledAt },
-    "increase"
-  );
-  health.dbSizeSampleAt = sampledAt;
-  health.dbSizeSamples = dbSizeSamples;
+  sampleAccountDbFootprint(health, resolvedDiagnostics.dbSizeBytes, sampledAt);
 }

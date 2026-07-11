@@ -23,7 +23,7 @@ import {
   isAuditEventsPath,
   parseAuditEventsRoute,
 } from "./events.js";
-import { healthSnapshot } from "../notify/health.js";
+import { hasAbnormalExperimentControl, healthSnapshot } from "../notify/health.js";
 import { logInfo, logError } from "../notify/logger.js";
 
 const MIME: Record<string, string> = {
@@ -95,7 +95,9 @@ function serveStatic(pathname: string, res: ServerResponse): boolean {
 }
 
 function handleHealth(res: ServerResponse): void {
-  const degraded = healthSnapshot.killSwitchActive
+  const unexpectedKillSwitchActive = hasAbnormalExperimentControl(healthSnapshot);
+  const degraded = unexpectedKillSwitchActive
+    || healthSnapshot.capacityStatus === "SETTLE_ONLY"
     || healthSnapshot.settlementFailures > 0
     || healthSnapshot.closedMarketOpenPositions > 0
     || healthSnapshot.pendingOrders > 0
@@ -106,6 +108,7 @@ function handleHealth(res: ServerResponse): void {
     uptimeSec: Math.floor((Date.now() - healthSnapshot.startedAt) / 1000),
     previewMode: healthSnapshot.previewMode,
     killSwitchActive: healthSnapshot.killSwitchActive,
+    unexpectedKillSwitchActive,
     lastPollAt: healthSnapshot.lastPollAt,
     lastPoll: healthSnapshot.lastPollResult,
     enabledLeaders: healthSnapshot.enabledLeaders,
@@ -116,6 +119,11 @@ function handleHealth(res: ServerResponse): void {
     closedMarketOpenPositions: healthSnapshot.closedMarketOpenPositions,
     dbSizeBytes: healthSnapshot.dbSizeBytes,
     dbGrowthBytesPerHour: healthSnapshot.dbGrowthBytesPerHour,
+    filesystemAvailableBytes: healthSnapshot.filesystemAvailableBytes,
+    filesystemDeclineBytesPerHour: healthSnapshot.filesystemDeclineBytesPerHour,
+    capacityProjectedDays: healthSnapshot.capacityProjectedDays,
+    capacityStatus: healthSnapshot.capacityStatus,
+    capacityReasons: healthSnapshot.capacityReasons,
     enabledAccountCount: healthSnapshot.enabledAccountCount,
     polledAccountCount: healthSnapshot.polledAccountCount,
     experiments: healthSnapshot.experiments,

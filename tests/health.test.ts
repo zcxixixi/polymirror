@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { healthSnapshot, syncAggregateHealth } from "../src/notify/health.js";
+import {
+  hasAbnormalExperimentControl,
+  healthSnapshot,
+  syncAggregateHealth,
+} from "../src/notify/health.js";
 
 function health(
   enabledLeaders: string[],
@@ -106,5 +110,31 @@ describe("syncAggregateHealth", () => {
     expect(healthSnapshot.lastError).toBe("leader poll failed");
     expect(healthSnapshot.enabledAccountCount).toBe(2);
     expect(healthSnapshot.polledAccountCount).toBe(2);
+  });
+
+  it("distinguishes planned legacy settlement from abnormal sticky stops", () => {
+    syncAggregateHealth([{
+      id: "legacy",
+      enabled: true,
+      health: health([], {
+        killSwitchActive: true,
+        experimentState: "SETTLE_ONLY",
+        experimentReason: "MANUAL_LEGACY_COHORT_SETTLE_ONLY",
+      }),
+    }]);
+    expect(healthSnapshot.killSwitchActive).toBe(true);
+    expect(healthSnapshot.experiments[0]).toMatchObject({ killSwitchActive: true });
+    expect(hasAbnormalExperimentControl(healthSnapshot)).toBe(false);
+
+    syncAggregateHealth([{
+      id: "risk-stopped",
+      enabled: true,
+      health: health([], {
+        killSwitchActive: true,
+        experimentState: "SETTLE_ONLY",
+        experimentReason: "RISK_MAX_LIQUIDATION_DRAWDOWN",
+      }),
+    }]);
+    expect(hasAbnormalExperimentControl(healthSnapshot)).toBe(true);
   });
 });

@@ -47,6 +47,10 @@ import {
 import { assertDashboardAuthForBind } from "../api/auth.js";
 import { syncApiServer, type ApiServerState } from "../api/server.js";
 import { AccountManager } from "../accounts/manager.js";
+import {
+  sampleAccountDbFootprint,
+  type AccountRuntime,
+} from "../accounts/runtime.js";
 import { LeaderRegistry } from "../leaders/registry.js";
 import { emptyLiveProbeFundedReason } from "../live/protected-probe.js";
 import { loadTelegramConfig, TelegramNotifier } from "../notify/telegram.js";
@@ -55,10 +59,27 @@ import { evaluateRuntimeSafety } from "./runtime-safety.js";
 import {
   assessCapacity,
   readFilesystemCapacity,
+  readSqliteFootprintBytes,
   recordRollingByteRate,
   selectProjectedGrowthRate,
   type RollingByteSample,
 } from "./capacity-guard.js";
+
+export async function runWithAccountDbGrowthSampling<T>(
+  account: Pick<AccountRuntime, "dbPath" | "health">,
+  run: () => Promise<T>,
+  sampledAt: () => number = Date.now
+): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    sampleAccountDbFootprint(
+      account.health,
+      readSqliteFootprintBytes(account.dbPath),
+      sampledAt()
+    );
+  }
+}
 
 export interface CopyCycleResult {
   fetched: number;
@@ -1548,8 +1569,18 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
           availableBytes,
           growthBytesPerHour,
         });
+        healthSnapshot.filesystemAvailableBytes = availableBytes;
+        healthSnapshot.filesystemDeclineBytesPerHour = filesystemDeclineBytesPerHour;
+        healthSnapshot.capacityProjectedDays = capacity.projectedDays;
+        healthSnapshot.capacityStatus = capacity.status;
+        healthSnapshot.capacityReasons = [...capacity.reasons];
         if (capacity.status !== lastCapacityStatus) {
-          logInfo("Capacity gate updated", capacity);
+          logInfo("Capacity gate updated", {
+            ...capacity,
+            cohortDbGrowthBytesPerHour: growthBytesPerHour,
+            filesystemAvailableBytes: availableBytes,
+            filesystemDeclineBytesPerHour,
+          });
           lastCapacityStatus = capacity.status;
         }
         for (const account of enabledAccounts) {
@@ -1591,9 +1622,12 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
       for (const account of manager.enabled()) {
         const tag = `[${account.id}]`;
         try {
-          const result = await runCopyCycle(account.config, account.store, telegram, {
-            pollActivityCache,
-          });
+          const result = await runWithAccountDbGrowthSampling(
+            account,
+            () => runCopyCycle(account.config, account.store, telegram, {
+              pollActivityCache,
+            })
+          );
           manager.updateHealthAfterPoll(account.id, result, result.walletDrifts);
           if (result.fetched > 0 || result.copied > 0 || result.errors.length > 0) {
             logInfo(`${tag} Poll complete`, result);

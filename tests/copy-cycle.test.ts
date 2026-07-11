@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { StateStore } from "../src/state/store.js";
-import { runCopyCycle } from "../src/engine/copy-cycle.js";
+import {
+  runCopyCycle,
+  runWithAccountDbGrowthSampling,
+} from "../src/engine/copy-cycle.js";
 import { pollLeaders } from "../src/monitor/poll.js";
 import { tradeEventKey, type Activity } from "../src/monitor/data-api.js";
 import { fetchResolvedMarketOutcome } from "../src/monitor/market-resolve.js";
@@ -9,12 +12,14 @@ import {
   fetchExecutableOrderBookSnapshot,
 } from "../src/executor/orderbook.js";
 import { previewRuntimeConfig, testActivity, testLeader } from "./helpers/fixtures.js";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { archiveExperimentEvidence } from "../src/experiments/archive.js";
 import { verifyExperimentReplay } from "../src/experiments/replay-verify.js";
+import { newAccountHealth, sampleAccountDbFootprint } from "../src/accounts/runtime.js";
+import { readSqliteFootprintBytes } from "../src/engine/capacity-guard.js";
 
 vi.mock("../src/monitor/poll.js", () => ({
   pollLeaders: vi.fn(),
@@ -55,6 +60,27 @@ beforeEach(() => {
 afterEach(() => {
   store.close();
   rmSync(dir, { recursive: true, force: true });
+});
+
+describe("runWithAccountDbGrowthSampling", () => {
+  it("counts DB and WAL growth even when the account cycle throws", async () => {
+    const dbPath = join(dir, "failed-cycle.sqlite");
+    writeFileSync(dbPath, Buffer.alloc(11));
+    const accountHealth = newAccountHealth(previewRuntimeConfig());
+    sampleAccountDbFootprint(accountHealth, readSqliteFootprintBytes(dbPath), 0);
+
+    await expect(runWithAccountDbGrowthSampling(
+      { dbPath, health: accountHealth },
+      async () => {
+        writeFileSync(`${dbPath}-wal`, Buffer.alloc(13));
+        throw new Error("cycle failed after WAL write");
+      },
+      () => 15 * 60_000
+    )).rejects.toThrow("cycle failed after WAL write");
+
+    expect(accountHealth.dbSizeBytes).toBe(24);
+    expect(accountHealth.dbGrowthBytesPerHour).toBe(52);
+  });
 });
 
 describe("runCopyCycle", () => {

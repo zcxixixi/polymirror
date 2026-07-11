@@ -195,8 +195,9 @@ describe("recordRollingByteRate", () => {
 });
 
 describe("selectProjectedGrowthRate", () => {
-  it("uses the larger of aggregate SQLite growth and filesystem free-space decline", () => {
+  it("projects runway from aggregate cohort SQLite growth only", () => {
     expect(selectProjectedGrowthRate([100, 200, null], 250)).toBe(300);
-    expect(selectProjectedGrowthRate([100, 0, null], 250)).toBe(250);
+    expect(selectProjectedGrowthRate([100, 0, null], 250)).toBe(100);
+    expect(selectProjectedGrowthRate([100, 0, null], 100 * GiB)).toBe(100);
   });
 });

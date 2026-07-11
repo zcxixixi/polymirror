@@ -142,5 +142,8 @@ export function selectProjectedGrowthRate(
   ) {
     throw new RangeError("filesystem decline rate must be a finite non-negative number");
   }
-  return Math.max(sqliteGrowthBytesPerHour, filesystemDeclineBytesPerHour ?? 0);
+  // Runway is a cohort-data gate: image pulls, backups, and other host writes
+  // must not make a healthy SQLite cohort look as if it will fill the disk.
+  // The whole-filesystem decline remains a separately exposed diagnostic.
+  return sqliteGrowthBytesPerHour;
 }

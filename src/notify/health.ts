@@ -1,4 +1,5 @@
 import type { CopyCycleResult } from "../engine/copy-cycle.js";
+import type { CapacityReason, CapacityStatus } from "../engine/capacity-guard.js";
 import type { ExperimentCopyState } from "../state/store.js";
 
 export interface HealthSnapshot {
@@ -15,12 +16,18 @@ export interface HealthSnapshot {
   closedMarketOpenPositions: number;
   dbSizeBytes: number;
   dbGrowthBytesPerHour: number;
+  filesystemAvailableBytes: number | null;
+  filesystemDeclineBytesPerHour: number | null;
+  capacityProjectedDays: number | null;
+  capacityStatus: CapacityStatus | null;
+  capacityReasons: CapacityReason[];
   enabledAccountCount: number;
   polledAccountCount: number;
   experiments: Array<{
     accountId: string;
     state: ExperimentCopyState;
     reason: string | null;
+    killSwitchActive: boolean;
     liquidationEquityUsd: number | null;
     liquidationDrawdownPct: number | null;
     quoteCoveragePct: number | null;
@@ -42,6 +49,11 @@ export const healthSnapshot: HealthSnapshot = {
   closedMarketOpenPositions: 0,
   dbSizeBytes: 0,
   dbGrowthBytesPerHour: 0,
+  filesystemAvailableBytes: null,
+  filesystemDeclineBytesPerHour: null,
+  capacityProjectedDays: null,
+  capacityStatus: null,
+  capacityReasons: [],
   enabledAccountCount: 0,
   polledAccountCount: 0,
   experiments: [],
@@ -105,6 +117,7 @@ export function syncAggregateHealth(
     accountId: account.id ?? "unknown",
     state: account.health.experimentState ?? "ACTIVE",
     reason: account.health.experimentReason ?? null,
+    killSwitchActive: account.health.killSwitchActive,
     liquidationEquityUsd: account.health.liquidationEquityUsd ?? null,
     liquidationDrawdownPct: account.health.liquidationDrawdownPct ?? null,
     quoteCoveragePct: account.health.quoteCoveragePct ?? null,
@@ -121,6 +134,25 @@ export function syncAggregateHealth(
     healthSnapshot.lastPollAt = latest.health.lastPollAt;
     healthSnapshot.lastPollResult = latest.health.lastPollResult;
   }
+}
+
+const EXPECTED_SETTLE_ONLY_REASON = "MANUAL_LEGACY_COHORT_SETTLE_ONLY";
+
+/** True only for an unexpected sticky stop; planned legacy settlement is healthy operation. */
+export function hasAbnormalExperimentControl(snapshot: HealthSnapshot): boolean {
+  let expectedKillSeen = false;
+  for (const experiment of snapshot.experiments) {
+    const expectedSettleOnly = experiment.state === "SETTLE_ONLY"
+      && experiment.reason === EXPECTED_SETTLE_ONLY_REASON;
+    if (expectedSettleOnly) {
+      if (experiment.killSwitchActive) expectedKillSeen = true;
+      continue;
+    }
+    if (experiment.state !== "ACTIVE" || experiment.killSwitchActive === true) return true;
+  }
+
+  if (!snapshot.killSwitchActive) return false;
+  return !expectedKillSeen;
 }
 
 /** @deprecated use AccountManager.updateHealthAfterPoll */

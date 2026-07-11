@@ -110,6 +110,11 @@ function resetHealthSnapshot(): void {
   healthSnapshot.closedMarketOpenPositions = 0;
   healthSnapshot.dbSizeBytes = 0;
   healthSnapshot.dbGrowthBytesPerHour = 0;
+  healthSnapshot.filesystemAvailableBytes = null;
+  healthSnapshot.filesystemDeclineBytesPerHour = null;
+  healthSnapshot.capacityProjectedDays = null;
+  healthSnapshot.capacityStatus = null;
+  healthSnapshot.capacityReasons = [];
   healthSnapshot.experiments = [];
 }
 
@@ -170,6 +175,103 @@ describe("syncApiServer", () => {
     expect((status.body as { status?: string }).status).toBe("degraded");
   });
 
+  it("keeps an expected legacy cohort SETTLE_ONLY control healthy", async () => {
+    healthSnapshot.previewMode = true;
+    healthSnapshot.killSwitchActive = true;
+    healthSnapshot.experiments = [{
+      accountId: "legacy-b55",
+      state: "SETTLE_ONLY",
+      reason: "MANUAL_LEGACY_COHORT_SETTLE_ONLY",
+      killSwitchActive: true,
+      liquidationEquityUsd: 210.96,
+      liquidationDrawdownPct: 0,
+      quoteCoveragePct: 100,
+    }];
+
+    const server = syncApiServer(apiState, portA, ctx);
+    expect(server).not.toBeNull();
+    await waitForListen(server!);
+
+    const res = await fetchJson(`http://127.0.0.1:${portA}/health`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: "ok",
+      killSwitchActive: true,
+      unexpectedKillSwitchActive: false,
+    });
+  });
+
+  it("degrades aggregate health for an abnormal quarantine without transient errors", async () => {
+    healthSnapshot.previewMode = true;
+    healthSnapshot.killSwitchActive = true;
+    healthSnapshot.experiments = [{
+      accountId: "candidate",
+      state: "QUARANTINED",
+      reason: "DATA_CAPACITY_LOW",
+      killSwitchActive: true,
+      liquidationEquityUsd: 200,
+      liquidationDrawdownPct: 0,
+      quoteCoveragePct: 100,
+    }];
+
+    const server = syncApiServer(apiState, portA, ctx);
+    expect(server).not.toBeNull();
+    await waitForListen(server!);
+
+    const res = await fetchJson(`http://127.0.0.1:${portA}/health`);
+    expect(res.status).toBe(200);
+    expect((res.body as { status?: string }).status).toBe("degraded");
+  });
+
+  it("exposes cohort projection separately from whole-filesystem decline diagnostics", async () => {
+    healthSnapshot.dbGrowthBytesPerHour = 25 * 1024 * 1024;
+    healthSnapshot.filesystemAvailableBytes = 40 * 1024 ** 3;
+    healthSnapshot.filesystemDeclineBytesPerHour = 8 * 1024 ** 3;
+    healthSnapshot.capacityProjectedDays = 40 * 1024 ** 3 / (25 * 1024 * 1024) / 24;
+    healthSnapshot.capacityStatus = "OK";
+    healthSnapshot.capacityReasons = [];
+
+    const server = syncApiServer(apiState, portA, ctx);
+    expect(server).not.toBeNull();
+    await waitForListen(server!);
+
+    const res = await fetchJson(`http://127.0.0.1:${portA}/health`);
+    expect(res.body).toMatchObject({
+      dbGrowthBytesPerHour: 25 * 1024 * 1024,
+      filesystemAvailableBytes: 40 * 1024 ** 3,
+      filesystemDeclineBytesPerHour: 8 * 1024 ** 3,
+      capacityProjectedDays: 40 * 1024 ** 3 / (25 * 1024 * 1024) / 24,
+      capacityStatus: "OK",
+      capacityReasons: [],
+    });
+  });
+
+  it("degrades immediately at SETTLE_ONLY capacity while WARNING remains healthy", async () => {
+    healthSnapshot.previewMode = true;
+    healthSnapshot.capacityStatus = "WARNING";
+    healthSnapshot.capacityReasons = ["projected_below_7_days"];
+
+    const server = syncApiServer(apiState, portA, ctx);
+    expect(server).not.toBeNull();
+    await waitForListen(server!);
+
+    const warning = await fetchJson(`http://127.0.0.1:${portA}/health`);
+    expect(warning.status).toBe(200);
+    expect(warning.body).toMatchObject({
+      status: "ok",
+      capacityStatus: "WARNING",
+    });
+
+    healthSnapshot.capacityStatus = "SETTLE_ONLY";
+    healthSnapshot.capacityReasons = ["available_below_10_gib"];
+    const settleOnly = await fetchJson(`http://127.0.0.1:${portA}/health`);
+    expect(settleOnly.status).toBe(200);
+    expect(settleOnly.body).toMatchObject({
+      status: "degraded",
+      capacityStatus: "SETTLE_ONLY",
+    });
+  });
+
   it("keeps persistent settlement failures visible after transient poll errors clear", async () => {
     healthSnapshot.previewMode = true;
     healthSnapshot.killSwitchActive = false;
@@ -182,6 +284,7 @@ describe("syncApiServer", () => {
       accountId: "sports",
       state: "QUARANTINED",
       reason: "DATA_SETTLEMENT_FAILURE",
+      killSwitchActive: true,
       liquidationEquityUsd: 118.64,
       liquidationDrawdownPct: 40.68,
       quoteCoveragePct: 100,
