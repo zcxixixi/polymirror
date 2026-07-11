@@ -25,6 +25,7 @@
     "preview:report": "node dist/report-preview-accounts.js",
     "preview:db-digest": "node dist/report-preview-db-digest.js",
     "preview:summary": "node dist/report-preview-summary.js",
+    "preview:cohort-table": "node dist/report-preview-cohort-table.js",
     "preview:prune-audit": "node dist/prune-preview-audit.js",
     "preview:collect": "node dist/report-preview-collector.js",
     "preview:verify-experiment": "node dist/report-preview-experiment-verify.js",
@@ -41,7 +42,7 @@
   },
   "dependencies": {
     "@ethersproject/wallet": "^5.7.0",
-    "@polymarket/client": "^0.1.0-beta.7",
+    "@polymarket/client": "0.1.0-beta.14",
     "ajv": "8.17.1",
     "better-sqlite3": "^12.11.1",
     "dotenv": "^16.4.0",

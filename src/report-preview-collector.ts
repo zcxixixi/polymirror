@@ -132,6 +132,61 @@ function runOneShotReportCommand(
   });
 }
 
+function runCohortTableCommand(
+  options: GeneratePreviewAccountsReportOptions | undefined,
+  timeoutMs: number | undefined,
+  stopSignal: AbortSignal
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [fileURLToPath(new URL("./report-preview-cohort-table.js", import.meta.url))],
+      {
+        cwd: process.cwd(),
+        env: reportEnv(options),
+        stdio: ["ignore", "ignore", "pipe"],
+      }
+    );
+    let stderr = "";
+    let timedOut = false;
+    let aborted = false;
+    let timeout: NodeJS.Timeout | undefined;
+    let hardKill: NodeJS.Timeout | undefined;
+    const isRunning = () => child.exitCode === null && child.signalCode === null;
+    const terminate = () => {
+      if (isRunning()) child.kill("SIGTERM");
+      hardKill = setTimeout(() => {
+        if (isRunning()) child.kill("SIGKILL");
+      }, 2_000);
+    };
+    const onAbort = () => {
+      aborted = true;
+      terminate();
+    };
+    stopSignal.addEventListener("abort", onAbort, { once: true });
+    if (timeoutMs) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, timeoutMs);
+    }
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (timeout) clearTimeout(timeout);
+      if (hardKill) clearTimeout(hardKill);
+      stopSignal.removeEventListener("abort", onAbort);
+      if (timedOut) return reject(new Error(`cohort table timed out after ${timeoutMs}ms`));
+      if (aborted) return reject(new Error("cohort table command aborted"));
+      if (code !== 0) {
+        return reject(new Error(`cohort table command failed code=${code}: ${stderr.trim()}`));
+      }
+      resolve();
+    });
+  });
+}
+
 const controller = new AbortController();
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => controller.abort());
@@ -142,12 +197,19 @@ const summary = await runPreviewReportCollector({
   ...options,
   runTimeoutMs: undefined,
   stopSignal: controller.signal,
-  generate: () =>
-    runOneShotReportCommand(
+  generate: async () => {
+    const result = await runOneShotReportCommand(
       options.reportOptions,
       options.runTimeoutMs,
       controller.signal
-    ),
+    );
+    await runCohortTableCommand(
+      options.reportOptions,
+      options.runTimeoutMs,
+      controller.signal
+    );
+    return result;
+  },
   onResult: (result, run) => {
     console.log(
       JSON.stringify({

@@ -34,7 +34,7 @@ export class RiskGate {
 
     const lossPct = (Math.abs(pnl) / capital) * 100;
     if (lossPct >= this.global.risk.dailyLossCapPct) {
-      this.store.triggerKillSwitch();
+      this.store.triggerKillSwitch("RISK_DAILY_LOSS_CAP");
       return {
         allow: false,
         reason: `daily loss cap ${lossPct.toFixed(1)}% >= ${this.global.risk.dailyLossCapPct}%`,

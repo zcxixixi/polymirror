@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 describe("runCopyCycle", () => {
-  it("persists the raw event before linking terminal copy decisions", async () => {
+  it("persists one decision chain and suppresses a decided observation on later polls", async () => {
     const activity = testActivity({ transactionHash: "0xlineage", timestamp: 123 });
     const config = previewRuntimeConfig();
     store.startOrResumeExperiment({
@@ -75,7 +75,7 @@ describe("runCopyCycle", () => {
     ]);
 
     await runCopyCycle(config, store);
-    await runCopyCycle(config, store);
+    const repeated = await runCopyCycle(config, store);
 
     expect(store.listRawEvents()).toEqual([
       expect.objectContaining({
@@ -85,9 +85,8 @@ describe("runCopyCycle", () => {
       }),
     ]);
     const decisions = store.listDecisions();
-    expect(decisions.map((decision) => decision.action)).toEqual(
-      expect.arrayContaining(["DETECT", "COPY", "SKIP"])
-    );
+    expect(decisions.map((decision) => decision.action)).toEqual(["DETECT", "COPY"]);
+    expect(repeated).toMatchObject({ copied: 0, skipped: 1 });
     expect(new Set(decisions.map((decision) => decision.rawEventId)).size).toBe(1);
     expect(decisions.find((decision) => decision.action === "COPY")).toMatchObject({
       reasonCode: "copy_executed",
@@ -104,8 +103,6 @@ describe("runCopyCycle", () => {
         orderStatus: "PREVIEW",
       },
     });
-    expect(decisions.find((decision) => decision.action === "SKIP")?.reasonCode)
-      .toBe("already_seen");
     const experimentId = store.getActiveExperiment()!.experimentId;
     const archived = await archiveExperimentEvidence({ dbPath: join(dir, "test.db"), experimentId,
       archiveDir: join(dir, "leader-limit-archive") });
@@ -499,24 +496,30 @@ describe("runCopyCycle", () => {
     expect(mockPollLeaders).toHaveBeenCalledTimes(1);
   });
 
-  it("skips already-seen trades on the next cycle", async () => {
+  it("counts an already-decided trade as suppressed without growing the audit log", async () => {
     const activity = testActivity();
     const config = previewRuntimeConfig();
+    store.startOrResumeExperiment({
+      accountId: "duplicate-suppression",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    });
 
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
     ]);
 
     await runCopyCycle(config, store);
+    const auditCount = store.listAuditLog().total;
     const second = await runCopyCycle(config, store);
 
     expect(second.copied).toBe(0);
     expect(second.skipped).toBeGreaterThan(0);
-    expect(
-      store
-        .listAuditLog({ action: "SKIP" })
-        .items.some((item) => item.reason === "already seen")
-    ).toBe(true);
+    expect(store.listAuditLog().total).toBe(auditCount);
   });
 
   it("skips trades that fail leader filters", async () => {
@@ -597,6 +600,53 @@ describe("runCopyCycle", () => {
     expect(store.getDailyVolumeUsd()).toBe(5);
   });
 
+  it("keeps SELL exits running after the experiment becomes settle-only", async () => {
+    const config = previewRuntimeConfig();
+    const tokenId = "token-settle-only-exit";
+    const experiment = store.startOrResumeExperiment({
+      accountId: "settle-only-exit",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    });
+    store.recordCopySuccess({
+      tradeKey: "seed-settle-only-buy",
+      leaderId: "whale",
+      tokenId,
+      side: "BUY",
+      filledShares: 10,
+      price: 0.5,
+      filledUsd: 5,
+      auditReason: "seed position",
+      preview: true,
+    });
+    store.setExperimentControl({
+      experimentId: experiment.experimentId,
+      state: "SETTLE_ONLY",
+      reasonCode: "RISK_DAILY_LOSS_CAP",
+    });
+
+    const sell = testActivity({
+      transactionHash: "0xsettleonlysell",
+      asset: tokenId,
+      side: "SELL",
+      size: 100,
+      price: 0.5,
+    });
+    mockPollLeaders.mockResolvedValue([
+      { leaderId: "whale", fetched: 1, candidates: [sell] },
+    ]);
+
+    const result = await runCopyCycle(config, store);
+
+    expect(result.copied).toBe(1);
+    expect(store.getPosition("whale", tokenId)).toBe(0);
+    expect(store.getExperimentControl()).toMatchObject({ state: "SETTLE_ONLY" });
+  });
+
   it("skips unmatched SELL exits without marking the cycle as errored", async () => {
     const config = previewRuntimeConfig();
     const sell = testActivity({
@@ -673,8 +723,17 @@ describe("runCopyCycle", () => {
     expect(store.hasSeen(tradeEventKey(redeem))).toBe(true);
   });
 
-  it("audits unmatched preview REDEEM once, then audits repeated REDEEM as already seen", async () => {
+  it("audits an unmatched preview REDEEM once and suppresses later polls", async () => {
     const config = previewRuntimeConfig();
+    store.startOrResumeExperiment({
+      accountId: "redeem-duplicate-suppression",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    });
     const redeem: Activity = {
       type: "REDEEM",
       timestamp: Date.now(),
@@ -703,9 +762,8 @@ describe("runCopyCycle", () => {
     expect(second.copied).toBe(0);
     expect(second.skipped).toBe(1);
     const skips = store.listAuditLog({ action: "SKIP" });
-    expect(skips.total).toBe(2);
-    expect(skips.items.map((item) => item.reason).sort()).toEqual([
-      "already seen",
+    expect(skips.total).toBe(1);
+    expect(skips.items.map((item) => item.reason)).toEqual([
       "no local preview position for condition",
     ]);
   });
@@ -804,6 +862,77 @@ describe("runCopyCycle", () => {
       expect(mockFetchResolvedMarketOutcome).toHaveBeenCalledTimes(2);
     } finally {
       secondStore.close();
+    }
+  });
+
+  it("compacts repeated settlement failures and quarantines after three cycles", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(100_000);
+      const config = previewRuntimeConfig();
+      config.app.global.risk.startingCapitalUsd = 200;
+      store.startOrResumeExperiment({
+        accountId: "settlement-failure",
+        candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+        config,
+        gitSha: "git-a",
+        imageDigest: "image-a",
+        lockfileHash: "lock-a",
+        trustClass: "candidate",
+      });
+      store.recordCopySuccess({
+        tradeKey: "seed-failing-settlement",
+        leaderId: "whale",
+        tokenId: "failing-token",
+        side: "BUY",
+        filledShares: 10,
+        price: 0.5,
+        filledUsd: 5,
+        auditReason: "seed",
+        preview: true,
+        cashInitialUsd: 200,
+        market: {
+          tokenId: "failing-token",
+          conditionId: "failing-condition",
+          slug: "failing-market",
+        },
+      });
+      mockFetchResolvedMarketOutcome.mockRejectedValue(
+        new Error("orderPriceMinTickSize: expected old values")
+      );
+      mockPollLeaders.mockResolvedValue([
+        { leaderId: "whale", fetched: 0, candidates: [] },
+      ]);
+
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await runCopyCycle(config, store);
+        vi.advanceTimersByTime(60_001);
+      }
+
+      expect(store.listActiveSettlementFailures()).toEqual([
+        expect.objectContaining({
+          conditionId: "failing-condition",
+          errorCode: "gamma_tick_size_schema",
+          count: 3,
+          resolvedAt: null,
+        }),
+      ]);
+      const raw = store.listRawEvents().find((event) =>
+        event.sourceId?.startsWith("auto-settle-observation")
+      );
+      expect(raw).toBeDefined();
+      expect(store.listRawEventObservations(raw!.rawEventId)).toHaveLength(1);
+      expect(
+        store.listAuditLog({ action: "SKIP" }).items.filter(
+          (row) => row.reason === "settlement evidence unavailable"
+        )
+      ).toHaveLength(1);
+      expect(store.getExperimentControl()).toMatchObject({
+        state: "QUARANTINED",
+        reasonCode: "DATA_SETTLEMENT_FAILURE",
+      });
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

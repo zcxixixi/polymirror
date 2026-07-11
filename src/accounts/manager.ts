@@ -16,6 +16,7 @@ import {
 import { resolveAccountDbPath } from "../state/db-path.js";
 import { logInfo } from "../notify/logger.js";
 import type { CopyCycleResult } from "../engine/copy-cycle.js";
+import { readSqliteFootprintBytes } from "../engine/capacity-guard.js";
 import {
   readNormalizedConfigDocument,
   writeNormalizedConfigDocument,
@@ -319,12 +320,33 @@ export class AccountManager {
     walletDrifts: string[]
   ): void {
     const rt = this.require(accountId);
+    const control = rt.store.getExperimentControl();
+    const activeFailures = rt.store.listActiveSettlementFailures();
+    const failedConditions = new Set(
+      activeFailures.map((failure) => `${failure.leaderId}\n${failure.conditionId}`)
+    );
+    const closedMarketOpenPositions = [...failedConditions].reduce((sum, key) => {
+      const [leaderId, conditionId] = key.split("\n");
+      return sum + rt.store.listPositionsByCondition(leaderId!, conditionId!).length;
+    }, 0);
+    const equity = rt.store.getLatestEquitySnapshot();
+    const dbSizeBytes = readSqliteFootprintBytes(rt.dbPath);
     updateAccountHealthAfterPoll(
       rt.health,
       result,
       rt.store.isKillSwitchActive(),
       rt.store.listPendingOrders().length,
-      walletDrifts
+      walletDrifts,
+      {
+        experimentState: control?.state ?? "ACTIVE",
+        experimentReason: control?.reasonCode ?? null,
+        settlementFailures: activeFailures.length,
+        closedMarketOpenPositions,
+        liquidationEquityUsd: equity?.equityUsd ?? null,
+        liquidationDrawdownPct: equity?.drawdownPct ?? null,
+        quoteCoveragePct: equity ? equity.quoteCoverage * 100 : null,
+        dbSizeBytes,
+      }
     );
   }
 
@@ -365,6 +387,13 @@ export class AccountManager {
         pendingOrders: rt.store.listPendingOrders().length,
         reconcilingOrders: rt.store.countReconcilingOrders(),
         quarantinedOrderIntents: rt.store.countQuarantinedLiveOrderIntents(),
+        experimentState: rt.store.getExperimentControl()?.state ?? "ACTIVE",
+        experimentReason: rt.store.getExperimentControl()?.reasonCode ?? null,
+        settlementFailures: rt.store.listActiveSettlementFailures().length,
+        liquidationEquityUsd: rt.store.getLatestEquitySnapshot()?.equityUsd ?? null,
+        liquidationDrawdownPct: rt.store.getLatestEquitySnapshot()?.drawdownPct ?? null,
+        dbSizeBytes: rt.health.dbSizeBytes ?? 0,
+        dbGrowthBytesPerHour: rt.health.dbGrowthBytesPerHour ?? null,
       };
     });
   }

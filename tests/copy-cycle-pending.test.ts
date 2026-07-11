@@ -199,7 +199,7 @@ describe("runCopyCycle pending reconciliation", () => {
       slippagePct: 0,
       feeUsd: 0.048,
     });
-    expect(result.errors.some((e) => e.includes("copy trading disabled"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("copy trading disabled"))).toBe(false);
   });
 
   it("keeps the final one percent of a confirmed partial order pending", async () => {

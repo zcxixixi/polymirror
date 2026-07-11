@@ -253,7 +253,9 @@ describe("experiment evidence archive", () => {
     store.recordDecision({ rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "policy_skip", exactTerms: {}, decidedAt: 2 });
     store.close();
     const db = new Database(dbPath);
-    db.exec(`DROP TRIGGER decision_observation_links_no_delete;
+    db.exec(`DROP TRIGGER observation_decision_slots_no_delete;
+      DELETE FROM observation_decision_slots;
+      DROP TRIGGER decision_observation_links_no_delete;
       DELETE FROM decision_observation_links;
       DROP TRIGGER raw_event_observations_no_delete;
       DELETE FROM raw_event_observations`);

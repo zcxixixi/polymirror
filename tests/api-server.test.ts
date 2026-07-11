@@ -106,6 +106,11 @@ function resetHealthSnapshot(): void {
   healthSnapshot.lastError = null;
   healthSnapshot.pendingOrders = 0;
   healthSnapshot.walletDrifts = [];
+  healthSnapshot.settlementFailures = 0;
+  healthSnapshot.closedMarketOpenPositions = 0;
+  healthSnapshot.dbSizeBytes = 0;
+  healthSnapshot.dbGrowthBytesPerHour = 0;
+  healthSnapshot.experiments = [];
 }
 
 describe("syncApiServer", () => {
@@ -163,6 +168,45 @@ describe("syncApiServer", () => {
     const status = await fetchJson(`http://127.0.0.1:${portA}/api/status`);
     expect(status.status).toBe(200);
     expect((status.body as { status?: string }).status).toBe("degraded");
+  });
+
+  it("keeps persistent settlement failures visible after transient poll errors clear", async () => {
+    healthSnapshot.previewMode = true;
+    healthSnapshot.killSwitchActive = false;
+    healthSnapshot.lastError = null;
+    healthSnapshot.settlementFailures = 2;
+    healthSnapshot.closedMarketOpenPositions = 5;
+    healthSnapshot.dbSizeBytes = 10_000;
+    healthSnapshot.dbGrowthBytesPerHour = 250;
+    healthSnapshot.experiments = [{
+      accountId: "sports",
+      state: "QUARANTINED",
+      reason: "DATA_SETTLEMENT_FAILURE",
+      liquidationEquityUsd: 118.64,
+      liquidationDrawdownPct: 40.68,
+      quoteCoveragePct: 100,
+    }];
+
+    const server = syncApiServer(apiState, portA, ctx);
+    expect(server).not.toBeNull();
+    await waitForListen(server!);
+
+    const res = await fetchJson(`http://127.0.0.1:${portA}/health`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: "degraded",
+      previewMode: true,
+      lastError: null,
+      settlementFailures: 2,
+      closedMarketOpenPositions: 5,
+      dbSizeBytes: 10_000,
+      dbGrowthBytesPerHour: 250,
+      experiments: [{
+        accountId: "sports",
+        state: "QUARANTINED",
+        reason: "DATA_SETTLEMENT_FAILURE",
+      }],
+    });
   });
 
   it("defaults quality diagnostics to enabled accounts and keeps disabled history opt-in", async () => {

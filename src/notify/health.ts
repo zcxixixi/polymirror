@@ -1,4 +1,5 @@
 import type { CopyCycleResult } from "../engine/copy-cycle.js";
+import type { ExperimentCopyState } from "../state/store.js";
 
 export interface HealthSnapshot {
   startedAt: number;
@@ -10,6 +11,20 @@ export interface HealthSnapshot {
   lastError: string | null;
   pendingOrders: number;
   walletDrifts: string[];
+  settlementFailures: number;
+  closedMarketOpenPositions: number;
+  dbSizeBytes: number;
+  dbGrowthBytesPerHour: number;
+  enabledAccountCount: number;
+  polledAccountCount: number;
+  experiments: Array<{
+    accountId: string;
+    state: ExperimentCopyState;
+    reason: string | null;
+    liquidationEquityUsd: number | null;
+    liquidationDrawdownPct: number | null;
+    quoteCoveragePct: number | null;
+  }>;
 }
 
 /** Process-level health summary (aggregated across accounts). */
@@ -23,10 +38,18 @@ export const healthSnapshot: HealthSnapshot = {
   lastError: null,
   pendingOrders: 0,
   walletDrifts: [],
+  settlementFailures: 0,
+  closedMarketOpenPositions: 0,
+  dbSizeBytes: 0,
+  dbGrowthBytesPerHour: 0,
+  enabledAccountCount: 0,
+  polledAccountCount: 0,
+  experiments: [],
 };
 
 export function syncAggregateHealth(
   accounts: {
+    id?: string;
     enabled?: boolean;
     health: {
       previewMode: boolean;
@@ -37,6 +60,15 @@ export function syncAggregateHealth(
       lastError: string | null;
       pendingOrders: number;
       walletDrifts: string[];
+      experimentState?: ExperimentCopyState;
+      experimentReason?: string | null;
+      settlementFailures?: number;
+      closedMarketOpenPositions?: number;
+      liquidationEquityUsd?: number | null;
+      liquidationDrawdownPct?: number | null;
+      quoteCoveragePct?: number | null;
+      dbSizeBytes?: number;
+      dbGrowthBytesPerHour?: number | null;
     };
   }[]
 ): void {
@@ -44,11 +76,42 @@ export function syncAggregateHealth(
 
   const enabledAccounts = accounts.filter((a) => a.enabled !== false);
 
+  healthSnapshot.enabledAccountCount = enabledAccounts.length;
+  healthSnapshot.polledAccountCount = enabledAccounts.filter(
+    (account) => account.health.lastPollAt !== null
+  ).length;
   healthSnapshot.previewMode = enabledAccounts.every((a) => a.health.previewMode);
   healthSnapshot.killSwitchActive = enabledAccounts.some((a) => a.health.killSwitchActive);
   healthSnapshot.enabledLeaders = enabledAccounts.flatMap((a) => a.health.enabledLeaders);
   healthSnapshot.pendingOrders = enabledAccounts.reduce((s, a) => s + a.health.pendingOrders, 0);
   healthSnapshot.walletDrifts = enabledAccounts.flatMap((a) => a.health.walletDrifts);
+  healthSnapshot.settlementFailures = enabledAccounts.reduce(
+    (sum, account) => sum + (account.health.settlementFailures ?? 0),
+    0
+  );
+  healthSnapshot.closedMarketOpenPositions = enabledAccounts.reduce(
+    (sum, account) => sum + (account.health.closedMarketOpenPositions ?? 0),
+    0
+  );
+  healthSnapshot.dbSizeBytes = enabledAccounts.reduce(
+    (sum, account) => sum + (account.health.dbSizeBytes ?? 0),
+    0
+  );
+  healthSnapshot.dbGrowthBytesPerHour = enabledAccounts.reduce(
+    (sum, account) => sum + (account.health.dbGrowthBytesPerHour ?? 0),
+    0
+  );
+  healthSnapshot.experiments = enabledAccounts.map((account) => ({
+    accountId: account.id ?? "unknown",
+    state: account.health.experimentState ?? "ACTIVE",
+    reason: account.health.experimentReason ?? null,
+    liquidationEquityUsd: account.health.liquidationEquityUsd ?? null,
+    liquidationDrawdownPct: account.health.liquidationDrawdownPct ?? null,
+    quoteCoveragePct: account.health.quoteCoveragePct ?? null,
+  }));
+  healthSnapshot.lastError = enabledAccounts.find(
+    (account) => account.health.lastError !== null
+  )?.health.lastError ?? null;
 
   const withPoll = enabledAccounts
     .filter((a) => a.health.lastPollAt)
@@ -57,7 +120,6 @@ export function syncAggregateHealth(
   if (latest) {
     healthSnapshot.lastPollAt = latest.health.lastPollAt;
     healthSnapshot.lastPollResult = latest.health.lastPollResult;
-    healthSnapshot.lastError = latest.health.lastError;
   }
 }
 

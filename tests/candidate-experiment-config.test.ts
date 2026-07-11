@@ -8,6 +8,8 @@ import {
   type CandidateCohortInput,
 } from "../src/experiments/candidate-cohort.js";
 
+const FRESH_INTAKE_SHA256 = "a".repeat(64);
+
 function cohort(overrides: Partial<CandidateCohortInput> = {}): CandidateCohortInput {
   return {
     cohortId: "2026w28-v1",
@@ -15,6 +17,8 @@ function cohort(overrides: Partial<CandidateCohortInput> = {}): CandidateCohortI
       {
         id: "ec47",
         address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+        freshIntakePassed: true,
+        freshIntakeEvidenceSha256: FRESH_INTAKE_SHA256,
       },
     ],
     ...overrides,
@@ -64,6 +68,80 @@ describe("buildCandidateExperimentConfig", () => {
     expect(baseline.execution.order_type).toBe("GTC");
   });
 
+  it("builds the deterministic quality12 watchlist without silently enabling copy", () => {
+    const input = JSON.parse(
+      readFileSync("config/candidate-cohorts/quality12-20260711-v1.json", "utf8")
+    ) as CandidateCohortInput;
+    const result = buildCandidateExperimentConfig(defaults(), input);
+    const expectedCandidates = [
+      ["ec47", "0xec47cb4e0a4f4e375d9787debf7c874214f21119"],
+      ["dance", "0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82"],
+      ["linabell", "0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8"],
+      ["pada", "0x714a685b5454ea4d52979563bbafa77b8168ab2f"],
+    ] as const;
+    const expectedArms = {
+      conservative: {
+        fixedUsd: 1, maxPositionUsd: 10, maxDailyVolumeUsd: 40,
+        maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015,
+      },
+      standard: {
+        fixedUsd: 2, maxPositionUsd: 20, maxDailyVolumeUsd: 80,
+        maxOpenMarkets: 15, dailyLossCapPct: 8, slippageTolerance: 0.025,
+      },
+      aggressive: {
+        fixedUsd: 5, maxPositionUsd: 40, maxDailyVolumeUsd: 160,
+        maxOpenMarkets: 20, dailyLossCapPct: 10, slippageTolerance: 0.04,
+      },
+    } as const;
+
+    expect(result.accounts).toHaveLength(12);
+    expect(result.accounts.map((account) => account.id)).toEqual(
+      expectedCandidates.flatMap(([candidateId]) =>
+        (["conservative", "standard", "aggressive"] as const).map(
+          (arm) => `exp_quality12-20260711-v1_${candidateId}_${arm}_200`
+        )
+      )
+    );
+
+    for (const [candidateId, address] of expectedCandidates) {
+      for (const [armName, arm] of Object.entries(expectedArms)) {
+        const account = result.accounts.find(
+          (candidate) => candidate.id === `exp_quality12-20260711-v1_${candidateId}_${armName}_200`
+        );
+        expect(account).toBeDefined();
+        expect(account).toMatchObject({
+          enabled: true,
+          global: {
+            preview_mode: true,
+            copy_price_mode: "executable_guarded",
+            risk: {
+              enable_copy_trading: false,
+              starting_capital_usd: 200,
+              daily_loss_cap_pct: arm.dailyLossCapPct,
+              max_daily_volume_usd: arm.maxDailyVolumeUsd,
+              max_open_markets: arm.maxOpenMarkets,
+              max_order_usd: arm.fixedUsd,
+              slippage_tolerance: arm.slippageTolerance,
+              max_position_per_token_usd: arm.maxPositionUsd,
+            },
+            execution: { order_type: "FOK" },
+          },
+          leaders: [{
+            id: candidateId,
+            address,
+            enabled: false,
+            strategy: { type: "FIXED", copy_size: arm.fixedUsd },
+            limits: {
+              max_order_usd: arm.fixedUsd,
+              max_position_usd: arm.maxPositionUsd,
+              max_daily_volume_usd: arm.maxDailyVolumeUsd,
+            },
+          }],
+        });
+      }
+    }
+  });
+
   it("rejects duplicate candidates and unsafe arm overrides", () => {
     const baseline = defaults();
     expect(() =>
@@ -74,10 +152,14 @@ describe("buildCandidateExperimentConfig", () => {
             {
               id: "same",
               address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+              freshIntakePassed: true,
+              freshIntakeEvidenceSha256: FRESH_INTAKE_SHA256,
             },
             {
               id: "same",
               address: "0x66f3b58702fa50aff254b4f84de82fe63a13787c",
+              freshIntakePassed: true,
+              freshIntakeEvidenceSha256: "b".repeat(64),
             },
           ],
         })
@@ -99,11 +181,94 @@ describe("buildCandidateExperimentConfig", () => {
   it("keeps incomplete candidates disabled instead of silently running them", () => {
     const result = buildCandidateExperimentConfig(
       defaults(),
-      cohort({ candidates: [{ id: "watch-only" }] })
+      cohort({ candidates: [{ id: "watch-only", freshIntakePassed: false }] })
     );
 
     expect(result.accounts.every((account) => account.enabled === false)).toBe(true);
     expect(result.accounts.every((account) => account.leaders[0]?.enabled === false)).toBe(true);
+  });
+
+  it("keeps configured watchlist accounts visible but copy-disabled until fresh intake passes", () => {
+    const result = buildCandidateExperimentConfig(
+      defaults(),
+      cohort({
+        candidates: [{
+          id: "watch-only",
+          address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+          freshIntakePassed: false,
+        }],
+      })
+    );
+
+    expect(result.accounts).toHaveLength(3);
+    expect(result.accounts.every((account) => account.enabled === true)).toBe(true);
+    expect(result.accounts.every(
+      (account) => account.global.risk.enable_copy_trading === false
+    )).toBe(true);
+    expect(result.accounts.every((account) => account.leaders[0]?.enabled === false)).toBe(true);
+  });
+
+  it("retains failed-intake candidates beside passed candidates instead of replacing them", () => {
+    const result = buildCandidateExperimentConfig(defaults(), cohort({
+      candidates: [
+        {
+          id: "passed",
+          address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+          freshIntakePassed: true,
+          freshIntakeEvidenceSha256: FRESH_INTAKE_SHA256,
+        },
+        {
+          id: "watch",
+          address: "0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82",
+          freshIntakePassed: false,
+        },
+      ],
+    }));
+
+    expect(result.accounts).toHaveLength(6);
+    expect(result.accounts.filter((account) => account.id.includes("_passed_")))
+      .toHaveLength(3);
+    expect(result.accounts.filter((account) => account.id.includes("_watch_")))
+      .toHaveLength(3);
+    expect(result.accounts.filter((account) => account.id.includes("_passed_"))
+      .every((account) => account.leaders[0]?.enabled === true)).toBe(true);
+    expect(result.accounts.filter((account) => account.id.includes("_watch_"))
+      .every((account) => account.leaders[0]?.enabled === false)).toBe(true);
+  });
+
+  it("requires an explicit fresh-intake decision instead of silently opting in", () => {
+    const candidateWithoutDecision = {
+      ...cohort(),
+      candidates: [{
+        id: "ec47",
+        address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+      }],
+    };
+
+    expect(() => validateCandidateCohortJson(candidateWithoutDecision)).toThrow(
+      /freshIntakePassed/i
+    );
+    expect(() => candidateCohortSchema.parse(candidateWithoutDecision)).toThrow(
+      /freshIntakePassed/i
+    );
+  });
+
+  it("requires fresh intake approval to reference immutable evidence", () => {
+    const passedWithoutEvidence = {
+      ...cohort(),
+      candidates: [{
+        id: "ec47",
+        address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+        freshIntakePassed: true,
+      }],
+    };
+
+    expect(() => validateCandidateCohortJson(passedWithoutEvidence)).toThrow(
+      /freshIntakeEvidenceSha256/i
+    );
+    expect(() => candidateCohortSchema.parse(passedWithoutEvidence)).toThrow(
+      /freshIntakeEvidenceSha256/i
+    );
   });
 
   it("rejects unknown and misspelled cohort fields before generation", () => {
@@ -132,8 +297,8 @@ describe("buildCandidateExperimentConfig", () => {
     expect(() => candidateCohortSchema.parse({
       ...cohort(),
       candidates: [
-        { id: "one", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119" },
-        { id: "two", address: "0xEC47CB4E0A4F4E375D9787DEBF7C874214F21119" },
+        { id: "one", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119", freshIntakePassed: true, freshIntakeEvidenceSha256: FRESH_INTAKE_SHA256 },
+        { id: "two", address: "0xEC47CB4E0A4F4E375D9787DEBF7C874214F21119", freshIntakePassed: true, freshIntakeEvidenceSha256: "b".repeat(64) },
       ],
     })).toThrow(/duplicate candidate address/i);
   });
@@ -147,6 +312,20 @@ describe("buildCandidateExperimentConfig", () => {
       $defs: { arm: { properties: Record<string, unknown>; "x-candidateArmRules": string[] } };
     };
     expect(Object.keys(published.properties).sort()).toEqual(["arms", "candidates", "cohortId"]);
+    const candidateItems = (published.properties.candidates as {
+      items: {
+        properties: Record<string, unknown>;
+        required: string[];
+        "x-candidateFreshIntakeRules": string[];
+      };
+    }).items;
+    expect(Object.keys(candidateItems.properties).sort()).toEqual([
+      "address", "freshIntakeEvidenceSha256", "freshIntakePassed", "id", "username",
+    ]);
+    expect(candidateItems.required.sort()).toEqual(["freshIntakePassed", "id"]);
+    expect(candidateItems["x-candidateFreshIntakeRules"]).toContain(
+      "passed requires evidence sha256"
+    );
     expect(Object.keys(published.$defs.arm.properties).sort()).toEqual([
       "dailyLossCapPct",
       "fixedUsd",
@@ -167,13 +346,19 @@ describe("buildCandidateExperimentConfig", () => {
     ["fixed above position", { arms: { standard: { fixedUsd: 5, maxPositionUsd: 4 } } }],
     ["fixed above daily volume", { arms: { standard: { fixedUsd: 5, maxDailyVolumeUsd: 4 } } }],
     ["duplicate IDs", { candidates: [
-      { id: "same", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119" },
-      { id: "same", address: "0x66f3b58702fa50aff254b4f84de82fe63a13787c" },
+      { id: "same", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119", freshIntakePassed: true, freshIntakeEvidenceSha256: FRESH_INTAKE_SHA256 },
+      { id: "same", address: "0x66f3b58702fa50aff254b4f84de82fe63a13787c", freshIntakePassed: true, freshIntakeEvidenceSha256: "b".repeat(64) },
     ] }],
     ["duplicate addresses", { candidates: [
-      { id: "one", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119" },
-      { id: "two", address: "0xEC47CB4E0A4F4E375D9787DEBF7C874214F21119" },
+      { id: "one", address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119", freshIntakePassed: true, freshIntakeEvidenceSha256: FRESH_INTAKE_SHA256 },
+      { id: "two", address: "0xEC47CB4E0A4F4E375D9787DEBF7C874214F21119", freshIntakePassed: true, freshIntakeEvidenceSha256: "b".repeat(64) },
     ] }],
+    ["watchlist carrying approval evidence", { candidates: [{
+      id: "watch",
+      address: "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+      freshIntakePassed: false,
+      freshIntakeEvidenceSha256: FRESH_INTAKE_SHA256,
+    }] }],
     ["typo", { arms: { standard: { fixedUSD: 2 } } }],
   ])("rejects the invalid corpus identically through JSON Schema and Zod: %s", (_name, patch) => {
     const input = { ...cohort(), ...patch };

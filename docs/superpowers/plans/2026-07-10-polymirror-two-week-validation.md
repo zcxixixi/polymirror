@@ -11,12 +11,14 @@
 ## Current Checkpoint (2026-07-11)
 
 - Active branch: `codex/polymirror-stability-checkpoint-20260710`.
-- Task 1 through Task 4 are implemented locally. The evidence schema is v9 and now preserves immutable archive attempts, rotation-time end state, observation occurrences, and deterministic replay inputs.
-- A fresh read-only review and targeted re-review are clean: all Critical/Important findings are closed. Maker fills are fee-free; uncertain orders fail closed unless an exact persisted CLOB order ID exists; missing orders enter a bounded 24h reconciliation tombstone; rotation and sealing reject unresolved pending/intents; rotation uses the old manifest's capital for old end state; failed archive publications can be retried without deleting attempt history.
-- The server continues its existing nine-account preview-only cohort (`b55`, `justdance/crypto_dance`, and `sports_candle`, each with conservative/standard/aggressive arms). This local branch has not been deployed over it, and no account/config/process was restarted during this checkpoint.
-- Candidate evidence was refreshed from current Polymarket leaderboard/activity data. Historical addresses remain watchlist-only. A new low-category-correlation politics watchlist entry, LinaBell (`0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8`), is not authorized for deployment.
-- Confirmed server snapshot: Docker healthy and `previewMode=true`, with `pendingOrders=0`, `walletDrifts=[]`, `lastError=null`; root filesystem is 49% used. Aggregate `/health` is degraded because `crypto_b55_standard` reached -20.90U daily realized PnL (10.45% of 200U) and correctly triggered its account kill switch. The protection remains enabled; other cohort accounts continue running. Existing cohort quality fails the funding gate.
-- Fresh local verification: `npm test` passed 69 files / 438 tests; `npm run lint`, `npm run build`, high-severity audit gate, and `git diff --check` passed. The dashboard retains its existing non-fatal chunk-size warning; dependency audit has no high/critical findings.
+- Task 1 through Task 4 remain implemented. The additive evidence schema is now v10: raw observation occurrences are `NEW | RESUMABLE | DECIDED`, every observation has at most one DETECT and one terminal decision, queued work carries immutable observation references, and compact hourly poll/settlement diagnostics are outside deterministic replay digests.
+- Official `@polymarket/client` is exactly pinned to `0.1.0-beta.14`. Only the contract-tested credential patch remains; official `0.005` and `0.0025` tick sizes are decoded, rounded, formatted, and contract-tested without a private Gamma parser.
+- Preview risk state is sticky per experiment (`ACTIVE | SETTLE_ONLY | QUARANTINED`). Daily loss, liquidation drawdown, ledger drift, stale exchange state, repeated settlement failure, and capacity gates stop new BUY entries while preserving SELL, REDEEM, and recovery. DATA recovery requires a continuous 60-minute healthy window and reviewed reactivation.
+- Liquidation equity uses executable SELL depth; missing depth is valued at zero and recorded as a quality gap. `/health` exposes persistent settlement failures, closed-market open positions, liquidation drawdown/coverage, SQLite-plus-WAL footprint/growth, and enabled-versus-polled account counts.
+- The `quality12-20260711-v1` seed contains exactly ec47, dance, LinaBell, and pada with three fixed 200U preview arms. It remains watchlist-only until a fresh official leaderboard/activity capture approves each Candidate and binds its immutable evidence SHA-256. No historical address is automatically enabled.
+- Shadow deployment is isolated at `/opt/polymirror/cohorts/quality12-20260711`, port 8081, with strict path separation, resource limits, exact-image provenance, 12/12 first-poll and collector gates, capacity preflight, and failure cleanup that preserves data and never replaces a running shadow cohort.
+- The production server has not yet received this v10 branch. Before rollout it must be re-read, WAL-safely backed up, checksummed, snapshotted, and expanded from 40GB to 80GB. The existing preview process and all historical databases remain untouched until those gates pass.
+- Fresh local verification after the v10 fixes: `npm test` passed 77 files / 529 tests; lint, build, official-registry high-severity audit, Compose parse, shell syntax, and `git diff --check` passed. The dashboard retains its existing non-fatal chunk-size warning; dependency audit has no high/critical findings.
 
 ## Global Constraints
 
@@ -172,3 +174,16 @@
 - [ ] Review conservative/standard/aggressive robustness by Candidate and reject narrow one-parameter winners.
 - [ ] At the two-week checkpoint, issue `fund`, `extend preview`, or `reject` with metric and lineage evidence.
 - [ ] If and only if `fund` is supported and the user explicitly confirms again, design a one-shot capped live canary before any 200U live allocation.
+
+### Task 7: v10 Correctness Repair and Quality12 Rollout
+
+- [x] Pin the official SDK and prove `0.005/0.0025` settlement and order-price compatibility with real redacted fixtures.
+- [x] Add v10 occurrence deduplication, persistent settlement failures, sticky experiment controls, liquidation equity, capacity guards, and hourly operator tables.
+- [x] Prove multi-token and multi-leader settlement is atomic, single-terminal, idempotent, and deterministically replayable.
+- [x] Build immutable fresh Candidate intake and a fail-closed isolated 12-account shadow deployment gate.
+- [x] Close all local Critical/Important review findings and pass the full local verification suite.
+- [ ] Re-read the live server; create WAL-safe backup, checksums, and an EBS snapshot; expand the root volume to 80GB.
+- [ ] Replay the five sports settlement remnants on database copies, then roll the pinned v10 image over the existing preview-only service with exact rollback.
+- [ ] Capture fresh Candidate evidence within 30 minutes of shadow launch; enable only approved Candidates and start the isolated quality12 cohort.
+- [ ] Pass the 15m capacity check and the 60m data-quality gate before stopping old dance BUY entries.
+- [ ] Continue 6h, 24h, and 14d evidence gates; remain preview-only regardless of outcome until a second explicit live-canary confirmation.

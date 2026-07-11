@@ -56,20 +56,24 @@ export async function fetchOrderBookMeta(
 }
 
 function tickDecimalPlaces(tickSize: number): number {
-  if (tickSize >= 0.1) return 1;
-  if (tickSize >= 0.01) return 2;
-  if (tickSize >= 0.001) return 3;
-  return 4;
+  for (let decimals = 0; decimals <= 8; decimals++) {
+    const scaled = tickSize * (10 ** decimals);
+    if (Math.abs(scaled - Math.round(scaled)) <= 1e-9) return decimals;
+  }
+  return 8;
 }
 
 export function roundToTick(value: number, tickSize: number): number {
   if (tickSize <= 0) return value;
   const decimals = tickDecimalPlaces(tickSize);
-  const maxPrice = parseFloat((1 - tickSize).toFixed(decimals));
+  const scale = 10 ** decimals;
+  const tickUnits = Math.round(tickSize * scale);
+  if (tickUnits <= 0) return value;
+  const maxPriceUnits = scale - tickUnits;
   const ticks = Math.round(value / tickSize);
-  const rounded = ticks * tickSize;
-  const clamped = Math.max(tickSize, Math.min(maxPrice, rounded));
-  return parseFloat(clamped.toFixed(decimals));
+  const roundedUnits = ticks * tickUnits;
+  const clampedUnits = Math.max(tickUnits, Math.min(maxPriceUnits, roundedUnits));
+  return clampedUnits / scale;
 }
 
 /** CLOB-safe price string (avoids float artifacts like 0.12300000000000001). */
@@ -91,7 +95,7 @@ export function toSide(side: "BUY" | "SELL"): OrderSide {
 
 export function toTickSizeArg(tick: string): string {
   const v = tick.trim();
-  if (["0.1", "0.01", "0.001", "0.0001"].includes(v)) return v;
+  if (["0.1", "0.01", "0.005", "0.0025", "0.001", "0.0001"].includes(v)) return v;
   return "0.01";
 }
 

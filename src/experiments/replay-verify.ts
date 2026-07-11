@@ -65,7 +65,7 @@ const REPLAY_TERM_KEYS = new Set([
   "filledUsd", "orderStatus", "pendingRemaining", "quoteBestPrice", "guardedTickSize", "guardedFeeRate",
   "guardedFeeExponent", "quoteEvidence", "settlementSource", "sourceId", "sourceIds", "winnerTokenIds",
   "conditionId", "payoutPerShare", "costBasisUsd", "grossPayoutUsd", "realizedPnlUsd", "transactionHash",
-  "outcome", "onChainTxHash",
+  "outcome", "onChainTxHash", "settlements",
 ]);
 interface ExpectedSpec { action: string; reasonCode: string; derivedTerms: Record<string, unknown> }
 const BASE_DECISION_TERMS: Record<string, unknown> = {
@@ -1061,7 +1061,6 @@ function validateAndApplyRedeem(
 ): void {
   if (decision.reasonCode !== "redeem_settled") throw new Error("Re-execution REDEEM reason differs");
   const terms = decisionTerms(decision);
-  const leaderId = requiredString(terms, "leaderId");
   const settlementSource = requiredString(terms, "settlementSource");
   const payout = requiredNumber(terms, "grossPayoutUsd");
   const cost = requiredNumber(terms, "costBasisUsd");
@@ -1071,7 +1070,62 @@ function validateAndApplyRedeem(
   }
   requireEvidenceValue(terms, "preview", config.app.global.previewMode, "REDEEM");
   const payloads = group.observations.map((observation) => JSON.parse(observation.payloadJson) as Record<string, unknown>);
-  if (settlementSource === "condition_resolution") {
+  const settlementRows = terms.settlements;
+  if (Array.isArray(settlementRows)) {
+    if (!["token_resolution", "token_settlement", "onchain_redeemable"].includes(settlementSource)) {
+      throw new Error("Aggregated token settlements use an unsupported immutable source");
+    }
+    requireEvidenceValue(terms, "leaderId", settlementRows.length === 1
+      ? (settlementRows[0] as Record<string, unknown>).leaderId
+      : null, "aggregated token REDEEM");
+    const tokenId = requiredString(terms, "tokenId");
+    const sourceMatches = settlementSource === "onchain_redeemable"
+      ? payloads.length > 0 && payloads.every((payload) => payload.type === "ONCHAIN_REDEEMABLE")
+        && payloads.some((payload) => payload.tokenId === tokenId)
+        && payloads.every((payload) => payload.conditionId === terms.conditionId)
+      : payloads.length === 1 && payloads[0]!.type === "TOKEN_SETTLEMENT"
+        && payloads[0]!.tokenId === tokenId;
+    if (!sourceMatches) throw new Error("Aggregated token settlement is not bound to its immutable raw event");
+    let actualCost = 0;
+    let actualPayout = 0;
+    let actualShares = 0;
+    const seen = new Set<string>();
+    for (const value of settlementRows) {
+      if (!value || typeof value !== "object") throw new Error("Malformed aggregated settlement row");
+      const row = value as Record<string, unknown>;
+      const rowLeaderId = requiredString(row, "leaderId");
+      if (requiredString(row, "tokenId") !== tokenId) throw new Error("Aggregated settlement token identity mismatch");
+      const key = stateKey(rowLeaderId, tokenId);
+      if (seen.has(key)) throw new Error("Duplicate aggregated settlement position");
+      seen.add(key);
+      const position = positions.get(key);
+      if (!position) throw new Error("Settlement attempts to close a missing position");
+      const shares = requiredNumber(row, "shares");
+      const payoutPerShare = requiredNumber(row, "payoutPerShare");
+      const rowCost = requiredNumber(row, "costBasisUsd");
+      const rowPayout = requiredNumber(row, "grossPayoutUsd");
+      const rowPnl = requiredNumber(row, "realizedPnlUsd");
+      const expectedCost = roundSettlementUsd(position.shares * position.avgEntryPrice);
+      const expectedPayout = roundSettlementUsd(position.shares * payoutPerShare);
+      if (Math.abs(shares - position.shares) > 1e-8 || Math.abs(rowCost - expectedCost) > 1e-6
+        || Math.abs(rowPayout - expectedPayout) > 1e-6 || Math.abs(rowPnl - (rowPayout - rowCost)) > 1e-6) {
+        throw new Error("Aggregated settlement accounting evidence differs");
+      }
+      actualShares += shares;
+      actualCost += rowCost;
+      actualPayout += rowPayout;
+      positions.delete(key);
+    }
+    actualShares = round(actualShares);
+    actualCost = roundSettlementUsd(actualCost);
+    actualPayout = roundSettlementUsd(actualPayout);
+    if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
+      throw new Error("Aggregated settlement totals differ");
+    }
+    requireEvidenceValue(terms, "size", actualPayout, "aggregated token REDEEM");
+    requireEvidenceValue(terms, "price", actualShares, "aggregated token REDEEM");
+  } else if (settlementSource === "condition_resolution") {
+    const leaderId = requiredString(terms, "leaderId");
     const conditionId = requiredString(terms, "conditionId");
     if (payloads.length !== 1 || !["REDEEM", "AUTO_SETTLEMENT"].includes(String(payloads[0]!.type)) ||
       payloads[0]!.conditionId !== conditionId) {
@@ -1099,6 +1153,7 @@ function validateAndApplyRedeem(
     requireEvidenceValue(terms, "size", round(actualPayout), "condition REDEEM");
     requireEvidenceValue(terms, "price", closedPositions, "condition REDEEM");
   } else if (["leader_redeem", "token_resolution", "token_settlement", "onchain_redeemable"].includes(settlementSource)) {
+    const leaderId = requiredString(terms, "leaderId");
     const tokenId = requiredString(terms, "tokenId");
     const payoutPerShare = requiredNumber(terms, "payoutPerShare");
     const sourceMatches = settlementSource === "leader_redeem"

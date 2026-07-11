@@ -51,6 +51,14 @@ import { LeaderRegistry } from "../leaders/registry.js";
 import { emptyLiveProbeFundedReason } from "../live/protected-probe.js";
 import { loadTelegramConfig, TelegramNotifier } from "../notify/telegram.js";
 import { ensureUndiciGlobalProxy } from "../util/proxy.js";
+import { evaluateRuntimeSafety } from "./runtime-safety.js";
+import {
+  assessCapacity,
+  readFilesystemCapacity,
+  recordRollingByteRate,
+  selectProjectedGrowthRate,
+  type RollingByteSample,
+} from "./capacity-guard.js";
 
 export interface CopyCycleResult {
   fetched: number;
@@ -66,7 +74,7 @@ interface QueuedTrade {
   leaderId: string;
   activity: Activity;
   sourceTradeKeys: string[];
-  rawObservationRefs?: DecisionObservationRef[];
+  rawObservationRefs: DecisionObservationRef[];
 }
 
 const SETTLEMENT_CHECK_INTERVAL_MS = 60_000;
@@ -155,8 +163,9 @@ async function settleResolvedPreviewPositions(
     }
 
     const sourceKey = `auto-settle-observation:${condition.leaderId}:${condition.conditionId}`;
-    const raw = store.getActiveExperiment()
-      ? store.recordRawEvent({
+    const activeExperiment = store.getActiveExperiment();
+    const occurrence = activeExperiment
+      ? store.recordRawEventOccurrence({
           sourceId: sourceKey,
           payload: {
             type: "AUTO_SETTLEMENT",
@@ -166,11 +175,34 @@ async function settleResolvedPreviewPositions(
             resolution: resolved,
             resolutionError,
           },
-          sourceTimestamp: now,
+          sourceTimestamp: 0,
           observedTimestamp: Date.now(),
         })
       : undefined;
-    store.setDecisionRawEventIds(raw ? [raw.rawEventId] : []);
+    if (resolutionError && activeExperiment) {
+      store.recordSettlementFailure({
+        experimentId: activeExperiment.experimentId,
+        accountId: activeExperiment.accountId,
+        leaderId: condition.leaderId,
+        conditionId: condition.conditionId,
+        slug: condition.slug,
+        errorCode: resolutionError.includes("orderPriceMinTickSize")
+          ? "gamma_tick_size_schema"
+          : "settlement_resolution_error",
+        errorMessage: resolutionError,
+        observedAt: now,
+      });
+    } else if (!resolutionError && activeExperiment) {
+      store.resolveSettlementFailure({
+        experimentId: activeExperiment.experimentId,
+        accountId: activeExperiment.accountId,
+        leaderId: condition.leaderId,
+        conditionId: condition.conditionId,
+        resolvedAt: now,
+      });
+    }
+    if (occurrence?.status === "DECIDED") continue;
+    store.setDecisionObservationRefs(occurrence ? [occurrence.observationRef] : []);
     store.audit({
       leaderId: condition.leaderId,
       action: "DETECT",
@@ -240,6 +272,9 @@ export async function runCopyCycle(
   let copied = 0;
   let skipped = 0;
   let pendingFilled = 0;
+  let uniqueObservations = 0;
+  let resumedObservations = 0;
+  let duplicateSuppressed = 0;
   const requestedCopyPriceMode = config.app.global.copyPriceMode ?? "leader_limit";
   const copyPriceModeBinding = store.ensureCopyPriceMode(requestedCopyPriceMode);
   const copyPriceModeMismatch = copyPriceModeBinding.status === "mismatch"
@@ -269,6 +304,24 @@ export async function runCopyCycle(
     errors.push(...settlementResult.errors);
   }
 
+  try {
+    await evaluateRuntimeSafety(config, store);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(`runtime safety evaluation failed — ${msg}`);
+    const control = store.getExperimentControl();
+    if (control?.state === "ACTIVE") {
+      store.setExperimentControl({
+        experimentId: control.experimentId,
+        state: "QUARANTINED",
+        reasonCode: "DATA_SAFETY_EVALUATION",
+        details: { error: msg },
+      });
+    } else if (control?.state === "QUARANTINED" && control.reasonCode?.startsWith("DATA_")) {
+      store.markExperimentDataUnhealthy({ experimentId: control.experimentId });
+    }
+  }
+
   if (copyPriceModeMismatch) {
     errors.unshift(copyPriceModeMismatch);
     return {
@@ -283,20 +336,25 @@ export async function runCopyCycle(
   }
 
   const gate = risk.canTrade();
-  if (!gate.allow) {
+  if (!gate.allow && gate.reason === "copy trading disabled") {
     logInfo("Copy cycle blocked", { reason: gate.reason });
-    if (gate.reason?.includes("daily loss cap") && telegram) {
-      telegram.killSwitch(gate.reason);
-    }
     return {
       fetched: 0,
       copied: 0,
       skipped: 0,
       pendingFilled,
-      errors: gate.reason ? [gate.reason, ...errors] : errors,
+      errors,
       walletDrifts: [],
       pendingOrders: store.countPendingOrders(),
     };
+  }
+  if (!gate.allow) {
+    logInfo("New COPY entries blocked; SELL and REDEEM remain enabled", {
+      reason: gate.reason,
+    });
+    if (gate.reason?.includes("daily loss cap") && telegram) {
+      telegram.killSwitch(gate.reason);
+    }
   }
 
   if (!config.app.global.previewMode) {
@@ -344,8 +402,8 @@ export async function runCopyCycle(
     for (const observation of observations) {
       const activity = observation.activity;
       const sourceKey = tradeEventKey(activity);
-      const rawEvent = store.getActiveExperiment()
-        ? store.recordRawEvent({
+      const occurrence = store.getActiveExperiment()
+        ? store.recordRawEventOccurrence({
             sourceId: sourceKey,
             payload: {
               ...activity,
@@ -359,7 +417,14 @@ export async function runCopyCycle(
             observedTimestamp: Date.now(),
           })
         : undefined;
-      const rawObservationRef = rawEvent ? store.latestObservationRef(rawEvent.rawEventId) : undefined;
+      const rawObservationRef = occurrence?.observationRef;
+      if (occurrence?.status === "NEW") uniqueObservations++;
+      else if (occurrence?.status === "RESUMABLE") resumedObservations++;
+      else if (occurrence?.status === "DECIDED") {
+        duplicateSuppressed++;
+        skipped++;
+        continue;
+      }
       const lineageKey = rawObservationRef
         ? `${rawObservationRef.rawEventId}:${rawObservationRef.observationId}`
         : undefined;
@@ -404,7 +469,7 @@ export async function runCopyCycle(
     rawQueue.map((item) => ({
       leaderId: item.leaderId,
       activity: item.activity,
-      sourceLineageKeys: item.rawObservationRefs?.map((ref) => `${ref.rawEventId}:${ref.observationId}`),
+      sourceLineageKeys: item.rawObservationRefs.map((ref) => `${ref.rawEventId}:${ref.observationId}`),
     })),
     config.app.global.tradeAggregationWindowMs
   );
@@ -526,15 +591,50 @@ export async function runCopyCycle(
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         errors.push(`${leaderId}: redeem resolve failed — ${msg}`);
-        store.audit({
-          leaderId,
-          action: "ERROR",
-          tokenId: conditionId,
-          side: "REDEEM",
-          reason: msg,
-          preview,
-        });
+        const active = store.getActiveExperiment();
+        if (active) {
+          const failure = store.recordSettlementFailure({
+            experimentId: active.experimentId,
+            accountId: active.accountId,
+            leaderId,
+            conditionId,
+            slug,
+            errorCode: msg.includes("orderPriceMinTickSize")
+              ? "gamma_tick_size_schema"
+              : "settlement_resolution_error",
+            errorMessage: msg,
+          });
+          if (failure.count === 1) {
+            store.audit({
+              leaderId,
+              action: "ERROR",
+              tokenId: conditionId,
+              side: "REDEEM",
+              reason: msg,
+              preview,
+            });
+          }
+        } else {
+          store.audit({
+            leaderId,
+            action: "ERROR",
+            tokenId: conditionId,
+            side: "REDEEM",
+            reason: msg,
+            preview,
+          });
+        }
         continue;
+      }
+
+      const active = store.getActiveExperiment();
+      if (active) {
+        store.resolveSettlementFailure({
+          experimentId: active.experimentId,
+          accountId: active.accountId,
+          leaderId,
+          conditionId,
+        });
       }
 
       if (!resolved?.closed || resolved.winnerTokenIds.length === 0) {
@@ -605,6 +705,21 @@ export async function runCopyCycle(
       price: activity.price,
       preview,
     });
+
+    if (activity.side === "BUY") {
+      const entryGate = risk.canTrade();
+      if (!entryGate.allow) {
+        skipped++;
+        skip(
+          store,
+          leaderId,
+          activity,
+          entryGate.reason ?? "new COPY entries disabled",
+          preview
+        );
+        continue;
+      }
+    }
 
     const filter = passActivityFilters(leader, activity);
     if (!filter.pass) {
@@ -1283,6 +1398,26 @@ export async function runCopyCycle(
   }
   store.setDecisionRawEventIds([]);
 
+  const activeExperiment = store.getActiveExperiment();
+  if (activeExperiment) {
+    try {
+      store.recordPollHourlyStats({
+        experimentId: activeExperiment.experimentId,
+        accountId: activeExperiment.accountId,
+        fetchedOccurrences: fetched,
+        uniqueObservations,
+        resumedObservations,
+        duplicateSuppressed,
+        pollErrors: pollResults.filter((result) => Boolean(result.error)).length,
+        copied,
+        skipped,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`poll statistics failed — ${msg}`);
+    }
+  }
+
   healthSnapshot.pendingOrders = store.countPendingOrders();
   return { fetched, copied, skipped, pendingFilled, errors, walletDrifts, pendingOrders };
 }
@@ -1367,6 +1502,9 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
   let cycleRunning = false;
   let pollIntervalMs = manager.pollIntervalMs;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let lastCapacityStatus: ReturnType<typeof assessCapacity>["status"] | null = null;
+  const filesystemCapacitySamples: RollingByteSample[] = [];
+  let filesystemCapacityPath: string | null = null;
 
   const schedulePoll = (ms: number) => {
     if (pollTimer) clearInterval(pollTimer);
@@ -1389,6 +1527,66 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
     }
     cycleRunning = true;
     try {
+      const enabledAccounts = manager.enabled();
+      const firstEnabled = enabledAccounts[0];
+      if (firstEnabled) {
+        if (filesystemCapacityPath !== firstEnabled.dbPath) {
+          filesystemCapacitySamples.length = 0;
+          filesystemCapacityPath = firstEnabled.dbPath;
+        }
+        const availableBytes = readFilesystemCapacity(firstEnabled.dbPath);
+        const filesystemDeclineBytesPerHour = recordRollingByteRate(
+          filesystemCapacitySamples,
+          { bytes: availableBytes, sampledAt: Date.now() },
+          "decrease"
+        );
+        const growthBytesPerHour = selectProjectedGrowthRate(
+          enabledAccounts.map((account) => account.health.dbGrowthBytesPerHour),
+          filesystemDeclineBytesPerHour
+        );
+        const capacity = assessCapacity({
+          availableBytes,
+          growthBytesPerHour,
+        });
+        if (capacity.status !== lastCapacityStatus) {
+          logInfo("Capacity gate updated", capacity);
+          lastCapacityStatus = capacity.status;
+        }
+        for (const account of enabledAccounts) {
+          const control = account.store.getExperimentControl();
+          if (!control) continue;
+          if (capacity.status === "SETTLE_ONLY") {
+            if (control.state === "ACTIVE") {
+              account.store.setExperimentControl({
+                experimentId: control.experimentId,
+                state: "QUARANTINED",
+                reasonCode: "DATA_CAPACITY_LOW",
+                details: {
+                  status: capacity.status,
+                  projectedDays: capacity.projectedDays,
+                  reasons: capacity.reasons,
+                },
+              });
+            } else if (
+              control.state === "QUARANTINED"
+              && control.reasonCode === "DATA_CAPACITY_LOW"
+            ) {
+              account.store.markExperimentDataUnhealthy({
+                experimentId: control.experimentId,
+              });
+            }
+          } else if (
+            capacity.status === "OK"
+            && control.state === "QUARANTINED"
+            && control.reasonCode === "DATA_CAPACITY_LOW"
+            && control.healthySince === null
+          ) {
+            account.store.markExperimentDataHealthy({
+              experimentId: control.experimentId,
+            });
+          }
+        }
+      }
       const pollActivityCache: PollActivityCache = new Map();
       for (const account of manager.enabled()) {
         const tag = `[${account.id}]`;
@@ -1404,7 +1602,12 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
             result.errors.slice(0, 5).forEach((e) => logError(`${tag} ${e}`));
           }
           if (account.store.isKillSwitchActive()) {
-            telegram.killSwitch(`${tag} active — no new copies until tomorrow UTC`);
+            const control = account.store.getExperimentControl();
+            telegram.killSwitch(
+              `${tag} sticky ${control?.state ?? "kill switch"}`
+              + `${control?.reasonCode ? ` — ${control.reasonCode}` : ""}`
+              + "; settlements continue, no automatic UTC reset"
+            );
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);

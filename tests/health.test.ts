@@ -28,6 +28,8 @@ describe("syncAggregateHealth", () => {
     syncAggregateHealth(accounts);
 
     expect(healthSnapshot.enabledLeaders).toEqual(["active-leader"]);
+    expect(healthSnapshot.enabledAccountCount).toBe(1);
+    expect(healthSnapshot.polledAccountCount).toBe(0);
   });
 
   it("excludes disabled accounts from aggregate health state", () => {
@@ -78,5 +80,31 @@ describe("syncAggregateHealth", () => {
     expect(healthSnapshot.walletDrifts).toEqual(["active drift"]);
     expect(healthSnapshot.lastPollAt).toBe(100);
     expect(healthSnapshot.lastError).toBeNull();
+  });
+
+  it("keeps an error from any enabled account even when a later account is healthy", () => {
+    const accounts = [
+      {
+        enabled: true,
+        health: health(["errored"], {
+          lastPollAt: 100,
+          lastError: "leader poll failed",
+        }),
+      },
+      {
+        enabled: true,
+        health: health(["healthy"], {
+          lastPollAt: 200,
+          lastError: null,
+        }),
+      },
+    ];
+
+    syncAggregateHealth(accounts);
+
+    expect(healthSnapshot.lastPollAt).toBe(200);
+    expect(healthSnapshot.lastError).toBe("leader poll failed");
+    expect(healthSnapshot.enabledAccountCount).toBe(2);
+    expect(healthSnapshot.polledAccountCount).toBe(2);
   });
 });

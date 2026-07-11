@@ -1,75 +1,86 @@
 /**
- * Patches @polymarket/client for PolyMirror deposit-wallet + env CLOB credentials.
- *
- * 1. classifyWalletType: relayer-deployed wallets via globalThis.__POLYMIRROR_RELAYER_WALLETS__
- * 2. beginAuthentication: trust .env credentials when L2 fetchApiKeys succeeds
+ * Patches the pinned @polymarket/client build to trust supplied CLOB credentials
+ * when the authenticated fetchApiKeys request succeeds.
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const chunkPath = join(root, "node_modules/@polymarket/client/dist/chunk-UBQO5URS.js");
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const root = process.env.POLYMIRROR_SDK_PATCH_ROOT
+  ? resolve(process.env.POLYMIRROR_SDK_PATCH_ROOT)
+  : repoRoot;
+const packagePath = join(root, "node_modules/@polymarket/client/package.json");
 const indexPath = join(root, "node_modules/@polymarket/client/dist/index.js");
-
-const RELAYER_MARKER = "__POLYMIRROR_RELAYER_WALLETS__";
-const CLASSIFY_NEEDLE =
-  "if(isSameEvmAddress(t,wn(r,o)))return WalletType.POLY_PROXY;never(";
-const CLASSIFY_REPLACEMENT =
-  `if(isSameEvmAddress(t,wn(r,o)))return WalletType.POLY_PROXY;if(globalThis.${RELAYER_MARKER}?.has?.(t.toLowerCase()))return WalletType.DEPOSIT_WALLET;never(`;
+const EXPECTED_VERSION = "0.1.0-beta.14";
 
 const CREDENTIALS_NEEDLE =
-  "try{if((await L(Ae)).includes(n.credentials.key))return Ae}catch(O){if(!(O instanceof d$1)||O.status!==401)throw O}";
-const CREDENTIALS_REPLACEMENT =
-  "try{await L(Ae);return Ae}catch(O){if(!(O instanceof d$1)||O.status!==401)throw O}";
+  "try{if((await $a(Ce)).includes(s.credentials.key))return Ce}catch(T){if(!(T instanceof d)||T.status!==401)throw T}";
 const CREDENTIALS_MARKER = "POLYMIRROR_TRUST_ENV_CREDENTIALS";
-
-const ALLOW_UNPATCHED = process.env.POLYMIRROR_ALLOW_UNPATCHED_SDK === "1";
+const CREDENTIALS_REPLACEMENT =
+  `try{await $a(Ce);/*${CREDENTIALS_MARKER}*/return Ce}catch(T){if(!(T instanceof d)||T.status!==401)throw T}`;
 
 class SdkPatchError extends Error {}
 
-function patchOnce(path, label, needle, replacement, appliedMarker) {
+function occurrenceCount(source, needle) {
+  return source.split(needle).length - 1;
+}
+
+function requirePinnedVersion() {
+  if (!existsSync(packagePath)) {
+    throw new SdkPatchError(
+      `@polymarket/client package metadata not found at ${packagePath}. Run "npm ci" first.`
+    );
+  }
+  const installedVersion = JSON.parse(readFileSync(packagePath, "utf8")).version;
+  if (installedVersion !== EXPECTED_VERSION) {
+    throw new SdkPatchError(
+      `expected @polymarket/client ${EXPECTED_VERSION}, found ${String(installedVersion)}`
+    );
+  }
+}
+
+function patchCredentials() {
+  const label = "@polymarket/client/dist/index.js";
+  const path = indexPath;
   if (!existsSync(path)) {
     throw new SdkPatchError(
-      `${label} not found at ${path} - @polymarket/client is a required dependency. ` +
-        `Run "npm install" to install it before patching.`
+      `${label} not found at ${path}. Run "npm ci" first.`
     );
   }
   const src = readFileSync(path, "utf8");
-  if (src.includes(appliedMarker) || src.includes(replacement)) {
+  const markerCount = occurrenceCount(src, CREDENTIALS_MARKER);
+  const replacementCount = occurrenceCount(src, CREDENTIALS_REPLACEMENT);
+  const targetCount = occurrenceCount(src, CREDENTIALS_NEEDLE);
+
+  if (markerCount === 1 && replacementCount === 1 && targetCount === 0) {
     return false;
   }
-  if (!src.includes(needle)) {
+  if (markerCount !== 0 || replacementCount !== 0) {
     throw new SdkPatchError(
-      `${label}: patch target not found - @polymarket/client likely changed version. ` +
-        `Update scripts/patch-polymarket-client.mjs to match the new SDK build, ` +
-        `then verify the change is still correct. ` +
-        `To bypass intentionally, set POLYMIRROR_ALLOW_UNPATCHED_SDK=1.`
+      `${label}: credentials patch marker/replacement is inconsistent ` +
+        `(marker=${markerCount}, replacement=${replacementCount}, target=${targetCount})`
     );
   }
-  writeFileSync(path, src.replace(needle, replacement), "utf8");
-  console.log(`patch-polymarket-client: applied ${appliedMarker} in ${label}`);
+  if (targetCount !== 1) {
+    throw new SdkPatchError(
+      `${label}: credentials patch target count was ${targetCount}, expected exactly 1. ` +
+        `The pinned SDK build may have changed; review before updating this patch.`
+    );
+  }
+
+  writeFileSync(path, src.replace(CREDENTIALS_NEEDLE, CREDENTIALS_REPLACEMENT), "utf8");
+  console.log(`patch-polymarket-client: applied ${CREDENTIALS_MARKER} in ${label}`);
   return true;
 }
 
 function main() {
   try {
-    patchOnce(chunkPath, "chunk", CLASSIFY_NEEDLE, CLASSIFY_REPLACEMENT, RELAYER_MARKER);
-    patchOnce(
-      indexPath,
-      "index.js",
-      CREDENTIALS_NEEDLE,
-      CREDENTIALS_REPLACEMENT,
-      CREDENTIALS_MARKER
-    );
+    requirePinnedVersion();
+    patchCredentials();
   } catch (e) {
     if (e instanceof SdkPatchError) {
-      const msg = `patch-polymarket-client: ${e.message}`;
-      if (ALLOW_UNPATCHED) {
-        console.warn(`${msg}\n(continuing because POLYMIRROR_ALLOW_UNPATCHED_SDK=1)`);
-        return;
-      }
-      console.error(msg);
+      console.error(`patch-polymarket-client: ${e.message}`);
       process.exit(1);
     }
     throw e;

@@ -1,0 +1,51 @@
+{
+  "cohortId": "quality12-20260711-v1",
+  "candidates": [
+    {
+      "id": "ec47",
+      "address": "0xec47cb4e0a4f4e375d9787debf7c874214f21119",
+      "freshIntakePassed": false
+    },
+    {
+      "id": "dance",
+      "address": "0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82",
+      "freshIntakePassed": false
+    },
+    {
+      "id": "linabell",
+      "address": "0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8",
+      "freshIntakePassed": false
+    },
+    {
+      "id": "pada",
+      "address": "0x714a685b5454ea4d52979563bbafa77b8168ab2f",
+      "freshIntakePassed": false
+    }
+  ],
+  "arms": {
+    "conservative": {
+      "fixedUsd": 1,
+      "maxPositionUsd": 10,
+      "maxDailyVolumeUsd": 40,
+      "maxOpenMarkets": 10,
+      "dailyLossCapPct": 5,
+      "slippageTolerance": 0.015
+    },
+    "standard": {
+      "fixedUsd": 2,
+      "maxPositionUsd": 20,
+      "maxDailyVolumeUsd": 80,
+      "maxOpenMarkets": 15,
+      "dailyLossCapPct": 8,
+      "slippageTolerance": 0.025
+    },
+    "aggressive": {
+      "fixedUsd": 5,
+      "maxPositionUsd": 40,
+      "maxDailyVolumeUsd": 160,
+      "maxOpenMarkets": 20,
+      "dailyLossCapPct": 10,
+      "slippageTolerance": 0.04
+    }
+  }
+}

@@ -50,13 +50,32 @@ const candidateArmSchema = z.object({
   }
 });
 
+const candidateSchema = z.object({
+  id: idSchema.max(20),
+  address: z.string().regex(/^0x[A-Fa-f0-9]{40}$/).optional(),
+  username: z.string().min(1).optional(),
+  freshIntakePassed: z.boolean(),
+  freshIntakeEvidenceSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+}).strict().superRefine((candidate, context) => {
+  if (candidate.freshIntakePassed && !candidate.freshIntakeEvidenceSha256) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "freshIntakeEvidenceSha256 is required when freshIntakePassed is true",
+      path: ["freshIntakeEvidenceSha256"],
+    });
+  }
+  if (!candidate.freshIntakePassed && candidate.freshIntakeEvidenceSha256) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "freshIntakeEvidenceSha256 is only allowed when freshIntakePassed is true",
+      path: ["freshIntakeEvidenceSha256"],
+    });
+  }
+});
+
 export const candidateCohortSchema = z.object({
   cohortId: idSchema.max(24),
-  candidates: z.array(z.object({
-    id: idSchema.max(20),
-    address: z.string().regex(/^0x[A-Fa-f0-9]{40}$/).optional(),
-    username: z.string().min(1).optional(),
-  }).strict()).min(1).max(10),
+  candidates: z.array(candidateSchema).min(1).max(10),
   arms: z.object({
     conservative: candidateArmSchema.optional(),
     standard: candidateArmSchema.optional(),
@@ -103,6 +122,11 @@ interface CandidateRuleInput {
   candidates?: Array<{ id?: string; address?: string }>;
 }
 
+interface CandidateFreshIntakeInput {
+  freshIntakePassed?: boolean;
+  freshIntakeEvidenceSha256?: string;
+}
+
 const candidateSchemaPath = fileURLToPath(
   new URL("../../config/candidate-cohort.schema.json", import.meta.url)
 );
@@ -111,6 +135,18 @@ const publishedCandidateSchema = JSON.parse(
 ) as AnySchema;
 const candidateSchemaValidator = (() => {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
+  ajv.addKeyword({
+    keyword: "x-candidateFreshIntakeRules",
+    schemaType: "array",
+    errors: false,
+    validate: (_rules: string[], value: unknown) => {
+      if (!value || typeof value !== "object") return true;
+      const candidate = value as CandidateFreshIntakeInput;
+      return candidate.freshIntakePassed === true
+        ? typeof candidate.freshIntakeEvidenceSha256 === "string"
+        : candidate.freshIntakeEvidenceSha256 === undefined;
+    },
+  });
   ajv.addKeyword({
     keyword: "x-candidateArmRules",
     schemaType: "array",
@@ -179,6 +215,19 @@ export function validateCandidateCohortJson(input: unknown): unknown {
               if (address) addresses.add(address);
             }
           }
+          if (error.keyword === "x-candidateFreshIntakeRules") {
+            const path = error.instancePath || "/";
+            const candidate = error.instancePath
+              .split("/")
+              .filter(Boolean)
+              .reduce<unknown>((value, key) => {
+                if (!value || typeof value !== "object") return undefined;
+                return (value as Record<string, unknown>)[key];
+              }, input) as CandidateFreshIntakeInput | undefined;
+            return candidate?.freshIntakePassed
+              ? `${path} freshIntakeEvidenceSha256 is required when freshIntakePassed is true`
+              : `${path} freshIntakeEvidenceSha256 is only allowed when freshIntakePassed is true`;
+          }
           return `${error.instancePath || "/"} ${error.message ?? "is invalid"}`;
         })
         .join("; ")
@@ -225,7 +274,7 @@ const ARM_DEFAULTS: Record<CandidateArmName, ResolvedArm> = {
     maxPositionUsd: 40,
     maxDailyVolumeUsd: 160,
     maxOpenMarkets: 20,
-    dailyLossCapPct: 12,
+    dailyLossCapPct: 10,
     slippageTolerance: 0.04,
     minPrice: 0.02,
     maxPrice: 0.9,
@@ -302,6 +351,7 @@ export function buildCandidateExperimentConfig(
     ARM_ORDER.map((armName) => {
       const arm = arms[armName];
       const configured = Boolean(candidate.address || candidate.username?.trim());
+      const copyEnabled = configured && candidate.freshIntakePassed;
       const id = `exp_${input.cohortId}_${candidate.id}_${armName}_200`;
       if (id.length > 64) throw new Error(`generated account id exceeds 64 characters: ${id}`);
 
@@ -312,7 +362,7 @@ export function buildCandidateExperimentConfig(
         copy_trades_only: true,
         risk: {
           ...defaults.risk,
-          enable_copy_trading: configured,
+          enable_copy_trading: copyEnabled,
           starting_capital_usd: 200,
           daily_loss_cap_pct: arm.dailyLossCapPct,
           max_daily_volume_usd: arm.maxDailyVolumeUsd,
@@ -341,7 +391,7 @@ export function buildCandidateExperimentConfig(
             id: candidate.id,
             ...(candidate.address ? { address: candidate.address.toLowerCase() } : {}),
             ...(candidate.username?.trim() ? { username: candidate.username.trim() } : {}),
-            enabled: configured,
+            enabled: copyEnabled,
             weight: 1,
             strategy: { type: "FIXED", copy_size: arm.fixedUsd },
             limits: {

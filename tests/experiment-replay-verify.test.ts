@@ -83,7 +83,7 @@ describe("sealed deterministic replay", () => {
     expect(result.actual.decisionDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("replays an already-seen decision after an identical observation is deduplicated", async () => {
+  it("suppresses an identical observation after its terminal decision", async () => {
     const dbPath = join(dir, "deduplicated-observation.db");
     const store = new StateStore(dbPath);
     const config = previewRuntimeConfig();
@@ -100,7 +100,7 @@ describe("sealed deterministic replay", () => {
     const raw = store.recordRawEvent({
       sourceId: "buy", payload, sourceTimestamp: 1, observedTimestamp: 1,
     });
-    store.recordRawEvent({
+    const repeated = store.recordRawEventOccurrence({
       sourceId: "buy", payload, sourceTimestamp: 1, observedTimestamp: 2,
     });
     expect(store.listRawEventObservations(raw.rawEventId)).toHaveLength(1);
@@ -117,12 +117,10 @@ describe("sealed deterministic replay", () => {
     });
     store.applyCopyFill("whale", "token-a", "BUY", 2, 0.5);
     store.adjustCash(-1, 10);
-    store.recordDecision({
-      rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "already_seen",
-      exactTerms: { leaderId: "whale", tokenId: "token-a", side: "BUY", size: 10, price: 0.5,
-        reason: "already seen", preview: true },
-      decidedAt: 3,
-    });
+    expect(store.recordRawEventOccurrence({
+      sourceId: "buy", payload, sourceTimestamp: 1, observedTimestamp: 3,
+    })).toMatchObject({ status: "DECIDED", terminalDecisionId: expect.any(String) });
+    expect(repeated.status).toBe("RESUMABLE");
     store.close();
 
     const archived = await archiveExperimentEvidence({
@@ -230,18 +228,9 @@ describe("sealed deterministic replay", () => {
       price: 0.5, reason: "stale_activity", reasonCode: "stale_activity", preview: true,
     });
 
-    store.recordRawEvent({
+    expect(store.recordRawEventOccurrence({
       sourceId: "buy", payload: acceptedPayload, sourceTimestamp: 1, observedTimestamp: 3,
-    });
-    store.setDecisionRawEventIds([accepted.rawEventId]);
-    store.audit({
-      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
-      size: 10, price: 0.5, preview: true,
-    });
-    store.audit({
-      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
-      size: 10, price: 0.5, reason: "already seen", preview: true,
-    });
+    })).toMatchObject({ status: "DECIDED" });
 
     store.recordRawEvent({
       sourceId: "buy", payload: acceptedPayload, sourceTimestamp: 2, observedTimestamp: 4,
@@ -270,19 +259,10 @@ describe("sealed deterministic replay", () => {
       size: 10, price: 0.7, reason: "price_filter", reasonCode: "price_filter", preview: true,
     });
 
-    store.recordRawEvent({
+    expect(store.recordRawEventOccurrence({
       sourceId: "buy", payload: { ...acceptedPayload, price: 0.7, candidate: false, rejectionReasonCode: "price_filter" },
       sourceTimestamp: 3, observedTimestamp: 6,
-    });
-    store.setDecisionRawEventIds([accepted.rawEventId]);
-    store.audit({
-      leaderId: "whale", action: "DETECT", tokenId: "token-a", side: "BUY",
-      size: 10, price: 0.7, reason: "raw activity detected", preview: true,
-    });
-    store.audit({
-      leaderId: "whale", action: "SKIP", tokenId: "token-a", side: "BUY",
-      size: 10, price: 0.7, reason: "price_filter", reasonCode: "price_filter", preview: true,
-    });
+    })).toMatchObject({ status: "DECIDED" });
     store.setDecisionRawEventIds([]);
     store.close();
 
@@ -298,7 +278,6 @@ describe("sealed deterministic replay", () => {
       [1, "COPY", "copy_executed"],
       [2, "DETECT", "detected"],
       [2, "SKIP", "stale_activity"],
-      [1, "SKIP", "already_seen"],
       [3, "DETECT", "detected"],
       [3, "SKIP", "already_seen"],
       [4, "DETECT", "detected"],
@@ -676,7 +655,7 @@ describe("sealed deterministic replay", () => {
       .rejects.toThrow(/global decision order|decision set mismatch/i);
   });
 
-  it("rejects an extra COPY after an incomplete activity and fabricated skip terms", async () => {
+  it("rejects an extra COPY at write time after an incomplete activity", async () => {
     const dbPath = join(dir, "extra.db"); const store = new StateStore(dbPath); const config = previewRuntimeConfig();
     const exp = store.startOrResumeExperiment({ accountId: "extra", candidateAddresses: [], config,
       gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
@@ -686,9 +665,10 @@ describe("sealed deterministic replay", () => {
       exactTerms: { leaderId: "whale", tokenId: null, side: null, size: null, price: null, preview: true }, decidedAt: 1 });
     store.recordDecision({ rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "unsupported_or_incomplete_activity",
       exactTerms: { leaderId: "whale", tokenId: null, side: null, reason: "fabricated reason", requestedPrice: 0.99 }, decidedAt: 1 });
-    store.recordDecision({ rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
+    expect(() => store.recordDecision({ rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
       exactTerms: { leaderId: "whale", tokenId: "fake", side: "BUY", requestedShares: 1, requestedPrice: 0.5,
-        filledShares: 1, filledUsd: 0.5, feeUsd: 0 }, decidedAt: 2 });
+        filledShares: 1, filledUsd: 0.5, feeUsd: 0 }, decidedAt: 2 }))
+      .toThrow(/terminal decision already exists/i);
     store.close();
     await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId, archiveDir: join(dir, "extra-archive") }))
       .rejects.toThrow(/incomplete trade|decision set mismatch/i);
@@ -703,14 +683,18 @@ describe("sealed deterministic replay", () => {
         timestamp: 1, candidate: false, rejectionReasonCode: "poll_rejected_activity" },
       sourceTimestamp: 1, observedTimestamp: 1 });
     store.recordDecision({ rawEventId: raw.rawEventId, action: "DETECT", reasonCode: "detected",
-      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 1 });
+      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY", size: 1, price: 0.5,
+        reason: "raw activity detected", preview: true }, decidedAt: 1 });
     store.recordDecision({ rawEventId: raw.rawEventId, action: "SKIP", reasonCode: "poll_rejected_activity",
-      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 2 });
-    store.recordDecision({ rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
-      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 3 });
+      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY", size: 1, price: 0.5,
+        reason: "poll rejected activity", preview: true }, decidedAt: 2 });
+    expect(() => store.recordDecision({ rawEventId: raw.rawEventId, action: "COPY", reasonCode: "copy_executed",
+      exactTerms: { leaderId: "whale", tokenId: "token", side: "BUY" }, decidedAt: 3 }))
+      .toThrow(/terminal decision already exists/i);
     store.close();
-    await expect(archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
-      archiveDir: join(dir, "rejected-extra-archive") })).rejects.toThrow(/poll rejection|decision set mismatch/i);
+    const archived = await archiveExperimentEvidence({ dbPath, experimentId: exp.experimentId,
+      archiveDir: join(dir, "rejected-extra-archive") });
+    expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath }).match).toBe(true);
   });
 
   it("rejects a fabricated AUTO_SETTLEMENT skip reason", async () => {

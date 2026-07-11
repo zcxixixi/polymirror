@@ -95,7 +95,11 @@ function serveStatic(pathname: string, res: ServerResponse): boolean {
 }
 
 function handleHealth(res: ServerResponse): void {
-  const degraded = healthSnapshot.killSwitchActive;
+  const degraded = healthSnapshot.killSwitchActive
+    || healthSnapshot.settlementFailures > 0
+    || healthSnapshot.closedMarketOpenPositions > 0
+    || healthSnapshot.pendingOrders > 0
+    || healthSnapshot.walletDrifts.length > 0;
   const httpOk = !degraded || healthSnapshot.previewMode;
   sendJson(res, httpOk ? 200 : 503, {
     status: degraded ? "degraded" : "ok",
@@ -108,6 +112,13 @@ function handleHealth(res: ServerResponse): void {
     lastError: healthSnapshot.lastError,
     pendingOrders: healthSnapshot.pendingOrders,
     walletDrifts: healthSnapshot.walletDrifts,
+    settlementFailures: healthSnapshot.settlementFailures,
+    closedMarketOpenPositions: healthSnapshot.closedMarketOpenPositions,
+    dbSizeBytes: healthSnapshot.dbSizeBytes,
+    dbGrowthBytesPerHour: healthSnapshot.dbGrowthBytesPerHour,
+    enabledAccountCount: healthSnapshot.enabledAccountCount,
+    polledAccountCount: healthSnapshot.polledAccountCount,
+    experiments: healthSnapshot.experiments,
   });
 }
 

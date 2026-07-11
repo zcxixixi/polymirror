@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MarketSchema } from "@polymarket/bindings/gamma";
 import { fetchResolvedMarketOutcome } from "../src/monitor/market-resolve.js";
 import { getPublicClient } from "../src/sdk/public-client.js";
+import { gammaMarketResponseFixture } from "./fixtures/gamma-market-response.js";
 
 vi.mock("../src/sdk/public-client.js", () => ({
   getPublicClient: vi.fn(),
@@ -24,6 +26,56 @@ function mockMarket(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+function decodeGammaMarket(overrides: Record<string, unknown> = {}) {
+  return MarketSchema.parse({
+    ...gammaMarketResponseFixture,
+    ...overrides,
+  });
+}
+
+describe("official Gamma market decoder compatibility", () => {
+  it.each([0.1, 0.01, 0.005, 0.0025, 0.001, 0.0001])(
+    "accepts supported minimum tick size %s",
+    (minimumTickSize) => {
+      const market = decodeGammaMarket({ orderPriceMinTickSize: minimumTickSize });
+      expect(market.trading.minimumTickSize).toBe(minimumTickSize);
+    }
+  );
+
+  it("rejects an unsupported minimum tick size", () => {
+    expect(() => decodeGammaMarket({ orderPriceMinTickSize: 0.003 })).toThrow();
+  });
+
+  it("feeds a decoded resolved market into settlement without network or orders", async () => {
+    const decoded = decodeGammaMarket({ orderPriceMinTickSize: 0.0025 });
+    mockGetPublicClient.mockResolvedValue({
+      fetchMarket: vi.fn().mockResolvedValue(decoded),
+    } as never);
+
+    await expect(fetchResolvedMarketOutcome(decoded.slug)).resolves.toEqual({
+      closed: true,
+      winnerTokenIds: ["123"],
+    });
+  });
+
+  it("keeps a decoded unresolved market open without network or orders", async () => {
+    const decoded = decodeGammaMarket({
+      orderPriceMinTickSize: 0.005,
+      closed: false,
+      umaResolutionStatus: undefined,
+      outcomePrices: '["0.995","0.005"]',
+    });
+    mockGetPublicClient.mockResolvedValue({
+      fetchMarket: vi.fn().mockResolvedValue(decoded),
+    } as never);
+
+    await expect(fetchResolvedMarketOutcome(decoded.slug)).resolves.toEqual({
+      closed: false,
+      winnerTokenIds: [],
+    });
+  });
+});
 
 describe("fetchResolvedMarketOutcome", () => {
   beforeEach(() => {

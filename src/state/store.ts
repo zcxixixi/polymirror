@@ -23,10 +23,157 @@ import {
 
 const DEFAULT_DB = "data/polymirror.db";
 export const FILL_RECONCILIATION_WINDOW_MS = 24 * 60 * 60_000;
-export const STATE_SCHEMA_VERSION = 9;
+export const STATE_SCHEMA_VERSION = 10;
 
 export type AuditAction = "DETECT" | "SKIP" | "COPY" | "ERROR" | "REDEEM";
 export interface DecisionObservationRef { rawEventId: string; observationId: number }
+
+export type RawEventOccurrenceStatus = "NEW" | "RESUMABLE" | "DECIDED";
+
+export interface RawEventOccurrenceResult {
+  status: RawEventOccurrenceStatus;
+  rawEvent: RawEventRow;
+  observationRef: Readonly<DecisionObservationRef>;
+  terminalDecisionId: string | null;
+}
+
+export interface PollHourlyStatsRow {
+  experimentId: string;
+  accountId: string;
+  hourStart: number;
+  pollCount: number;
+  fetchedOccurrences: number;
+  uniqueObservations: number;
+  resumedObservations: number;
+  duplicateSuppressed: number;
+  pollErrors: number;
+  copied: number;
+  skipped: number;
+  firstPollAt: number;
+  lastPollAt: number;
+}
+
+export interface RecordPollHourlyStatsInput {
+  experimentId?: string;
+  accountId?: string;
+  observedAt?: number;
+  fetchedOccurrences: number;
+  uniqueObservations: number;
+  resumedObservations: number;
+  duplicateSuppressed: number;
+  pollErrors: number;
+  copied?: number;
+  skipped?: number;
+}
+
+export interface SettlementFailureRow {
+  experimentId: string;
+  accountId: string;
+  leaderId: string;
+  conditionId: string;
+  slug: string | null;
+  errorCode: string;
+  errorMessage: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  count: number;
+  resolvedAt: number | null;
+}
+
+export interface RecordSettlementFailureInput {
+  experimentId?: string;
+  accountId?: string;
+  leaderId: string;
+  conditionId: string;
+  slug?: string;
+  errorCode: string;
+  errorMessage: string;
+  observedAt?: number;
+}
+
+export interface ResolveSettlementFailureInput {
+  experimentId?: string;
+  accountId?: string;
+  leaderId: string;
+  conditionId: string;
+  resolvedAt?: number;
+}
+
+export type ExperimentCopyState = "ACTIVE" | "SETTLE_ONLY" | "QUARANTINED";
+
+export interface ExperimentControlRow {
+  experimentId: string;
+  state: ExperimentCopyState;
+  reasonCode: string | null;
+  details: Record<string, unknown>;
+  triggeredAt: number | null;
+  healthySince: number | null;
+  reviewedAt: number | null;
+}
+
+export interface ExperimentControlAuditRow {
+  auditId: number;
+  experimentId: string;
+  fromState: ExperimentCopyState;
+  toState: ExperimentCopyState;
+  reasonCode: string;
+  details: Record<string, unknown>;
+  occurredAt: number;
+  reviewedAt: number | null;
+}
+
+export interface SetExperimentControlInput {
+  experimentId?: string;
+  state: Exclude<ExperimentCopyState, "ACTIVE">;
+  reasonCode: string;
+  details?: Record<string, unknown>;
+  triggeredAt?: number;
+}
+
+export interface MarkExperimentDataHealthyInput {
+  experimentId?: string;
+  healthyAt?: number;
+}
+
+export interface MarkExperimentDataUnhealthyInput {
+  experimentId?: string;
+  observedAt?: number;
+}
+
+export interface ReactivateQuarantinedExperimentInput {
+  experimentId?: string;
+  reviewedAt: number;
+  details?: Record<string, unknown>;
+}
+
+export interface EquitySnapshotRow {
+  experimentId: string;
+  accountId: string;
+  hourStart: number;
+  cashUsd: number;
+  liquidationValueUsd: number;
+  equityUsd: number;
+  openCostUsd: number;
+  quoteCoverage: number;
+  drawdownPct: number;
+  peakEquityUsd: number;
+  missingTokenCount: number;
+  observedAt: number;
+}
+
+export interface RecordEquitySnapshotInput {
+  experimentId?: string;
+  accountId?: string;
+  observedAt?: number;
+  cashUsd: number;
+  liquidationValueUsd: number;
+  equityUsd: number;
+  openCostUsd: number;
+  quoteCoverage: number;
+  drawdownPct: number;
+  peakEquityUsd: number;
+  missingTokenCount: number;
+}
 
 export interface PendingOrderRow {
   orderId: string;
@@ -85,6 +232,7 @@ export interface AuditLogRow {
   feeUsd: number;
   reason: string | null;
   preview: boolean;
+  decisionId: string | null;
 }
 
 export interface PositionRow {
@@ -177,6 +325,47 @@ export interface CopyPriceModeCompatibilityResult {
 
 function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+function assertNonNegativeInteger(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative safe integer`);
+  }
+}
+
+function requiredAggregateKey(name: string, value: string): string {
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`${name} is required`);
+  return normalized;
+}
+
+const DATA_HEALTHY_WINDOW_MS = 60 * 60_000;
+
+function assertFiniteNumber(name: string, value: number): void {
+  if (!Number.isFinite(value)) throw new Error(`${name} must be finite`);
+}
+
+type DecisionSlotPhase = "DETECT" | "PROGRESS" | "TERMINAL";
+
+function decisionSlotPhase(
+  action: DecisionAction,
+  exactTerms: Record<string, unknown>
+): DecisionSlotPhase {
+  if (action === "DETECT") return "DETECT";
+  if (action === "COPY" || action === "SELL") {
+    const pendingRemaining = exactTerms.pendingRemaining;
+    if (typeof pendingRemaining === "number" && Number.isFinite(pendingRemaining)) {
+      return pendingRemaining > 1e-9 ? "PROGRESS" : "TERMINAL";
+    }
+    const requestedShares = exactTerms.requestedShares;
+    const filledShares = exactTerms.filledShares;
+    if (typeof requestedShares === "number" && Number.isFinite(requestedShares)
+      && typeof filledShares === "number" && Number.isFinite(filledShares)
+      && filledShares + 1e-9 < requestedShares) {
+      return "PROGRESS";
+    }
+  }
+  return "TERMINAL";
 }
 
 function roundUsd(value: number): number {
@@ -372,6 +561,7 @@ export class StateStore {
         reason TEXT,
         preview INTEGER NOT NULL DEFAULT 1
         ,experiment_id TEXT
+        ,decision_id TEXT REFERENCES decisions(decision_id)
       );
       CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
       CREATE INDEX IF NOT EXISTS idx_audit_log_action_reason ON audit_log(action, reason);
@@ -499,6 +689,27 @@ export class StateStore {
           OR NEW.trust_class <> OLD.trust_class
           OR NEW.start_state_json <> OLD.start_state_json
         BEGIN SELECT RAISE(ABORT, 'experiment manifest is immutable'); END;
+      CREATE TABLE IF NOT EXISTS experiment_controls (
+        experiment_id TEXT PRIMARY KEY REFERENCES experiments(experiment_id),
+        copy_state TEXT NOT NULL CHECK(copy_state IN ('ACTIVE', 'SETTLE_ONLY', 'QUARANTINED')),
+        reason_code TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        triggered_at INTEGER NOT NULL,
+        healthy_since INTEGER,
+        reviewed_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS experiment_control_audit (
+        audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        from_state TEXT NOT NULL,
+        to_state TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        occurred_at INTEGER NOT NULL,
+        reviewed_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_experiment_control_audit_experiment
+        ON experiment_control_audit(experiment_id, audit_id);
       CREATE TABLE IF NOT EXISTS raw_events (
         raw_event_id TEXT PRIMARY KEY,
         experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
@@ -542,6 +753,64 @@ export class StateStore {
         decision_order INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_decisions_raw_event ON decisions(raw_event_id, decided_at);
+      CREATE TABLE IF NOT EXISTS observation_decision_slots (
+        observation_id INTEGER NOT NULL REFERENCES raw_event_observations(observation_id),
+        decision_phase TEXT NOT NULL CHECK(decision_phase IN ('DETECT', 'TERMINAL')),
+        decision_id TEXT NOT NULL REFERENCES decisions(decision_id),
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (observation_id, decision_phase),
+        UNIQUE (observation_id, decision_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_observation_decision_slots_decision
+        ON observation_decision_slots(decision_id);
+      CREATE TABLE IF NOT EXISTS poll_hourly_stats (
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        account_id TEXT NOT NULL,
+        hour_start INTEGER NOT NULL,
+        poll_count INTEGER NOT NULL DEFAULT 0,
+        fetched_occurrences INTEGER NOT NULL DEFAULT 0,
+        unique_observations INTEGER NOT NULL DEFAULT 0,
+        resumed_observations INTEGER NOT NULL DEFAULT 0,
+        duplicate_suppressed INTEGER NOT NULL DEFAULT 0,
+        poll_errors INTEGER NOT NULL DEFAULT 0,
+        copied INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        first_poll_at INTEGER NOT NULL,
+        last_poll_at INTEGER NOT NULL,
+        PRIMARY KEY (experiment_id, account_id, hour_start)
+      );
+      CREATE TABLE IF NOT EXISTS settlement_failures (
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        account_id TEXT NOT NULL,
+        leader_id TEXT NOT NULL,
+        condition_id TEXT NOT NULL,
+        slug TEXT,
+        error_code TEXT NOT NULL,
+        error_message TEXT NOT NULL,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        failure_count INTEGER NOT NULL DEFAULT 1,
+        resolved_at INTEGER,
+        PRIMARY KEY (experiment_id, account_id, leader_id, condition_id, error_code)
+      );
+      CREATE INDEX IF NOT EXISTS idx_settlement_failures_active
+        ON settlement_failures(experiment_id, resolved_at, last_seen_at);
+      CREATE TABLE IF NOT EXISTS equity_snapshots (
+        experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id),
+        account_id TEXT NOT NULL,
+        hour_start INTEGER NOT NULL,
+        cash_usd REAL NOT NULL,
+        liquidation_value_usd REAL NOT NULL,
+        equity_usd REAL NOT NULL,
+        open_cost_usd REAL NOT NULL,
+        quote_coverage REAL NOT NULL,
+        drawdown_pct REAL NOT NULL,
+        peak_equity_usd REAL NOT NULL,
+        missing_token_count INTEGER NOT NULL,
+        observed_at INTEGER NOT NULL,
+        PRIMARY KEY (experiment_id, account_id, hour_start)
+      );
       CREATE TABLE IF NOT EXISTS experiment_archives (
         experiment_id TEXT PRIMARY KEY REFERENCES experiments(experiment_id),
         snapshot_sha256 TEXT NOT NULL,
@@ -646,6 +915,7 @@ export class StateStore {
           OR NEW.lockfile_hash <> OLD.lockfile_hash OR NEW.schema_version <> OLD.schema_version
           OR NEW.started_at <> OLD.started_at OR NEW.trust_class <> OLD.trust_class
           OR NEW.start_state_json <> OLD.start_state_json
+          OR NEW.previous_experiment_id IS NOT OLD.previous_experiment_id
         BEGIN SELECT RAISE(ABORT, 'experiment manifest is immutable'); END;
         DROP TRIGGER IF EXISTS raw_events_sealed_no_insert;
         CREATE TRIGGER raw_events_sealed_no_insert BEFORE INSERT ON raw_events
@@ -696,6 +966,89 @@ export class StateStore {
           FROM raw_event_observations o JOIN raw_events r ON r.raw_event_id=o.raw_event_id
           JOIN experiments e ON e.experiment_id=r.experiment_id WHERE o.observation_id=NEW.observation_id)
         BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+        DROP TRIGGER IF EXISTS observation_decision_slots_no_update;
+        CREATE TRIGGER observation_decision_slots_no_update BEFORE UPDATE ON observation_decision_slots
+        BEGIN SELECT RAISE(ABORT, 'observation decision slots are immutable'); END;
+        DROP TRIGGER IF EXISTS observation_decision_slots_no_delete;
+        CREATE TRIGGER observation_decision_slots_no_delete BEFORE DELETE ON observation_decision_slots
+        BEGIN SELECT RAISE(ABORT, 'observation decision slots are append-only'); END;
+        DROP TRIGGER IF EXISTS observation_decision_slots_sealed_no_insert;
+        CREATE TRIGGER observation_decision_slots_sealed_no_insert BEFORE INSERT ON observation_decision_slots
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment evidence is immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_controls_transition_guard;
+        CREATE TRIGGER experiment_controls_transition_guard BEFORE UPDATE OF copy_state ON experiment_controls
+        WHEN OLD.copy_state <> NEW.copy_state
+          AND NOT (OLD.copy_state='ACTIVE' AND NEW.copy_state IN ('SETTLE_ONLY','QUARANTINED'))
+          AND NOT (OLD.copy_state='QUARANTINED' AND NEW.copy_state='ACTIVE'
+            AND substr(OLD.reason_code, 1, 5)='DATA_'
+            AND OLD.healthy_since IS NOT NULL AND NEW.reviewed_at IS NOT NULL
+            AND NEW.reviewed_at - OLD.healthy_since >= ${DATA_HEALTHY_WINDOW_MS})
+        BEGIN SELECT RAISE(ABORT, 'sticky experiment control transition rejected'); END;
+        DROP TRIGGER IF EXISTS experiment_controls_sealed_no_insert;
+        CREATE TRIGGER experiment_controls_sealed_no_insert BEFORE INSERT ON experiment_controls
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment controls are immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_controls_sealed_no_update;
+        CREATE TRIGGER experiment_controls_sealed_no_update BEFORE UPDATE ON experiment_controls
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment controls are immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_controls_no_delete;
+        CREATE TRIGGER experiment_controls_no_delete BEFORE DELETE ON experiment_controls
+        BEGIN SELECT RAISE(ABORT, 'experiment controls are persistent'); END;
+        DROP TRIGGER IF EXISTS experiment_control_audit_sealed_no_insert;
+        CREATE TRIGGER experiment_control_audit_sealed_no_insert BEFORE INSERT ON experiment_control_audit
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment controls are immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_control_audit_no_update;
+        CREATE TRIGGER experiment_control_audit_no_update BEFORE UPDATE ON experiment_control_audit
+        BEGIN SELECT RAISE(ABORT, 'experiment control audit is immutable'); END;
+        DROP TRIGGER IF EXISTS experiment_control_audit_no_delete;
+        CREATE TRIGGER experiment_control_audit_no_delete BEFORE DELETE ON experiment_control_audit
+        BEGIN SELECT RAISE(ABORT, 'experiment control audit is append-only'); END;
+        DROP TRIGGER IF EXISTS poll_hourly_stats_sealed_no_insert;
+        CREATE TRIGGER poll_hourly_stats_sealed_no_insert BEFORE INSERT ON poll_hourly_stats
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment aggregates are immutable'); END;
+        DROP TRIGGER IF EXISTS poll_hourly_stats_sealed_no_update;
+        CREATE TRIGGER poll_hourly_stats_sealed_no_update BEFORE UPDATE ON poll_hourly_stats
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment aggregates are immutable'); END;
+        DROP TRIGGER IF EXISTS poll_hourly_stats_no_delete;
+        CREATE TRIGGER poll_hourly_stats_no_delete BEFORE DELETE ON poll_hourly_stats
+        BEGIN SELECT RAISE(ABORT, 'poll aggregates are persistent'); END;
+        DROP TRIGGER IF EXISTS settlement_failures_sealed_no_insert;
+        CREATE TRIGGER settlement_failures_sealed_no_insert BEFORE INSERT ON settlement_failures
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment aggregates are immutable'); END;
+        DROP TRIGGER IF EXISTS settlement_failures_sealed_no_update;
+        CREATE TRIGGER settlement_failures_sealed_no_update BEFORE UPDATE ON settlement_failures
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment aggregates are immutable'); END;
+        DROP TRIGGER IF EXISTS settlement_failures_no_delete;
+        CREATE TRIGGER settlement_failures_no_delete BEFORE DELETE ON settlement_failures
+        BEGIN SELECT RAISE(ABORT, 'settlement failure aggregates are persistent'); END;
+        DROP TRIGGER IF EXISTS equity_snapshots_sealed_no_insert;
+        CREATE TRIGGER equity_snapshots_sealed_no_insert BEFORE INSERT ON equity_snapshots
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment snapshots are immutable'); END;
+        DROP TRIGGER IF EXISTS equity_snapshots_sealed_no_update;
+        CREATE TRIGGER equity_snapshots_sealed_no_update BEFORE UPDATE ON equity_snapshots
+        WHEN (SELECT sealed_at IS NOT NULL OR archive_status='PREPARING'
+          FROM experiments WHERE experiment_id=NEW.experiment_id)
+        BEGIN SELECT RAISE(ABORT, 'sealed experiment snapshots are immutable'); END;
+        DROP TRIGGER IF EXISTS equity_snapshots_no_delete;
+        CREATE TRIGGER equity_snapshots_no_delete BEFORE DELETE ON equity_snapshots
+        BEGIN SELECT RAISE(ABORT, 'equity snapshots are persistent'); END;
       `);
       this.db.prepare(
         `INSERT INTO schema_metadata (key, value) VALUES ('schema_version', ?)
@@ -741,7 +1094,10 @@ export class StateStore {
         && active.lockfileHash === input.lockfileHash
         && active.schemaVersion === STATE_SCHEMA_VERSION
         && active.trustClass === input.trustClass;
-      if (sameIdentity) return active!;
+      if (sameIdentity) {
+        this.consumePendingLegacyKillSwitch(active!);
+        return this.getExperiment(active!.experimentId)!;
+      }
       if (active) {
         const pending = this.db.prepare("SELECT COUNT(*) AS count FROM pending_orders").get() as { count: number };
         if (pending.count > 0) {
@@ -791,6 +1147,8 @@ export class StateStore {
         active?.experimentId ?? null,
         normalizedPayloadJson(newStartState)
       );
+      const experiment = this.getExperiment(experimentId)!;
+      if (experiment.state === "ACTIVE") this.consumePendingLegacyKillSwitch(experiment);
       return this.getExperiment(experimentId)!;
     })();
   }
@@ -866,6 +1224,8 @@ export class StateStore {
         }
         this.db.prepare("UPDATE experiments SET state = 'ACTIVE' WHERE experiment_id = ? AND state = 'PREPARED'")
           .run(row.experimentId);
+        const activated = this.getExperiment(row.experimentId);
+        if (activated) this.consumePendingLegacyKillSwitch(activated);
       }
     })();
   }
@@ -894,67 +1254,91 @@ export class StateStore {
     observedTimestamp?: number;
     experimentId?: string;
   }): RawEventRow {
-    return this.db.transaction(() => {
-    const experiment = input.experimentId
-      ? this.getExperiment(input.experimentId)
-      : this.getActiveExperiment();
-    if (!experiment) throw new Error("Cannot record raw event without an active experiment");
-    const payloadHash = payloadSha256(input.payload);
-    const sourceId = input.sourceId?.trim() || null;
-    const identity = sourceId ? `source:${sourceId}` : `payload:${payloadHash}`;
-    const rawEventId = createHash("sha256")
-      .update(`${experiment.experimentId}\n${identity}`)
-      .digest("hex");
-    this.db.prepare(
-      `INSERT OR IGNORE INTO raw_events
-       (raw_event_id, experiment_id, source_id, payload_hash, normalized_payload_json,
-        source_timestamp, observed_timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      rawEventId,
-      experiment.experimentId,
-      sourceId,
-      payloadHash,
-      normalizedPayloadJson(input.payload),
-      input.sourceTimestamp,
-      input.observedTimestamp ?? Date.now()
-    );
-    const row = sourceId
-      ? this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND source_id = ?")
-          .get(experiment.experimentId, sourceId) as { rawEventId: string }
-      : this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND payload_hash = ?")
-          .get(experiment.experimentId, payloadHash) as { rawEventId: string };
-    const observedTimestamp = input.observedTimestamp ?? Date.now();
-    const observationKey = createHash("sha256")
-      .update([row.rawEventId, payloadHash, input.sourceTimestamp].join("\n"))
-      .digest("hex");
-    this.db.prepare(
-      `INSERT OR IGNORE INTO raw_event_observations
-       (observation_key, raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
-       SELECT ?, ?, ?, ?, ?, ?
-       WHERE NOT EXISTS (
-         SELECT 1 FROM raw_event_observations
+    return this.recordRawEventOccurrence(input).rawEvent;
+  }
+
+  recordRawEventOccurrence(input: {
+    sourceId?: string;
+    payload: unknown;
+    sourceTimestamp: number;
+    observedTimestamp?: number;
+    experimentId?: string;
+  }): RawEventOccurrenceResult {
+    return this.db.transaction((): RawEventOccurrenceResult => {
+      const experiment = input.experimentId
+        ? this.getExperiment(input.experimentId)
+        : this.getActiveExperiment();
+      if (!experiment) throw new Error("Cannot record raw event without an active experiment");
+      const payloadHash = payloadSha256(input.payload);
+      const payloadJson = normalizedPayloadJson(input.payload);
+      const sourceId = input.sourceId?.trim() || null;
+      const identity = sourceId ? `source:${sourceId}` : `payload:${payloadHash}`;
+      const rawEventId = createHash("sha256")
+        .update(`${experiment.experimentId}\n${identity}`)
+        .digest("hex");
+      const observedTimestamp = input.observedTimestamp ?? Date.now();
+      this.db.prepare(
+        `INSERT OR IGNORE INTO raw_events
+         (raw_event_id, experiment_id, source_id, payload_hash, normalized_payload_json,
+          source_timestamp, observed_timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        rawEventId,
+        experiment.experimentId,
+        sourceId,
+        payloadHash,
+        payloadJson,
+        input.sourceTimestamp,
+        observedTimestamp
+      );
+      const row = sourceId
+        ? this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND source_id = ?")
+            .get(experiment.experimentId, sourceId) as { rawEventId: string }
+        : this.db.prepare("SELECT raw_event_id AS rawEventId FROM raw_events WHERE experiment_id = ? AND payload_hash = ?")
+            .get(experiment.experimentId, payloadHash) as { rawEventId: string };
+      const observationKey = createHash("sha256")
+        .update([row.rawEventId, payloadHash, input.sourceTimestamp].join("\n"))
+        .digest("hex");
+      const inserted = this.db.prepare(
+        `INSERT OR IGNORE INTO raw_event_observations
+         (observation_key, raw_event_id, payload_hash, normalized_payload_json, source_timestamp, observed_timestamp)
+         SELECT ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM raw_event_observations
+           WHERE raw_event_id = ? AND payload_hash = ? AND source_timestamp = ?
+         )`
+      ).run(
+        observationKey,
+        row.rawEventId,
+        payloadHash,
+        payloadJson,
+        input.sourceTimestamp,
+        observedTimestamp,
+        row.rawEventId,
+        payloadHash,
+        input.sourceTimestamp
+      );
+      const observation = this.db.prepare(
+        `SELECT observation_id AS observationId FROM raw_event_observations
          WHERE raw_event_id = ? AND payload_hash = ? AND source_timestamp = ?
-       )`
-    ).run(
-      observationKey,
-      row.rawEventId,
-      payloadHash,
-      normalizedPayloadJson(input.payload),
-      input.sourceTimestamp,
-      observedTimestamp,
-      row.rawEventId,
-      payloadHash,
-      input.sourceTimestamp
-    );
-    const observation = this.db.prepare(
-      `SELECT observation_id AS observationId FROM raw_event_observations
-       WHERE raw_event_id = ? AND payload_hash = ? AND source_timestamp = ?
-       ORDER BY observation_id LIMIT 1`
-    ).get(row.rawEventId, payloadHash, input.sourceTimestamp) as { observationId: number } | undefined;
-    if (!observation) throw new Error(`Raw observation persistence failed: ${row.rawEventId}`);
-    this.latestObservationIdByRawEventId.set(row.rawEventId, observation.observationId);
-    return this.getRawEvent(row.rawEventId)!;
+         ORDER BY observation_id LIMIT 1`
+      ).get(row.rawEventId, payloadHash, input.sourceTimestamp) as { observationId: number } | undefined;
+      if (!observation) throw new Error(`Raw observation persistence failed: ${row.rawEventId}`);
+      this.latestObservationIdByRawEventId.set(row.rawEventId, observation.observationId);
+      const observationRef = Object.freeze({
+        rawEventId: row.rawEventId,
+        observationId: observation.observationId,
+      });
+      const terminal = this.db.prepare(
+        `SELECT decision_id AS decisionId FROM observation_decision_slots
+         WHERE observation_id = ? AND decision_phase = 'TERMINAL'`
+      ).get(observation.observationId) as { decisionId: string } | undefined;
+      return {
+        status: inserted.changes > 0 ? "NEW" : terminal ? "DECIDED" : "RESUMABLE",
+        rawEvent: this.getRawEvent(row.rawEventId)!,
+        observationRef,
+        terminalDecisionId: terminal?.decisionId ?? null,
+      };
     })();
   }
 
@@ -1032,6 +1416,7 @@ export class StateStore {
       const decisionId = createHash("sha256")
         .update([raw.experimentId, observationContext, input.action, input.reasonCode, exactTermsJson].join("\n"))
         .digest("hex");
+      const decisionPhase = decisionSlotPhase(input.action, input.exactTerms);
       this.db.prepare(
         `INSERT OR IGNORE INTO decisions
          (decision_id, experiment_id, raw_event_id, action, reason_code, exact_terms_json, decided_at, decision_order)
@@ -1054,7 +1439,33 @@ export class StateStore {
          (experiment_id, observation_id, decision_id, link_order, linked_at)
          VALUES (?, ?, ?, ?, ?)`
       );
+      const readSlot = this.db.prepare(
+        `SELECT decision_id AS decisionId FROM observation_decision_slots
+         WHERE observation_id = ? AND decision_phase = ?`
+      );
+      const insertSlot = this.db.prepare(
+        `INSERT INTO observation_decision_slots
+         (observation_id, decision_phase, decision_id, experiment_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      );
       for (const { observationId } of normalizedRefs) {
+        if (decisionPhase !== "PROGRESS") {
+          const slot = readSlot.get(observationId, decisionPhase) as { decisionId: string } | undefined;
+          if (slot && slot.decisionId !== decisionId) {
+            throw new Error(
+              `${decisionPhase === "DETECT" ? "DETECT" : "terminal"} decision already exists for observation ${observationId}`
+            );
+          }
+          if (!slot) {
+            insertSlot.run(
+              observationId,
+              decisionPhase,
+              decisionId,
+              raw.experimentId,
+              decidedAt
+            );
+          }
+        }
         const linkOrder = (nextLinkOrder.get(raw.experimentId) as { next: number }).next;
         insertLink.run(raw.experimentId, observationId, decisionId, linkOrder, decidedAt);
       }
@@ -1079,6 +1490,549 @@ export class StateStore {
       "SELECT decision_id AS decisionId FROM decisions ORDER BY decision_order, decided_at, decision_id"
     ).all() as { decisionId: string }[];
     return ids.map((row) => this.getDecision(row.decisionId)!);
+  }
+
+  getExperimentControl(experimentId?: string): ExperimentControlRow | null {
+    const experiment = experimentId
+      ? this.getExperiment(experimentId)
+      : this.getActiveExperiment();
+    if (!experiment) return null;
+    return this.readExperimentControl(experiment.experimentId) ?? {
+      experimentId: experiment.experimentId,
+      state: "ACTIVE",
+      reasonCode: null,
+      details: {},
+      triggeredAt: null,
+      healthySince: null,
+      reviewedAt: null,
+    };
+  }
+
+  setExperimentControl(input: SetExperimentControlInput): ExperimentControlRow {
+    return this.db.transaction(() => {
+      if (input.state !== "SETTLE_ONLY" && input.state !== "QUARANTINED") {
+        throw new Error("setExperimentControl only permits ACTIVE to non-active transitions");
+      }
+      const triggeredAt = input.triggeredAt ?? Date.now();
+      assertNonNegativeInteger("triggeredAt", triggeredAt);
+      const reasonCode = requiredAggregateKey("reasonCode", input.reasonCode);
+      const experiment = this.aggregateExperiment(input.experimentId);
+      const current = this.getExperimentControl(experiment.experimentId)!;
+      if (current.state !== "ACTIVE") {
+        if (current.state === input.state && current.reasonCode === reasonCode) return current;
+        throw new Error("Experiment control transition requires ACTIVE to non-active");
+      }
+      const details = input.details ?? {};
+      const detailsJson = normalizedPayloadJson(details);
+      if (this.readExperimentControl(experiment.experimentId)) {
+        this.db.prepare(
+          `UPDATE experiment_controls SET copy_state = ?, reason_code = ?, details_json = ?,
+             triggered_at = ?, healthy_since = NULL, reviewed_at = NULL
+           WHERE experiment_id = ?`
+        ).run(input.state, reasonCode, detailsJson, triggeredAt, experiment.experimentId);
+      } else {
+        this.db.prepare(
+          `INSERT INTO experiment_controls
+           (experiment_id, copy_state, reason_code, details_json, triggered_at)
+           VALUES (?, ?, ?, ?, ?)`
+        ).run(experiment.experimentId, input.state, reasonCode, detailsJson, triggeredAt);
+      }
+      this.insertExperimentControlAudit({
+        experimentId: experiment.experimentId,
+        fromState: "ACTIVE",
+        toState: input.state,
+        reasonCode,
+        details,
+        occurredAt: triggeredAt,
+        reviewedAt: null,
+      });
+      return this.readExperimentControl(experiment.experimentId)!;
+    })();
+  }
+
+  markExperimentDataHealthy(
+    input: MarkExperimentDataHealthyInput = {}
+  ): ExperimentControlRow {
+    const healthyAt = input.healthyAt ?? Date.now();
+    assertNonNegativeInteger("healthyAt", healthyAt);
+    const experiment = this.aggregateExperiment(input.experimentId);
+    const control = this.readExperimentControl(experiment.experimentId);
+    if (control?.state !== "QUARANTINED") {
+      throw new Error("Data health can only be marked for a QUARANTINED experiment");
+    }
+    if (!control.reasonCode?.startsWith("DATA_")) {
+      throw new Error("Only DATA_* quarantines can enter a healthy review window");
+    }
+    this.db.prepare(
+      `UPDATE experiment_controls
+       SET healthy_since = COALESCE(healthy_since, ?), reviewed_at = NULL
+       WHERE experiment_id = ?`
+    ).run(healthyAt, experiment.experimentId);
+    return this.readExperimentControl(experiment.experimentId)!;
+  }
+
+  markExperimentDataUnhealthy(
+    input: MarkExperimentDataUnhealthyInput = {}
+  ): ExperimentControlRow {
+    return this.db.transaction(() => {
+      const observedAt = input.observedAt ?? Date.now();
+      assertNonNegativeInteger("observedAt", observedAt);
+      const experiment = this.aggregateExperiment(input.experimentId);
+      const control = this.readExperimentControl(experiment.experimentId);
+      if (control?.state !== "QUARANTINED") {
+        throw new Error("Data health can only be reset for a QUARANTINED experiment");
+      }
+      if (!control.reasonCode?.startsWith("DATA_")) {
+        throw new Error("Only DATA_* quarantines can reset the healthy review window");
+      }
+      if (control.healthySince === null && control.reviewedAt === null) return control;
+      this.db.prepare(
+        `UPDATE experiment_controls SET healthy_since = NULL, reviewed_at = NULL
+         WHERE experiment_id = ?`
+      ).run(experiment.experimentId);
+      this.insertExperimentControlAudit({
+        experimentId: experiment.experimentId,
+        fromState: "QUARANTINED",
+        toState: "QUARANTINED",
+        reasonCode: control.reasonCode,
+        details: { event: "DATA_UNHEALTHY", observedAt },
+        occurredAt: observedAt,
+        reviewedAt: null,
+      });
+      return this.readExperimentControl(experiment.experimentId)!;
+    })();
+  }
+
+  reactivateQuarantinedExperiment(
+    input: ReactivateQuarantinedExperimentInput
+  ): ExperimentControlRow {
+    return this.db.transaction(() => {
+      assertNonNegativeInteger("reviewedAt", input.reviewedAt);
+      const experiment = this.aggregateExperiment(input.experimentId);
+      const control = this.readExperimentControl(experiment.experimentId);
+      if (control?.state !== "QUARANTINED") {
+        throw new Error("Only a QUARANTINED experiment can be reactivated");
+      }
+      if (!control.reasonCode?.startsWith("DATA_")) {
+        throw new Error("Only DATA_* quarantines can be reactivated");
+      }
+      if (control.healthySince === null
+        || input.reviewedAt - control.healthySince < DATA_HEALTHY_WINDOW_MS) {
+        throw new Error("DATA quarantine requires 60 continuous healthy minutes before review");
+      }
+      const details = { ...control.details, ...(input.details ?? {}) };
+      this.db.prepare(
+        `UPDATE experiment_controls SET copy_state = 'ACTIVE', details_json = ?, reviewed_at = ?
+         WHERE experiment_id = ?`
+      ).run(normalizedPayloadJson(details), input.reviewedAt, experiment.experimentId);
+      this.insertExperimentControlAudit({
+        experimentId: experiment.experimentId,
+        fromState: "QUARANTINED",
+        toState: "ACTIVE",
+        reasonCode: control.reasonCode,
+        details: input.details ?? {},
+        occurredAt: input.reviewedAt,
+        reviewedAt: input.reviewedAt,
+      });
+      return this.readExperimentControl(experiment.experimentId)!;
+    })();
+  }
+
+  listExperimentControlAudit(experimentId?: string): ExperimentControlAuditRow[] {
+    const resolvedExperimentId = experimentId ?? this.getActiveExperiment()?.experimentId;
+    if (!resolvedExperimentId) return [];
+    const rows = this.db.prepare(
+      `SELECT audit_id AS auditId, experiment_id AS experimentId,
+              from_state AS fromState, to_state AS toState, reason_code AS reasonCode,
+              details_json AS detailsJson, occurred_at AS occurredAt,
+              reviewed_at AS reviewedAt
+       FROM experiment_control_audit WHERE experiment_id = ? ORDER BY audit_id`
+    ).all(resolvedExperimentId) as Array<Omit<ExperimentControlAuditRow, "details"> & {
+      detailsJson: string;
+    }>;
+    return rows.map(({ detailsJson, ...row }) => ({
+      ...row,
+      details: JSON.parse(detailsJson) as Record<string, unknown>,
+    }));
+  }
+
+  private readExperimentControl(experimentId: string): ExperimentControlRow | undefined {
+    const row = this.db.prepare(
+      `SELECT experiment_id AS experimentId, copy_state AS state,
+              reason_code AS reasonCode, details_json AS detailsJson,
+              triggered_at AS triggeredAt, healthy_since AS healthySince,
+              reviewed_at AS reviewedAt
+       FROM experiment_controls WHERE experiment_id = ?`
+    ).get(experimentId) as (Omit<ExperimentControlRow, "details"> & {
+      detailsJson: string;
+    }) | undefined;
+    if (!row) return undefined;
+    const { detailsJson, ...rest } = row;
+    return { ...rest, details: JSON.parse(detailsJson) as Record<string, unknown> };
+  }
+
+  private insertExperimentControlAudit(input: Omit<ExperimentControlAuditRow, "auditId">): void {
+    this.db.prepare(
+      `INSERT INTO experiment_control_audit
+       (experiment_id, from_state, to_state, reason_code, details_json,
+        occurred_at, reviewed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      input.experimentId,
+      input.fromState,
+      input.toState,
+      input.reasonCode,
+      normalizedPayloadJson(input.details),
+      input.occurredAt,
+      input.reviewedAt
+    );
+  }
+
+  private latestLegacyKillSwitch(): { date: string; triggeredAt: number } | null {
+    const row = this.db.prepare(
+      "SELECT date FROM daily_stats WHERE kill_switch = 1 ORDER BY date DESC LIMIT 1"
+    ).get() as { date: string } | undefined;
+    if (!row) return null;
+    const parsed = Date.parse(`${row.date}T00:00:00.000Z`);
+    return { date: row.date, triggeredAt: Number.isFinite(parsed) ? parsed : Date.now() };
+  }
+
+  private persistLegacyKillSwitchControl(
+    experimentId: string,
+    legacyKill: { date: string; triggeredAt: number }
+  ): void {
+    if (this.readExperimentControl(experimentId)) return;
+    const details = { migratedFrom: "daily_stats", legacyDate: legacyKill.date };
+    this.db.prepare(
+      `INSERT INTO experiment_controls
+       (experiment_id, copy_state, reason_code, details_json, triggered_at)
+       VALUES (?, 'SETTLE_ONLY', 'LEGACY_KILL_SWITCH', ?, ?)`
+    ).run(experimentId, normalizedPayloadJson(details), legacyKill.triggeredAt);
+    this.insertExperimentControlAudit({
+      experimentId,
+      fromState: "ACTIVE",
+      toState: "SETTLE_ONLY",
+      reasonCode: "LEGACY_KILL_SWITCH",
+      details,
+      occurredAt: legacyKill.triggeredAt,
+      reviewedAt: null,
+    });
+  }
+
+  private consumePendingLegacyKillSwitch(experiment: ExperimentManifestRow): void {
+    if (experiment.previousExperimentId !== null) return;
+    const pending = this.db.prepare(
+      "SELECT 1 FROM runtime_metadata WHERE key = 'legacy_kill_switch_backfill_pending' AND value = '1'"
+    ).get();
+    if (!pending) return;
+    const legacyKill = this.latestLegacyKillSwitch();
+    if (legacyKill) this.persistLegacyKillSwitchControl(experiment.experimentId, legacyKill);
+    this.db.prepare(
+      "DELETE FROM runtime_metadata WHERE key = 'legacy_kill_switch_backfill_pending'"
+    ).run();
+  }
+
+  private aggregateExperiment(
+    experimentId?: string,
+    accountId?: string
+  ): ExperimentManifestRow {
+    const experiment = experimentId
+      ? this.getExperiment(experimentId)
+      : this.getActiveExperiment(accountId);
+    if (!experiment) throw new Error("Cannot record aggregate without an active experiment");
+    if (accountId && accountId !== experiment.accountId) {
+      throw new Error("Aggregate account does not own the experiment");
+    }
+    if (experiment.state !== "ACTIVE" && experiment.state !== "PREPARED") {
+      throw new Error("Cannot update aggregates for an inactive experiment");
+    }
+    return experiment;
+  }
+
+  recordPollHourlyStats(input: RecordPollHourlyStatsInput): PollHourlyStatsRow {
+    const observedAt = input.observedAt ?? Date.now();
+    assertNonNegativeInteger("observedAt", observedAt);
+    const counters = {
+      fetchedOccurrences: input.fetchedOccurrences,
+      uniqueObservations: input.uniqueObservations,
+      resumedObservations: input.resumedObservations,
+      duplicateSuppressed: input.duplicateSuppressed,
+      pollErrors: input.pollErrors,
+      copied: input.copied ?? 0,
+      skipped: input.skipped ?? 0,
+    };
+    for (const [name, value] of Object.entries(counters)) {
+      assertNonNegativeInteger(name, value);
+    }
+    const experiment = this.aggregateExperiment(input.experimentId, input.accountId);
+    const hourStart = Math.floor(observedAt / 3_600_000) * 3_600_000;
+    this.db.prepare(
+      `INSERT INTO poll_hourly_stats
+       (experiment_id, account_id, hour_start, poll_count, fetched_occurrences,
+        unique_observations, resumed_observations, duplicate_suppressed, poll_errors,
+        copied, skipped, first_poll_at, last_poll_at)
+       VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(experiment_id, account_id, hour_start) DO UPDATE SET
+         poll_count = poll_count + 1,
+         fetched_occurrences = fetched_occurrences + excluded.fetched_occurrences,
+         unique_observations = unique_observations + excluded.unique_observations,
+         resumed_observations = resumed_observations + excluded.resumed_observations,
+         duplicate_suppressed = duplicate_suppressed + excluded.duplicate_suppressed,
+         poll_errors = poll_errors + excluded.poll_errors,
+         copied = copied + excluded.copied,
+         skipped = skipped + excluded.skipped,
+         first_poll_at = MIN(first_poll_at, excluded.first_poll_at),
+         last_poll_at = MAX(last_poll_at, excluded.last_poll_at)`
+    ).run(
+      experiment.experimentId,
+      experiment.accountId,
+      hourStart,
+      counters.fetchedOccurrences,
+      counters.uniqueObservations,
+      counters.resumedObservations,
+      counters.duplicateSuppressed,
+      counters.pollErrors,
+      counters.copied,
+      counters.skipped,
+      observedAt,
+      observedAt
+    );
+    return this.listPollHourlyStats(experiment.experimentId)
+      .find((row) => row.hourStart === hourStart)!;
+  }
+
+  listPollHourlyStats(experimentId?: string): PollHourlyStatsRow[] {
+    const resolvedExperimentId = experimentId ?? this.getActiveExperiment()?.experimentId;
+    if (!resolvedExperimentId) return [];
+    return this.db.prepare(
+      `SELECT experiment_id AS experimentId, account_id AS accountId,
+              hour_start AS hourStart, poll_count AS pollCount,
+              fetched_occurrences AS fetchedOccurrences,
+              unique_observations AS uniqueObservations,
+              resumed_observations AS resumedObservations,
+              duplicate_suppressed AS duplicateSuppressed,
+              poll_errors AS pollErrors, copied, skipped,
+              first_poll_at AS firstPollAt, last_poll_at AS lastPollAt
+       FROM poll_hourly_stats WHERE experiment_id = ?
+       ORDER BY hour_start`
+    ).all(resolvedExperimentId) as PollHourlyStatsRow[];
+  }
+
+  recordEquitySnapshot(input: RecordEquitySnapshotInput): EquitySnapshotRow {
+    const observedAt = input.observedAt ?? Date.now();
+    assertNonNegativeInteger("observedAt", observedAt);
+    for (const [name, value] of Object.entries({
+      cashUsd: input.cashUsd,
+      liquidationValueUsd: input.liquidationValueUsd,
+      equityUsd: input.equityUsd,
+      openCostUsd: input.openCostUsd,
+      quoteCoverage: input.quoteCoverage,
+      drawdownPct: input.drawdownPct,
+      peakEquityUsd: input.peakEquityUsd,
+    })) {
+      assertFiniteNumber(name, value);
+    }
+    if (input.quoteCoverage < 0 || input.quoteCoverage > 1) {
+      throw new Error("quoteCoverage must be between 0 and 1");
+    }
+    if (input.drawdownPct < 0 || input.drawdownPct > 100) {
+      throw new Error("drawdownPct must be between 0 and 100");
+    }
+    assertNonNegativeInteger("missingTokenCount", input.missingTokenCount);
+    const experiment = this.aggregateExperiment(input.experimentId, input.accountId);
+    const hourStart = Math.floor(observedAt / 3_600_000) * 3_600_000;
+    this.db.prepare(
+      `INSERT INTO equity_snapshots
+       (experiment_id, account_id, hour_start, cash_usd, liquidation_value_usd,
+        equity_usd, open_cost_usd, quote_coverage, drawdown_pct, peak_equity_usd,
+        missing_token_count, observed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(experiment_id, account_id, hour_start) DO UPDATE SET
+         cash_usd = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.cash_usd ELSE equity_snapshots.cash_usd END,
+         liquidation_value_usd = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.liquidation_value_usd ELSE equity_snapshots.liquidation_value_usd END,
+         equity_usd = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.equity_usd ELSE equity_snapshots.equity_usd END,
+         open_cost_usd = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.open_cost_usd ELSE equity_snapshots.open_cost_usd END,
+         quote_coverage = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.quote_coverage ELSE equity_snapshots.quote_coverage END,
+         drawdown_pct = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.drawdown_pct ELSE equity_snapshots.drawdown_pct END,
+         peak_equity_usd = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.peak_equity_usd ELSE equity_snapshots.peak_equity_usd END,
+         missing_token_count = CASE WHEN excluded.observed_at >= equity_snapshots.observed_at
+           THEN excluded.missing_token_count ELSE equity_snapshots.missing_token_count END,
+         observed_at = MAX(equity_snapshots.observed_at, excluded.observed_at)`
+    ).run(
+      experiment.experimentId,
+      experiment.accountId,
+      hourStart,
+      input.cashUsd,
+      input.liquidationValueUsd,
+      input.equityUsd,
+      input.openCostUsd,
+      input.quoteCoverage,
+      input.drawdownPct,
+      input.peakEquityUsd,
+      input.missingTokenCount,
+      observedAt
+    );
+    return this.listEquitySnapshots(experiment.experimentId)
+      .find((row) => row.hourStart === hourStart)!;
+  }
+
+  listEquitySnapshots(experimentId?: string): EquitySnapshotRow[] {
+    const resolvedExperimentId = experimentId ?? this.getActiveExperiment()?.experimentId;
+    if (!resolvedExperimentId) return [];
+    return this.db.prepare(
+      `SELECT experiment_id AS experimentId, account_id AS accountId,
+              hour_start AS hourStart, cash_usd AS cashUsd,
+              liquidation_value_usd AS liquidationValueUsd, equity_usd AS equityUsd,
+              open_cost_usd AS openCostUsd, quote_coverage AS quoteCoverage,
+              drawdown_pct AS drawdownPct, peak_equity_usd AS peakEquityUsd,
+              missing_token_count AS missingTokenCount, observed_at AS observedAt
+       FROM equity_snapshots WHERE experiment_id = ? ORDER BY hour_start`
+    ).all(resolvedExperimentId) as EquitySnapshotRow[];
+  }
+
+  getLatestEquitySnapshot(experimentId?: string): EquitySnapshotRow | null {
+    return this.listEquitySnapshots(experimentId).at(-1) ?? null;
+  }
+
+  recordSettlementFailure(input: RecordSettlementFailureInput): SettlementFailureRow {
+    return this.db.transaction(() => {
+      const observedAt = input.observedAt ?? Date.now();
+      assertNonNegativeInteger("observedAt", observedAt);
+      const leaderId = requiredAggregateKey("leaderId", input.leaderId);
+      const conditionId = requiredAggregateKey("conditionId", input.conditionId);
+      const errorCode = requiredAggregateKey("errorCode", input.errorCode);
+      const experiment = this.aggregateExperiment(input.experimentId, input.accountId);
+      const existing = this.readSettlementFailure(
+        experiment.experimentId,
+        experiment.accountId,
+        leaderId,
+        conditionId,
+        errorCode
+      );
+      if (existing?.resolvedAt !== null && existing?.resolvedAt !== undefined
+        && observedAt <= existing.resolvedAt) {
+        return existing;
+      }
+      this.db.prepare(
+        `INSERT INTO settlement_failures
+         (experiment_id, account_id, leader_id, condition_id, slug, error_code,
+          error_message, first_seen_at, last_seen_at, failure_count, resolved_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)
+         ON CONFLICT(experiment_id, account_id, leader_id, condition_id, error_code)
+         DO UPDATE SET
+           slug = COALESCE(excluded.slug, settlement_failures.slug),
+           error_message = excluded.error_message,
+           first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
+           last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
+           failure_count = failure_count + 1,
+           resolved_at = NULL`
+      ).run(
+        experiment.experimentId,
+        experiment.accountId,
+        leaderId,
+        conditionId,
+        input.slug?.trim() || null,
+        errorCode,
+        input.errorMessage,
+        observedAt,
+        observedAt
+      );
+      const control = this.readExperimentControl(experiment.experimentId);
+      if (control?.state === "QUARANTINED"
+        && control.reasonCode?.startsWith("DATA_")
+        && control.healthySince !== null) {
+        this.markExperimentDataUnhealthy({
+          experimentId: experiment.experimentId,
+          observedAt,
+        });
+      }
+      return this.readSettlementFailure(
+        experiment.experimentId,
+        experiment.accountId,
+        leaderId,
+        conditionId,
+        errorCode
+      )!;
+    })();
+  }
+
+  resolveSettlementFailure(input: ResolveSettlementFailureInput): number {
+    const resolvedAt = input.resolvedAt ?? Date.now();
+    assertNonNegativeInteger("resolvedAt", resolvedAt);
+    const leaderId = requiredAggregateKey("leaderId", input.leaderId);
+    const conditionId = requiredAggregateKey("conditionId", input.conditionId);
+    const experiment = this.aggregateExperiment(input.experimentId, input.accountId);
+    const latest = this.db.prepare(
+      `SELECT MAX(last_seen_at) AS lastSeenAt FROM settlement_failures
+       WHERE experiment_id = ? AND account_id = ? AND leader_id = ? AND condition_id = ?
+         AND resolved_at IS NULL`
+    ).get(
+      experiment.experimentId,
+      experiment.accountId,
+      leaderId,
+      conditionId
+    ) as { lastSeenAt: number | null };
+    if (latest.lastSeenAt === null) return 0;
+    if (resolvedAt < latest.lastSeenAt) {
+      throw new Error("Settlement resolution predates the latest failure");
+    }
+    return this.db.prepare(
+      `UPDATE settlement_failures SET resolved_at = ?
+       WHERE experiment_id = ? AND account_id = ? AND leader_id = ? AND condition_id = ?
+         AND resolved_at IS NULL`
+    ).run(
+      resolvedAt,
+      experiment.experimentId,
+      experiment.accountId,
+      leaderId,
+      conditionId
+    ).changes;
+  }
+
+  listSettlementFailures(experimentId?: string): SettlementFailureRow[] {
+    const resolvedExperimentId = experimentId ?? this.getActiveExperiment()?.experimentId;
+    if (!resolvedExperimentId) return [];
+    return this.db.prepare(
+      `SELECT experiment_id AS experimentId, account_id AS accountId,
+              leader_id AS leaderId, condition_id AS conditionId, slug,
+              error_code AS errorCode, error_message AS errorMessage,
+              first_seen_at AS firstSeenAt, last_seen_at AS lastSeenAt,
+              failure_count AS count, resolved_at AS resolvedAt
+       FROM settlement_failures WHERE experiment_id = ?
+       ORDER BY first_seen_at, leader_id, condition_id, error_code`
+    ).all(resolvedExperimentId) as SettlementFailureRow[];
+  }
+
+  listActiveSettlementFailures(experimentId?: string): SettlementFailureRow[] {
+    return this.listSettlementFailures(experimentId)
+      .filter((failure) => failure.resolvedAt === null);
+  }
+
+  private readSettlementFailure(
+    experimentId: string,
+    accountId: string,
+    leaderId: string,
+    conditionId: string,
+    errorCode: string
+  ): SettlementFailureRow | undefined {
+    return this.db.prepare(
+      `SELECT experiment_id AS experimentId, account_id AS accountId,
+              leader_id AS leaderId, condition_id AS conditionId, slug,
+              error_code AS errorCode, error_message AS errorMessage,
+              first_seen_at AS firstSeenAt, last_seen_at AS lastSeenAt,
+              failure_count AS count, resolved_at AS resolvedAt
+       FROM settlement_failures
+       WHERE experiment_id = ? AND account_id = ? AND leader_id = ?
+         AND condition_id = ? AND error_code = ?`
+    ).get(experimentId, accountId, leaderId, conditionId, errorCode) as
+      SettlementFailureRow | undefined;
   }
 
   setDecisionRawEventIds(rawEventIds: string[]): void {
@@ -1165,6 +2119,9 @@ export class StateStore {
   }
 
   private migrate(): void {
+    const storedSchemaVersion = Number((this.db.prepare(
+      "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+    ).get() as { value: string } | undefined)?.value ?? 0);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decision_observation_links (
         link_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1192,8 +2149,35 @@ export class StateStore {
     if (!experimentCols.some((column) => column.name === "end_state_json")) this.db.exec("ALTER TABLE experiments ADD COLUMN end_state_json TEXT");
     if (!experimentCols.some((column) => column.name === "archive_status")) this.db.exec("ALTER TABLE experiments ADD COLUMN archive_status TEXT NOT NULL DEFAULT 'NONE'");
     if (!experimentCols.some((column) => column.name === "archive_error")) this.db.exec("ALTER TABLE experiments ADD COLUMN archive_error TEXT");
+    const legacyKill = this.latestLegacyKillSwitch();
+    if (legacyKill) {
+      const legacyKilledExperiments = this.db.prepare(
+        `SELECT e.experiment_id AS experimentId
+         FROM experiments e
+         LEFT JOIN experiment_controls c ON c.experiment_id=e.experiment_id
+         WHERE e.state='ACTIVE' AND e.ended_at IS NULL AND e.sealed_at IS NULL
+           AND e.archive_status <> 'PREPARING'
+           AND e.schema_version < ? AND c.experiment_id IS NULL`
+      ).all(STATE_SCHEMA_VERSION) as { experimentId: string }[];
+      for (const row of legacyKilledExperiments) {
+        this.persistLegacyKillSwitchControl(row.experimentId, legacyKill);
+      }
+      const experimentCount = (this.db.prepare(
+        "SELECT COUNT(*) AS count FROM experiments"
+      ).get() as { count: number }).count;
+      if (experimentCount === 0 && storedSchemaVersion < STATE_SCHEMA_VERSION) {
+        this.db.prepare(
+          `INSERT INTO runtime_metadata (key, value)
+           VALUES ('legacy_kill_switch_backfill_pending', '1')
+           ON CONFLICT(key) DO UPDATE SET value = '1'`
+        ).run();
+      }
+    }
     const auditExperimentCols = this.db.prepare("PRAGMA table_info(audit_log)").all() as { name: string }[];
     if (!auditExperimentCols.some((column) => column.name === "experiment_id")) this.db.exec("ALTER TABLE audit_log ADD COLUMN experiment_id TEXT");
+    if (!auditExperimentCols.some((column) => column.name === "decision_id")) {
+      this.db.exec("ALTER TABLE audit_log ADD COLUMN decision_id TEXT REFERENCES decisions(decision_id)");
+    }
     const archiveCols = this.db.prepare("PRAGMA table_info(experiment_archives)").all() as { name: string }[];
     if (!archiveCols.some((column) => column.name === "archive_path")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN archive_path TEXT");
     if (!archiveCols.some((column) => column.name === "verified_at")) this.db.exec("ALTER TABLE experiment_archives ADD COLUMN verified_at INTEGER");
@@ -1215,6 +2199,48 @@ export class StateStore {
     if (!decisionCols.some((column) => column.name === "decision_order")) {
       this.db.exec("ALTER TABLE decisions ADD COLUMN decision_order INTEGER");
       this.db.exec("UPDATE decisions SET decision_order=rowid WHERE decision_order IS NULL");
+    }
+    const legacyDecisionLinks = this.db.prepare(
+      `SELECT l.observation_id AS observationId, d.action,
+              d.exact_terms_json AS exactTermsJson, d.decision_id AS decisionId,
+              d.experiment_id AS experimentId, l.linked_at AS linkedAt
+       FROM decision_observation_links l
+       JOIN decisions d ON d.decision_id=l.decision_id
+       ORDER BY l.link_order, l.link_id`
+    ).all() as Array<{
+      observationId: number;
+      action: DecisionAction;
+      exactTermsJson: string;
+      decisionId: string;
+      experimentId: string;
+      linkedAt: number;
+    }>;
+    const insertLegacySlot = this.db.prepare(
+      `INSERT OR IGNORE INTO observation_decision_slots
+       (observation_id, decision_phase, decision_id, experiment_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    const hasLegacySlot = this.db.prepare(
+      `SELECT 1 FROM observation_decision_slots
+       WHERE observation_id = ? AND decision_phase = ?`
+    );
+    for (const row of legacyDecisionLinks) {
+      let exactTerms: Record<string, unknown> = {};
+      try {
+        exactTerms = JSON.parse(row.exactTermsJson) as Record<string, unknown>;
+      } catch {
+        // Invalid legacy terms fail closed as a terminal decision slot.
+      }
+      const phase = decisionSlotPhase(row.action, exactTerms);
+      if (phase === "PROGRESS") continue;
+      if (hasLegacySlot.get(row.observationId, phase)) continue;
+      insertLegacySlot.run(
+        row.observationId,
+        phase,
+        row.decisionId,
+        row.experimentId,
+        row.linkedAt
+      );
     }
     const observationCols = this.db.prepare("PRAGMA table_info(raw_event_observations)").all() as { name: string }[];
     if (!observationCols.some((column) => column.name === "observation_key")) {
@@ -1244,6 +2270,8 @@ export class StateStore {
     if (!auditCols.some((c) => c.name === "fee_usd")) {
       this.db.exec("ALTER TABLE audit_log ADD COLUMN fee_usd REAL NOT NULL DEFAULT 0");
     }
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_log_decision
+      ON audit_log(decision_id) WHERE decision_id IS NOT NULL`);
     const intentCols = this.db.prepare("PRAGMA table_info(live_order_intents)").all() as { name: string }[];
     if (!intentCols.some((c) => c.name === "leader_price")) {
       this.db.exec("ALTER TABLE live_order_intents ADD COLUMN leader_price REAL");
@@ -1766,12 +2794,22 @@ export class StateStore {
         )
         .all(tokenId) as { leaderId: string; shares: number; avgEntryPrice: number }[];
 
-      let settled = 0;
-      for (const row of rows) {
+      if (rows.length === 0) return 0;
+      const settlements = rows.map((row) => {
         const payoutUsd = roundUsd(row.shares * payoutPerShare);
         const costUsd = roundUsd(row.shares * row.avgEntryPrice);
         const realizedPnl = roundUsd(payoutUsd - costUsd);
-
+        return {
+          leaderId: row.leaderId,
+          tokenId,
+          shares: row.shares,
+          payoutPerShare,
+          costBasisUsd: costUsd,
+          grossPayoutUsd: payoutUsd,
+          realizedPnlUsd: realizedPnl,
+        };
+      });
+      for (const row of rows) {
         this.db
           .prepare(
             `UPDATE positions
@@ -1779,35 +2817,41 @@ export class StateStore {
              WHERE leader_id = ? AND token_id = ?`
           )
           .run(row.leaderId, tokenId);
-
-        if (realizedPnl !== 0) this.addRealizedPnl(realizedPnl);
-        if (preview && cashInitialUsd !== undefined && payoutUsd !== 0) {
-          this.adjustCash(payoutUsd, cashInitialUsd);
-        }
-
-        this.audit({
-          leaderId: row.leaderId,
-          action: "REDEEM",
-          tokenId,
-          side: "REDEEM",
-          size: payoutUsd,
-          price: row.shares,
-          reason: `token settlement payout ${payoutPerShare}; pnl $${realizedPnl.toFixed(2)}`,
-          preview,
-          exactTerms: {
-            settlementSource: "token_settlement",
-            payoutPerShare,
-            winnerTokenIds: payoutPerShare > 0 ? [tokenId] : [],
-            costBasisUsd: costUsd,
-            grossPayoutUsd: payoutUsd,
-            realizedPnlUsd: realizedPnl,
-            ...settlementTerms,
-          },
-        });
-        settled++;
       }
-
-      return settled;
+      const totalShares = Math.round(
+        settlements.reduce((sum, row) => sum + row.shares, 0) * 100_000_000
+      ) / 100_000_000;
+      const costBasisUsd = roundUsd(settlements.reduce((sum, row) => sum + row.costBasisUsd, 0));
+      const grossPayoutUsd = roundUsd(settlements.reduce((sum, row) => sum + row.grossPayoutUsd, 0));
+      const realizedPnlUsd = roundUsd(settlements.reduce((sum, row) => sum + row.realizedPnlUsd, 0));
+      if (realizedPnlUsd !== 0) this.addRealizedPnl(realizedPnlUsd);
+      if (preview && cashInitialUsd !== undefined && grossPayoutUsd !== 0) {
+        this.adjustCash(grossPayoutUsd, cashInitialUsd);
+      }
+      const single = settlements.length === 1 ? settlements[0]! : null;
+      this.audit({
+        leaderId: single?.leaderId,
+        action: "REDEEM",
+        tokenId,
+        side: "REDEEM",
+        size: grossPayoutUsd,
+        price: totalShares,
+        reason: single
+          ? `token settlement payout ${payoutPerShare}; pnl $${realizedPnlUsd.toFixed(2)}`
+          : `token settlement payout ${payoutPerShare}; ${settlements.length} positions; pnl $${realizedPnlUsd.toFixed(2)}`,
+        preview,
+        exactTerms: {
+          settlementSource: "token_settlement",
+          payoutPerShare,
+          winnerTokenIds: payoutPerShare > 0 ? [tokenId] : [],
+          costBasisUsd,
+          grossPayoutUsd,
+          realizedPnlUsd,
+          settlements,
+          ...settlementTerms,
+        },
+      });
+      return rows.length;
     })();
   }
 
@@ -2630,72 +3674,78 @@ export class StateStore {
     reasonCode?: DecisionReasonCode;
   }): void {
     this.db.transaction(() => {
-    const experimentId = this.getActiveExperiment()?.experimentId ?? null;
-    this.db
-      .prepare(
-        `INSERT INTO audit_log
-         (ts, leader_id, action, token_id, side, size, price, leader_price,
-          executable_price, slippage_pct, fee_usd, reason, preview, experiment_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        Date.now(),
-        entry.leaderId ?? null,
-        entry.action,
-        entry.tokenId ?? null,
-        entry.side ?? null,
-        entry.size ?? null,
-        entry.price ?? null,
-        entry.leaderPrice ?? null,
-        entry.executablePrice ?? null,
-        entry.slippagePct ?? null,
-        entry.feeUsd ?? 0,
-        entry.reason ?? null,
-        entry.preview ? 1 : 0,
-        experimentId
-      );
-    const decisionAction: DecisionAction | null = entry.action === "ERROR"
-      ? null
-      : entry.action === "COPY" && entry.side === "SELL"
-        ? "SELL"
-        : entry.action;
-    if (decisionAction) {
-      const reasonCode = entry.reasonCode ?? (decisionAction === "DETECT"
-        ? "detected"
-        : decisionAction === "COPY"
-          ? "copy_executed"
-          : decisionAction === "SELL"
-            ? "sell_executed"
-            : decisionAction === "REDEEM"
-              ? "redeem_settled"
-              : stableSkipReasonCode(entry.reason));
-      const exactTerms: Record<string, unknown> = {
-        leaderId: entry.leaderId ?? null,
-        tokenId: entry.tokenId ?? null,
-        side: entry.side ?? null,
-        size: entry.size ?? null,
-        price: entry.price ?? null,
-        leaderPrice: entry.leaderPrice ?? null,
-        executablePrice: entry.executablePrice ?? null,
-        slippagePct: entry.slippagePct ?? null,
-        feeUsd: entry.feeUsd ?? 0,
-        reason: entry.reason ?? null,
-        preview: entry.preview,
-        ...entry.exactTerms,
-      };
-      const observationRefs = this.observationRefsForRawEventIds(this.decisionRawEventIds);
-      if (this.decisionRawEventIds.length > 0 && observationRefs.length === 0) {
-        throw new Error("Cannot persist decision without raw observation evidence");
+      const ts = Date.now();
+      const experimentId = this.getActiveExperiment()?.experimentId ?? null;
+      const decisionAction: DecisionAction | null = entry.action === "ERROR"
+        ? null
+        : entry.action === "COPY" && entry.side === "SELL"
+          ? "SELL"
+          : entry.action;
+      let decisionId: string | null = null;
+      if (decisionAction) {
+        const reasonCode = entry.reasonCode ?? (decisionAction === "DETECT"
+          ? "detected"
+          : decisionAction === "COPY"
+            ? "copy_executed"
+            : decisionAction === "SELL"
+              ? "sell_executed"
+              : decisionAction === "REDEEM"
+                ? "redeem_settled"
+                : stableSkipReasonCode(entry.reason));
+        const exactTerms: Record<string, unknown> = {
+          leaderId: entry.leaderId ?? null,
+          tokenId: entry.tokenId ?? null,
+          side: entry.side ?? null,
+          size: entry.size ?? null,
+          price: entry.price ?? null,
+          leaderPrice: entry.leaderPrice ?? null,
+          executablePrice: entry.executablePrice ?? null,
+          slippagePct: entry.slippagePct ?? null,
+          feeUsd: entry.feeUsd ?? 0,
+          reason: entry.reason ?? null,
+          preview: entry.preview,
+          ...entry.exactTerms,
+        };
+        const observationRefs = this.observationRefsForRawEventIds(this.decisionRawEventIds);
+        if (this.decisionRawEventIds.length > 0 && observationRefs.length === 0) {
+          throw new Error("Cannot persist decision without raw observation evidence");
+        }
+        const primary = observationRefs[0];
+        if (primary) {
+          decisionId = this.recordDecision({
+            rawEventId: primary.rawEventId,
+            action: decisionAction,
+            reasonCode,
+            exactTerms,
+            observationRefs,
+            decidedAt: ts,
+          }).decisionId;
+        }
       }
-      const primary = observationRefs[0];
-      if (primary) this.recordDecision({
-        rawEventId: primary.rawEventId,
-        action: decisionAction,
-        reasonCode,
-        exactTerms,
-        observationRefs,
-      });
-    }
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO audit_log
+           (ts, leader_id, action, token_id, side, size, price, leader_price,
+            executable_price, slippage_pct, fee_usd, reason, preview, experiment_id, decision_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          ts,
+          entry.leaderId ?? null,
+          entry.action,
+          entry.tokenId ?? null,
+          entry.side ?? null,
+          entry.size ?? null,
+          entry.price ?? null,
+          entry.leaderPrice ?? null,
+          entry.executablePrice ?? null,
+          entry.slippagePct ?? null,
+          entry.feeUsd ?? 0,
+          entry.reason ?? null,
+          entry.preview ? 1 : 0,
+          experimentId,
+          decisionId
+        );
     })();
   }
 
@@ -2740,6 +3790,13 @@ export class StateStore {
     return row?.realized_pnl ?? 0;
   }
 
+  getTotalRealizedPnl(): number {
+    const row = this.db.prepare(
+      "SELECT COALESCE(SUM(realized_pnl), 0) AS realizedPnl FROM daily_stats"
+    ).get() as { realizedPnl: number };
+    return row.realizedPnl;
+  }
+
   addRealizedPnl(delta: number): void {
     this.db
       .prepare(
@@ -2749,16 +3806,44 @@ export class StateStore {
       .run(todayKey(), delta);
   }
 
-  triggerKillSwitch(): void {
-    this.db
-      .prepare(
-        `INSERT INTO daily_stats (date, kill_switch) VALUES (?, 1)
-         ON CONFLICT(date) DO UPDATE SET kill_switch = 1`
-      )
-      .run(todayKey());
+  triggerKillSwitch(reasonCode = "DAILY_LOSS_CAP"): void {
+    const normalizedReason = requiredAggregateKey("reasonCode", reasonCode);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO daily_stats (date, kill_switch) VALUES (?, 1)
+           ON CONFLICT(date) DO UPDATE SET kill_switch = 1`
+        )
+        .run(todayKey());
+      const experiment = this.getActiveExperiment();
+      if (!experiment) {
+        this.db.prepare(
+          `INSERT INTO runtime_metadata (key, value)
+           VALUES ('legacy_kill_switch_backfill_pending', '1')
+           ON CONFLICT(key) DO UPDATE SET value = '1'`
+        ).run();
+        return;
+      }
+      const control = this.getExperimentControl(experiment.experimentId)!;
+      if (control.state === "ACTIVE") {
+        this.setExperimentControl({
+          experimentId: experiment.experimentId,
+          state: "SETTLE_ONLY",
+          reasonCode: normalizedReason,
+          details: { source: "kill_switch" },
+        });
+      }
+    })();
   }
 
   resetKillSwitch(): void {
+    const experiment = this.getActiveExperiment();
+    if (experiment) {
+      const control = this.getExperimentControl(experiment.experimentId)!;
+      if (control.state !== "ACTIVE") {
+        throw new Error("Sticky experiment control cannot reset; start a new experiment or use reviewed DATA recovery");
+      }
+    }
     this.db
       .prepare(
         `INSERT INTO daily_stats (date, kill_switch) VALUES (?, 0)
@@ -2768,6 +3853,10 @@ export class StateStore {
   }
 
   isKillSwitchActive(): boolean {
+    const experiment = this.getActiveExperiment();
+    if (experiment) {
+      return this.getExperimentControl(experiment.experimentId)!.state !== "ACTIVE";
+    }
     const row = this.db
       .prepare("SELECT kill_switch FROM daily_stats WHERE date = ?")
       .get(todayKey()) as { kill_switch: number } | undefined;
@@ -2822,7 +3911,7 @@ export class StateStore {
                 size, price, leader_price AS leaderPrice,
                 executable_price AS executablePrice, slippage_pct AS slippagePct,
                 fee_usd AS feeUsd,
-                reason, preview
+                reason, preview, decision_id AS decisionId
          FROM audit_log ${where}
          ORDER BY ts DESC, id DESC
          LIMIT ? OFFSET ?`
@@ -2842,7 +3931,7 @@ export class StateStore {
                 size, price, leader_price AS leaderPrice,
                 executable_price AS executablePrice, slippage_pct AS slippagePct,
                 fee_usd AS feeUsd,
-                reason, preview
+                reason, preview, decision_id AS decisionId
          FROM audit_log
          WHERE id > ?
          ORDER BY id ASC

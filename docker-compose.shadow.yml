@@ -1,0 +1,83 @@
+services:
+  polymirror-shadow:
+    image: polymirror:${POLYMIRROR_GIT_SHA:?POLYMIRROR_GIT_SHA is required}
+    restart: unless-stopped
+    read_only: true
+    cpus: "${SHADOW_CPUS:-1.0}"
+    mem_limit: "${SHADOW_MEMORY_LIMIT:-1024m}"
+    pids_limit: 256
+    oom_score_adj: 500
+    ports:
+      - "127.0.0.1:${SHADOW_HEALTH_PORT:-8081}:8080"
+    env_file:
+      - ${POLYMIRROR_ENV_FILE:?POLYMIRROR_ENV_FILE is required}
+    volumes:
+      - ${SHADOW_CONFIG:?SHADOW_CONFIG is required}:/app/config.yaml:ro
+      - ${SHADOW_DATA_DIR:?SHADOW_DATA_DIR is required}:/app/data
+      - ${SHADOW_REPORTS_DIR:?SHADOW_REPORTS_DIR is required}:/app/reports
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    environment:
+      - HEALTH_PORT=8080
+      - HEALTH_BIND=0.0.0.0
+      - POLYMIRROR_GIT_SHA=${POLYMIRROR_GIT_SHA:?POLYMIRROR_GIT_SHA is required}
+      - POLYMIRROR_IMAGE_DIGEST=${POLYMIRROR_IMAGE_DIGEST:?POLYMIRROR_IMAGE_DIGEST is required}
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - --input-type=module
+        - -e
+        - |
+          const response = await fetch("http://127.0.0.1:8080/health");
+          const health = await response.json();
+          if (!response.ok || health.status !== "ok" || health.previewMode !== true
+            || !Number.isFinite(health.lastPollAt) || health.lastError !== null
+            || health.pendingOrders !== 0
+            || health.settlementFailures !== 0 || health.closedMarketOpenPositions !== 0
+            || !Array.isArray(health.walletDrifts) || health.walletDrifts.length !== 0
+            || health.enabledAccountCount !== 12 || health.polledAccountCount !== 12
+            || !Array.isArray(health.experiments) || health.experiments.length !== 12) process.exit(1);
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  polymirror-shadow-collector:
+    image: polymirror:${POLYMIRROR_GIT_SHA:?POLYMIRROR_GIT_SHA is required}
+    restart: unless-stopped
+    read_only: true
+    cpus: "${SHADOW_COLLECTOR_CPUS:-0.5}"
+    mem_limit: "${SHADOW_COLLECTOR_MEMORY_LIMIT:-512m}"
+    pids_limit: 128
+    oom_score_adj: 750
+    depends_on:
+      polymirror-shadow:
+        condition: service_healthy
+    volumes:
+      - ${SHADOW_CONFIG:?SHADOW_CONFIG is required}:/app/config.yaml:ro
+      - ${SHADOW_DATA_DIR:?SHADOW_DATA_DIR is required}:/app/data:ro
+      - ${SHADOW_REPORTS_DIR:?SHADOW_REPORTS_DIR is required}:/app/reports
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    environment:
+      - CONFIG_PATH=/app/config.yaml
+      - REPORT_DATA_DIR=/app/data/accounts
+      - REPORT_OUT_DIR=/app/reports/preview-live
+      - REPORT_STARTING_CAPITAL_USD=200
+      - REPORT_WINDOW_MINUTES=1440
+      - REPORT_COLLECT_INTERVAL_MINUTES=60
+      - REPORT_COLLECT_RUN_IMMEDIATELY=1
+    command: ["node", "dist/report-preview-collector.js"]
+    healthcheck:
+      disable: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

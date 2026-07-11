@@ -214,11 +214,15 @@ function settleTrackedTokenPayouts(
   tokenPayouts: Map<string, number>,
   preview: boolean,
   cashInitialUsd: number,
-  settlementTerms?: Record<string, unknown>
+  settlementTerms?: Record<string, unknown>,
+  observationRefsByToken?: Map<string, DecisionObservationRef[]>
 ): number {
   let settled = 0;
   for (const [tokenId, payoutPerShare] of tokenPayouts) {
     if (store.getTotalTokenShares(tokenId) <= 0.001) continue;
+    if (observationRefsByToken) {
+      store.setDecisionObservationRefs(observationRefsByToken.get(tokenId) ?? []);
+    }
     settled += store.recordTokenSettlement(
       tokenId,
       payoutPerShare,
@@ -250,6 +254,7 @@ async function processOnChainRedeemableScan(
 
   const byCondition = new Map<string, RedeemablePositionRow[]>();
   const rawRefsByCondition = new Map<string, DecisionObservationRef[]>();
+  const rawRefsByConditionToken = new Map<string, Map<string, DecisionObservationRef[]>>();
   for (const row of redeemable) {
     const sourceId = `onchain-redeemable:${row.conditionId}:${row.tokenId}:${row.size}:${row.payoutPerShare}`;
     const raw = store.getActiveExperiment()
@@ -275,6 +280,11 @@ async function processOnChainRedeemableScan(
       const refs = rawRefsByCondition.get(row.conditionId) ?? [];
       refs.push(rawRef);
       rawRefsByCondition.set(row.conditionId, refs);
+      const byToken = rawRefsByConditionToken.get(row.conditionId) ?? new Map();
+      const tokenRefs = byToken.get(row.tokenId) ?? [];
+      tokenRefs.push(rawRef);
+      byToken.set(row.tokenId, tokenRefs);
+      rawRefsByConditionToken.set(row.conditionId, byToken);
     }
     store.setDecisionRawEventIds([]);
   }
@@ -302,7 +312,8 @@ async function processOnChainRedeemableScan(
         settlementSource: "onchain_redeemable",
         conditionId,
         onChainTxHash: redeemedTxHashesThisCycle.get(conditionId) ?? null,
-      }
+      },
+      rawRefsByConditionToken.get(conditionId)
     );
     if (settled > 0) {
       logInfo("Synced local positions after on-chain redeem", {

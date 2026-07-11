@@ -204,6 +204,78 @@ describe("processSettlements", () => {
       archiveDir: join(dir, `tampered-${index}`) })).rejects.toThrow(/decision|order|identity|settlement/i);
   });
 
+  it("settles one token held by multiple leaders with one terminal observation decision", async () => {
+    seedPosition("shared-token");
+    store.recordCopySuccess({
+      tradeKey: "seed-shared-token-second-leader",
+      leaderId: "whale-2",
+      tokenId: "shared-token",
+      side: "BUY",
+      filledShares: 4,
+      price: 0.25,
+      filledUsd: 1,
+      auditReason: "seed",
+      preview: true,
+      cashInitialUsd: 500,
+      market: {
+        tokenId: "shared-token",
+        conditionId: "0xcondition",
+        slug: "market-slug",
+        title: "Market",
+        outcome: "Yes",
+      },
+    });
+    startExperiment(false);
+    vi.doMock("../src/monitor/data-api.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/monitor/data-api.js")>()),
+      getActivity: vi.fn(async () => []),
+    }));
+    vi.doMock("../src/executor/redeem.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/executor/redeem.js")>()),
+      listRedeemablePositions: vi.fn(async () => [{
+        conditionId: "0xcondition",
+        tokenId: "shared-token",
+        size: 14,
+        payoutPerShare: 1,
+      }]),
+      redeemConditionOnChain: vi.fn(async () => ({ ok: true })),
+    }));
+    const { processSettlements, resetSettlementCache } = await import("../src/engine/settlement.js");
+    resetSettlementCache();
+
+    await processSettlements(
+      new LeaderRegistry([leader]),
+      { ...globalBase, previewMode: false },
+      store,
+      false,
+      { wallet }
+    );
+
+    expect(store.getPosition("whale", "shared-token")).toBe(0);
+    expect(store.getPosition("whale-2", "shared-token")).toBe(0);
+    expect(store.listDecisions().map((decision) => decision.action)).toEqual([
+      "DETECT",
+      "REDEEM",
+    ]);
+    expect(store.listDecisions()[1]?.exactTerms).toMatchObject({
+      tokenId: "shared-token",
+      settlementSource: "onchain_redeemable",
+      settlements: [
+        expect.objectContaining({ leaderId: "whale", tokenId: "shared-token" }),
+        expect.objectContaining({ leaderId: "whale-2", tokenId: "shared-token" }),
+      ],
+    });
+    const experimentId = store.getActiveExperiment()!.experimentId;
+    const archived = await archiveExperimentEvidence({
+      dbPath: join(dir, "test.db"),
+      experimentId,
+      archiveDir: join(dir, "multi-leader-token-archive"),
+    });
+    expect(verifyExperimentReplay(archived.manifestPath, {
+      sourceDbPath: join(dir, "test.db"),
+    }).match).toBe(true);
+  });
+
   it("replays one failed on-chain redemption linked to two token observations", async () => {
     seedPosition("token-a"); seedPosition("token-b"); startExperiment(false);
     vi.doMock("../src/monitor/data-api.js", async (importOriginal) => ({
