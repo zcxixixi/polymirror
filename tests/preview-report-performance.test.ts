@@ -28,6 +28,7 @@ describe("preview report bounded reads", () => {
       expect(db.pragma("temp_store", { simple: true })).toBe(1);
       expect(db.pragma("cache_size", { simple: true })).toBe(-65_536);
       expect(db.pragma("busy_timeout", { simple: true })).toBe(5_000);
+      expect(db.pragma("mmap_size", { simple: true })).toBe(256 * 1024 * 1024);
       expect(() => db.exec("INSERT INTO sample DEFAULT VALUES")).toThrow();
     } finally {
       db.close();
