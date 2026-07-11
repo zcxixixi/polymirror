@@ -998,28 +998,18 @@ export function readPreviewAccountReport(
       : [];
     const byAction = new Map(counts.map((row) => [row.action, row.count]));
 
-    const skipReasons = hasAuditLog
-      ? (db
-          .prepare(
-            `SELECT COALESCE(reason, '') AS reason, COUNT(*) AS count
-             FROM audit_log
-             WHERE action = 'SKIP'
-             GROUP BY reason
-             ORDER BY count DESC, reason ASC
-             LIMIT ?`
-          )
-          .all(limit) as PreviewSkipReason[])
-      : [];
     const allSkipReasons = hasAuditLog
       ? (db
           .prepare(
             `SELECT COALESCE(reason, '') AS reason, COUNT(*) AS count
              FROM audit_log
              WHERE action = 'SKIP'
-             GROUP BY reason`
+             GROUP BY reason
+             ORDER BY count DESC, reason ASC`
           )
           .all() as PreviewSkipReason[])
       : [];
+    const skipReasons = allSkipReasons.slice(0, limit);
     const recentRedeems = hasAuditLog
       ? (db
           .prepare(
