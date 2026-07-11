@@ -134,6 +134,7 @@ function runOneShotReportCommand(
 
 function runCohortTableCommand(
   options: GeneratePreviewAccountsReportOptions | undefined,
+  sourceReportPath: string,
   timeoutMs: number | undefined,
   stopSignal: AbortSignal
 ): Promise<void> {
@@ -143,7 +144,10 @@ function runCohortTableCommand(
       [fileURLToPath(new URL("./report-preview-cohort-table.js", import.meta.url))],
       {
         cwd: process.cwd(),
-        env: reportEnv(options),
+        env: {
+          ...reportEnv(options),
+          REPORT_SOURCE_JSON: sourceReportPath,
+        },
         stdio: ["ignore", "ignore", "pipe"],
       }
     );
@@ -205,6 +209,7 @@ const summary = await runPreviewReportCollector({
     );
     await runCohortTableCommand(
       options.reportOptions,
+      result.outPath,
       options.runTimeoutMs,
       controller.signal
     );

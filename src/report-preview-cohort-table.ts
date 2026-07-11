@@ -17,8 +17,14 @@ import {
   formatCohortQualityMarkdown,
   type CohortQualityTableOptions,
 } from "./sim/cohort-quality-table.js";
-import { resolveCohortTableAccounts } from "./sim/cohort-table-accounts.js";
-import { readPreviewAccountReport } from "./sim/preview-report.js";
+import {
+  resolveCohortTableAccounts,
+  selectExactCohortReports,
+} from "./sim/cohort-table-accounts.js";
+import {
+  readPreviewAccountReport,
+  type PreviewAccountReport,
+} from "./sim/preview-report.js";
 
 const RECENT_WINDOW_MS = 24 * 60 * 60_000;
 
@@ -101,12 +107,9 @@ const controlStates: Record<string, string> = {};
 const settlementFailures: Record<string, number> = {};
 
 const configAccountById = new Map(config?.accounts.map((account) => [account.id, account]));
-const reports = accountIds.map((accountId) => {
+for (const accountId of accountIds) {
   const dbPath = join(dataDir, accountId, "preview.db");
   const configAccount = configAccountById.get(accountId);
-  const mergedGlobal = config && configAccount
-    ? accountMergedGlobal(config, configAccount)
-    : undefined;
   if (configAccount?.label.trim()) labels[accountId] = configAccount.label.trim();
 
   const evidence = readOperationalEvidence(dbPath);
@@ -116,16 +119,31 @@ const reports = accountIds.map((accountId) => {
   if (evidence.settlementFailures !== undefined) {
     settlementFailures[accountId] = evidence.settlementFailures;
   }
+}
 
-  return readPreviewAccountReport({
-    accountId,
-    dbPath,
-    copyPriceMode: mergedGlobal?.copy_price_mode ?? "leader_limit",
-    startingCapitalUsd: mergedGlobal?.risk.starting_capital_usd ?? fallbackCapital,
-    recentWindowMs: RECENT_WINDOW_MS,
-    limit: Number(process.env.REPORT_LIMIT ?? 8),
-  });
-});
+const sourceReportPath = process.env.REPORT_SOURCE_JSON?.trim();
+const reports: PreviewAccountReport[] = sourceReportPath
+  ? selectExactCohortReports(
+      accountIds,
+      (JSON.parse(readFileSync(sourceReportPath, "utf8")) as {
+        reports?: PreviewAccountReport[];
+      }).reports ?? []
+    )
+  : accountIds.map((accountId) => {
+      const dbPath = join(dataDir, accountId, "preview.db");
+      const configAccount = configAccountById.get(accountId);
+      const mergedGlobal = config && configAccount
+        ? accountMergedGlobal(config, configAccount)
+        : undefined;
+      return readPreviewAccountReport({
+        accountId,
+        dbPath,
+        copyPriceMode: mergedGlobal?.copy_price_mode ?? "leader_limit",
+        startingCapitalUsd: mergedGlobal?.risk.starting_capital_usd ?? fallbackCapital,
+        recentWindowMs: RECENT_WINDOW_MS,
+        limit: Number(process.env.REPORT_LIMIT ?? 8),
+      });
+    });
 
 const options: CohortQualityTableOptions = {
   labels,

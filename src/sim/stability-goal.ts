@@ -43,6 +43,12 @@ export interface StabilityGoalAssessment {
 
 export interface StabilityGoalEvidence {
   recentErrorCount?: number;
+  copyPath?: {
+    copiedBuy: number;
+    copiedSell: number;
+    redeemCount: number;
+    unclassifiedGap: number;
+  };
 }
 
 const DEFAULT_THRESHOLDS: StabilityGoalThresholds = {
@@ -115,13 +121,19 @@ export function assessStabilityGoal(
     lastCopyAgeHours !== null && lastCopyAgeHours <= t.maxLastCopyAgeHours;
   const lastCopyStale =
     lastCopyAgeHours !== null && lastCopyAgeHours > t.maxLastCopyAgeHours;
-  const unclassifiedCopyGap =
-    report.copyQuality.copyGap.buy.unclassified +
-    report.copyQuality.copyGap.sell.unclassified;
+  const copyPath = evidence.copyPath ?? {
+    copiedBuy: report.copyQuality.copied.buy,
+    copiedSell: report.copyQuality.copied.sell,
+    redeemCount: report.copyQuality.redeem.count,
+    unclassifiedGap:
+      report.copyQuality.copyGap.buy.unclassified +
+      report.copyQuality.copyGap.sell.unclassified,
+  };
+  const unclassifiedCopyGap = copyPath.unclassifiedGap;
   const copyPathComplete =
-    report.copyQuality.copied.buy > 0 &&
-    report.copyQuality.copied.sell > 0 &&
-    report.copyQuality.redeem.count > 0 &&
+    copyPath.copiedBuy > 0 &&
+    copyPath.copiedSell > 0 &&
+    copyPath.redeemCount > 0 &&
     unclassifiedCopyGap === 0;
   const accountingClean =
     Math.abs(report.cashReplayDeltaUsd) <= 0.01 &&

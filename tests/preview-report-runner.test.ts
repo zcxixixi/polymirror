@@ -296,4 +296,22 @@ describe("generatePreviewAccountsReport", () => {
       storeB.close();
     }
   });
+
+  it("treats explicit report accounts as an exact bounded scope", () => {
+    const storeB = new StateStore(join(dataDir, "acct-b", "preview.db"));
+    try {
+      const result = generatePreviewAccountsReport({
+        dataDir,
+        outDir,
+        accounts: ["acct-b"],
+        currentActiveAccounts: ["acct-a"],
+      });
+
+      expect(result.summary.accountCount).toBe(1);
+      expect(result.reports.map((report) => report.accountId)).toEqual(["acct-b"]);
+      expect(result.active?.summary.accountCount).toBe(0);
+    } finally {
+      storeB.close();
+    }
+  });
 });

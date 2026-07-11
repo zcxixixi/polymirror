@@ -4,6 +4,7 @@ import { replayPreviewCashFromAudit } from "./preview-cash-reconcile.js";
 import {
   buildPreviewCopyQuality,
   emptyPreviewCopyQuality,
+  PREVIEW_COPY_DEDUP_REASONS,
   type PreviewCopyQualitySummary,
 } from "./preview-quality.js";
 import {
@@ -12,12 +13,24 @@ import {
 } from "./profitability-gate.js";
 import {
   assessStabilityGoal,
+  type StabilityGoalEvidence,
   type StabilityGoalAssessment,
 } from "./stability-goal.js";
 import type { CopyPriceMode } from "../config/types.js";
 
 const STABILITY_GOAL_COPY_PATH_WINDOW_MS = 14 * 24 * 60 * 60_000;
 const STABILITY_GOAL_ERROR_WINDOW_MS = 6 * 60 * 60_000;
+const REPORT_CACHE_KIB = 64 * 1024;
+const REPORT_MMAP_BYTES = 256 * 1024 * 1024;
+
+export function configurePreviewReportDatabase(db: Database.Database): void {
+  db.pragma("busy_timeout = 5000");
+  db.pragma(`cache_size = -${REPORT_CACHE_KIB}`);
+  db.pragma(`mmap_size = ${REPORT_MMAP_BYTES}`);
+  // Keep high-cardinality GROUP BY spill bounded by the collector's writable /tmp.
+  db.pragma("temp_store = FILE");
+  db.pragma("query_only = ON");
+}
 
 export interface PreviewSkipReason {
   reason: string;
@@ -462,16 +475,68 @@ function summarizeRecentWindow(
   };
 }
 
-function countErrorsSince(db: Database.Database, sinceMs: number): number {
-  return (
-    db
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM audit_log
-         WHERE action = 'ERROR' AND ts >= ?`
-      )
-      .get(sinceMs) as { count: number }
-  ).count;
+export function readStabilityGoalEvidence(
+  db: Database.Database,
+  copyPathSinceMs: number,
+  errorSinceMs: number
+): StabilityGoalEvidence {
+  const row = db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'DETECT' AND side = 'BUY' THEN 1 ELSE 0 END), 0) AS detectedBuy,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'DETECT' AND side = 'SELL' THEN 1 ELSE 0 END), 0) AS detectedSell,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'COPY' AND side = 'BUY' THEN 1 ELSE 0 END), 0) AS copiedBuy,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'COPY' AND side = 'SELL' THEN 1 ELSE 0 END), 0) AS copiedSell,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'SKIP' AND side = 'BUY'
+           AND COALESCE(reason, '') IN (@dedupReason0, @dedupReason1) THEN 1 ELSE 0 END), 0) AS dedupedBuy,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'SKIP' AND side = 'SELL'
+           AND COALESCE(reason, '') IN (@dedupReason0, @dedupReason1) THEN 1 ELSE 0 END), 0) AS dedupedSell,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'SKIP' AND side = 'BUY'
+           AND COALESCE(reason, '') NOT IN (@dedupReason0, @dedupReason1) THEN 1 ELSE 0 END), 0) AS skippedBuy,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'SKIP' AND side = 'SELL'
+           AND COALESCE(reason, '') NOT IN (@dedupReason0, @dedupReason1) THEN 1 ELSE 0 END), 0) AS skippedSell,
+         COALESCE(SUM(CASE WHEN ts >= @copyPathSinceMs AND action = 'REDEEM' THEN 1 ELSE 0 END), 0) AS redeemCount,
+         COALESCE(SUM(CASE WHEN ts >= @errorSinceMs AND action = 'ERROR' THEN 1 ELSE 0 END), 0) AS recentErrorCount
+       FROM audit_log
+       WHERE ts >= @minimumSinceMs
+         AND action IN ('DETECT', 'COPY', 'SKIP', 'REDEEM', 'ERROR')`
+    )
+    .get({
+      copyPathSinceMs,
+      errorSinceMs,
+      minimumSinceMs: Math.min(copyPathSinceMs, errorSinceMs),
+      dedupReason0: PREVIEW_COPY_DEDUP_REASONS[0],
+      dedupReason1: PREVIEW_COPY_DEDUP_REASONS[1],
+    }) as {
+      detectedBuy: number;
+      detectedSell: number;
+      copiedBuy: number;
+      copiedSell: number;
+      dedupedBuy: number;
+      dedupedSell: number;
+      skippedBuy: number;
+      skippedSell: number;
+      redeemCount: number;
+      recentErrorCount: number;
+    };
+
+  const unclassified = (
+    detected: number,
+    deduped: number,
+    copied: number,
+    skipped: number
+  ): number => Math.max(0, Math.max(0, detected - deduped) - copied - skipped);
+  return {
+    recentErrorCount: row.recentErrorCount,
+    copyPath: {
+      copiedBuy: row.copiedBuy,
+      copiedSell: row.copiedSell,
+      redeemCount: row.redeemCount,
+      unclassifiedGap:
+        unclassified(row.detectedBuy, row.dedupedBuy, row.copiedBuy, row.skippedBuy) +
+        unclassified(row.detectedSell, row.dedupedSell, row.copiedSell, row.skippedSell),
+    },
+  };
 }
 
 function parseAuditPnl(reason: string | null): number {
@@ -837,6 +902,7 @@ export function readPreviewAccountReport(
 
   const db = new Database(options.dbPath, { readonly: true });
   try {
+    configurePreviewReportDatabase(db);
     const hasCashLedger = tableExists(db, "cash_ledger");
     const hasAuditLog = tableExists(db, "audit_log");
     const copyPriceMode = readCopyPriceMode(db, hasAuditLog, options.copyPriceMode);
@@ -1033,13 +1099,21 @@ export function readPreviewAccountReport(
       ...copyQualityContext,
       sinceMs: recentSinceMs,
     });
-    const stabilityCopyQuality = buildPreviewCopyQuality({
-      ...copyQualityContext,
-      sinceMs: nowMs - STABILITY_GOAL_COPY_PATH_WINDOW_MS,
-    });
-    const stabilityErrorCount = hasAuditLog
-      ? countErrorsSince(db, nowMs - STABILITY_GOAL_ERROR_WINDOW_MS)
-      : 0;
+    const stabilityEvidence = hasAuditLog
+      ? readStabilityGoalEvidence(
+          db,
+          nowMs - STABILITY_GOAL_COPY_PATH_WINDOW_MS,
+          nowMs - STABILITY_GOAL_ERROR_WINDOW_MS
+        )
+      : {
+          recentErrorCount: 0,
+          copyPath: {
+            copiedBuy: 0,
+            copiedSell: 0,
+            redeemCount: 0,
+            unclassifiedGap: 0,
+          },
+        };
     const performance = readPreviewPerformance(
       db,
       hasAuditLog,
@@ -1111,13 +1185,7 @@ export function readPreviewAccountReport(
     return {
       ...report,
       profitabilityGate: assessProfitabilityGate(report),
-      stabilityGoal: assessStabilityGoal({
-        ...report,
-        copyQuality: {
-          ...stabilityCopyQuality,
-          primaryIssue: copyQuality.primaryIssue,
-        },
-      }, {}, { recentErrorCount: stabilityErrorCount }),
+      stabilityGoal: assessStabilityGoal(report, {}, stabilityEvidence),
     };
   } finally {
     db.close();

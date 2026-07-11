@@ -18,8 +18,9 @@ function discoverCohortTableAccounts(dataDir: string): string[] {
     .sort();
 }
 
-function isSafeAccountId(accountId: string): boolean {
-  return accountId !== "."
+function isSafeAccountId(accountId: unknown): accountId is string {
+  return typeof accountId === "string"
+    && accountId !== "."
     && accountId !== ".."
     && !accountId.includes("/")
     && !accountId.includes("\\")
@@ -58,4 +59,24 @@ export function resolveCohortTableAccounts(
     }
   }
   return accountIds;
+}
+
+export function selectExactCohortReports<T extends { accountId: string }>(
+  accountIds: readonly string[],
+  sourceReports: readonly T[]
+): T[] {
+  const reportsByAccount = new Map<string, T>();
+  for (const report of sourceReports) {
+    if (!isSafeAccountId(report.accountId) || reportsByAccount.has(report.accountId)) {
+      throw new Error(`invalid or duplicate source cohort report: ${report.accountId}`);
+    }
+    reportsByAccount.set(report.accountId, report);
+  }
+  if (
+    reportsByAccount.size !== accountIds.length
+    || accountIds.some((accountId) => !reportsByAccount.has(accountId))
+  ) {
+    throw new Error("source cohort report scope does not match requested accounts");
+  }
+  return accountIds.map((accountId) => reportsByAccount.get(accountId)!);
 }

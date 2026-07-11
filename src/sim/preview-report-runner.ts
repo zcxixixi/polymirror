@@ -133,7 +133,8 @@ function resolveReportAccounts(
   accounts: readonly string[] | undefined,
   currentActiveAccounts: readonly string[] | undefined
 ): string[] {
-  return uniq([...(accounts ?? discoverPreviewAccounts(dataDir)), ...(currentActiveAccounts ?? [])]);
+  if (accounts) return uniq([...accounts]);
+  return uniq([...discoverPreviewAccounts(dataDir), ...(currentActiveAccounts ?? [])]);
 }
 
 function uniq(values: readonly string[]): string[] {

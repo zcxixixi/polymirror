@@ -2,7 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resolveCohortTableAccounts } from "../src/sim/cohort-table-accounts.js";
+import {
+  resolveCohortTableAccounts,
+  selectExactCohortReports,
+} from "../src/sim/cohort-table-accounts.js";
 
 let dir: string;
 let dataDir: string;
@@ -63,5 +66,32 @@ describe("resolveCohortTableAccounts", () => {
     expect(() => resolveCohortTableAccounts(dataDir, "../acct-a")).toThrow(
       /invalid requested cohort account id/
     );
+  });
+});
+
+describe("selectExactCohortReports", () => {
+  it("reuses one exact report snapshot in requested account order", () => {
+    expect(selectExactCohortReports(
+      ["acct-b", "acct-a"],
+      [{ accountId: "acct-a", value: 1 }, { accountId: "acct-b", value: 2 }]
+    )).toEqual([
+      { accountId: "acct-b", value: 2 },
+      { accountId: "acct-a", value: 1 },
+    ]);
+  });
+
+  it("fails closed for missing, extra, or duplicate source reports", () => {
+    expect(() => selectExactCohortReports(
+      ["acct-a", "acct-b"],
+      [{ accountId: "acct-a" }]
+    )).toThrow(/scope does not match/i);
+    expect(() => selectExactCohortReports(
+      ["acct-a"],
+      [{ accountId: "acct-a" }, { accountId: "extra" }]
+    )).toThrow(/scope does not match/i);
+    expect(() => selectExactCohortReports(
+      ["acct-a"],
+      [{ accountId: "acct-a" }, { accountId: "acct-a" }]
+    )).toThrow(/duplicate/i);
   });
 });

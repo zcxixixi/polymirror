@@ -140,6 +140,8 @@ export interface BuildPreviewCopyQualityOptions {
   limit?: number;
 }
 
+export const PREVIEW_COPY_DEDUP_REASONS = ["already seen", "recent buy dedup"] as const;
+
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -229,7 +231,9 @@ function reasonMatchesSellWithoutLocal(reason: string): boolean {
 }
 
 function reasonMatchesAlreadySeen(reason: string): boolean {
-  return reason === "already seen" || reason === "recent buy dedup";
+  return PREVIEW_COPY_DEDUP_REASONS.includes(
+    reason as (typeof PREVIEW_COPY_DEDUP_REASONS)[number]
+  );
 }
 
 function addSideGapSkip(
