@@ -516,6 +516,69 @@ describe("sealed deterministic replay", () => {
       archiveDir: join(dir, "fabricated-policy-skip-archive") })).rejects.toThrow(/cannot prove production SKIP/i);
   });
 
+  it.each([
+    ["absolute_price" as const, 0.04, 0.04],
+    ["relative_pct" as const, 0.04, 0.008],
+  ])("replays leader-limit %s slippage SKIPs from immutable price evidence", async (
+    mode,
+    configuredTolerance,
+    absoluteTolerance
+  ) => {
+    const dbPath = join(dir, `leader-limit-${mode}.db`);
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    config.app.global.copyPriceMode = "leader_limit";
+    config.app.global.risk.slippageTolerance = configuredTolerance;
+    config.app.global.risk.slippageToleranceMode = mode;
+    const exp = store.startOrResumeExperiment({
+      accountId: `leader-limit-${mode}`,
+      candidateAddresses: [],
+      config,
+      gitSha: "git",
+      imageDigest: "image",
+      lockfileHash: "lock",
+      trustClass: "candidate",
+    });
+    const raw = store.recordRawEvent({
+      sourceId: `leader-limit-${mode}`,
+      payload: { leaderId: "whale", type: "TRADE", side: "BUY", asset: "token",
+        price: 0.2, size: 10, timestamp: 1, candidate: true },
+      sourceTimestamp: 1,
+      observedTimestamp: 1,
+    });
+    store.setDecisionObservationRefs([store.latestObservationRef(raw.rawEventId)]);
+    store.audit({ leaderId: "whale", action: "DETECT", tokenId: "token", side: "BUY",
+      size: 10, price: 0.2, preview: true });
+    store.audit({
+      leaderId: "whale",
+      action: "SKIP",
+      tokenId: "token",
+      side: "BUY",
+      size: 5,
+      price: 0.2,
+      leaderPrice: 0.2,
+      executablePrice: 0.25,
+      slippagePct: 25,
+      reason: `slippage 0.0500 > ${absoluteTolerance}`,
+      preview: true,
+      exactTerms: {
+        buyNotionalMode: "submitted_cents",
+        configuredSlippageTolerance: configuredTolerance,
+        slippageToleranceMode: mode,
+        absoluteSlippageTolerance: absoluteTolerance,
+      },
+    });
+    store.close();
+
+    const archived = await archiveExperimentEvidence({
+      dbPath,
+      experimentId: exp.experimentId,
+      archiveDir: join(dir, `leader-limit-${mode}-archive`),
+    });
+    expect(verifyExperimentReplay(archived.manifestPath, { sourceDbPath: dbPath }).match)
+      .toBe(true);
+  });
+
   it("rejects a pre-seal decision identity rewrite even when its link is remapped", async () => {
     const dbPath = join(dir, "decision-id-tamper.db"); const store = new StateStore(dbPath);
     const config = previewRuntimeConfig();

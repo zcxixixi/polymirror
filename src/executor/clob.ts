@@ -15,6 +15,9 @@ export interface PlaceOrderRequest {
   side: TradeSide;
   price: number;
   size: number;
+  buyAmountUsd?: number;
+  buyMaxSpendUsd?: number;
+  expectedBuyMakerAmountUsd?: number;
   expectedTickSize?: number;
   feeRate?: number;
   feeExponent?: number;
@@ -98,7 +101,9 @@ export class ClobExecutor {
   }
 
   async placeLimitOrder(req: PlaceOrderRequest): Promise<PlaceOrderResult> {
-    const notional = req.price * req.size;
+    const notional = req.side === "BUY" && req.expectedBuyMakerAmountUsd !== undefined
+      ? req.expectedBuyMakerAmountUsd
+      : req.price * req.size;
 
     if (this.global.previewMode) {
       const feeUsd = calculatePlatformFeeUsd(
@@ -169,6 +174,8 @@ export class ClobExecutor {
           side: req.side,
           price,
           size: req.size,
+          buyAmountUsd: req.buyAmountUsd,
+          buyMaxSpendUsd: req.buyMaxSpendUsd,
           orderType: this.global.execution.orderType,
           tickSize: meta.tickSize,
           negRisk: meta.negRisk,

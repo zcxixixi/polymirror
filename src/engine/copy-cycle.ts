@@ -8,6 +8,8 @@ import { calculateOrderSize } from "../engine/sizing.js";
 import {
   prepareExecutableGuardedOrder,
   prepareGuardedOrderTerms,
+  resolveAbsoluteSlippageTolerance,
+  submittedBuyOrderUsd,
 } from "../engine/execution-price.js";
 import { processSettlements } from "../engine/settlement.js";
 import { passActivityFilters } from "../engine/filters.js";
@@ -36,9 +38,12 @@ import {
 import {
   fetchBestExecutablePrice,
   fetchExecutableOrderBookSnapshot,
+  fetchOrderBookMeta,
   quoteExecutableOrderBook,
+  roundToTick,
 } from "../executor/orderbook.js";
 import { calculateCopySlippageLossPct } from "../sim/copy-slippage.js";
+import { prepareSdkMarketBuyWithinMaxSpend } from "../executor/fees.js";
 import { logInfo, logError, logPreviewAction } from "../notify/logger.js";
 import {
   healthSnapshot,
@@ -805,6 +810,24 @@ export async function runCopyCycle(
     let guardedFeeRate = 0;
     let guardedFeeExponent = 0;
     let guardedQuoteEvidence: Record<string, unknown> | null = null;
+    const maxOrderUsd = Math.min(
+      config.app.global.risk.maxOrderUsd,
+      leader.limits?.maxOrderUsd ?? Infinity
+    );
+    const slippageToleranceMode =
+      config.app.global.risk.slippageToleranceMode ?? "absolute_price";
+    const absoluteSlippageTolerance = resolveAbsoluteSlippageTolerance(
+      leaderPrice,
+      config.app.global.risk.slippageTolerance,
+      slippageToleranceMode
+    );
+    const slippagePolicyTerms = {
+      buyNotionalMode: "submitted_cents",
+      configuredSlippageTolerance: config.app.global.risk.slippageTolerance,
+      slippageToleranceMode,
+      absoluteSlippageTolerance,
+    };
+    let executionPolicyTerms: Record<string, unknown> = slippagePolicyTerms;
     let executionAudit:
       | {
           leaderPrice: number;
@@ -834,7 +857,8 @@ export async function runCopyCycle(
         targetUsd: sizing.finalUsd,
         targetShares: sizing.finalShares,
         minOrderUsd: config.app.global.risk.minOrderUsd,
-        absoluteTolerance: config.app.global.risk.slippageTolerance,
+        maxOrderUsd,
+        absoluteTolerance: absoluteSlippageTolerance,
         tickSize: snapshot?.tickSize,
       });
       if (!terms.allow || terms.orderPrice === null) {
@@ -842,32 +866,56 @@ export async function runCopyCycle(
         skip(store, leaderId, activity, terms.reason ?? "invalid guarded order", preview);
         continue;
       }
+      const sdkBuy = activity.side === "BUY"
+        && config.app.global.execution.orderType !== "GTC"
+        && snapshot
+        ? prepareSdkMarketBuyWithinMaxSpend({
+            requestedAmountUsd: terms.orderUsd,
+            maxSpendUsd: terms.orderUsd,
+            price: terms.orderPrice,
+            tickSize: snapshot.tickSize,
+            platformFeeRate: snapshot.feeRate ?? 0,
+            platformFeeExponent: snapshot.feeExponent ?? 0,
+          })
+        : null;
+      executionPolicyTerms = {
+        ...slippagePolicyTerms,
+        ...(sdkBuy ? {
+          sdkRequestedBuyAmountUsd: terms.orderUsd,
+          sdkMaxSpendUsd: terms.orderUsd,
+          sdkExpectedMakerAmountUsd: sdkBuy.makerAmountUsd,
+          sdkExpectedAllInSpendUsd: sdkBuy.allInSpendUsd,
+          sdkTickSize: snapshot!.tickSize,
+          sdkPlatformFeeRate: snapshot!.feeRate ?? 0,
+          sdkPlatformFeeExponent: snapshot!.feeExponent ?? 0,
+        } : {}),
+      };
+      const requestedOrderShares = sdkBuy?.requestedShares ?? terms.orderShares;
       const quote = snapshot
         ? quoteExecutableOrderBook(
           snapshot.levels,
           activity.side,
-          terms.orderShares,
+          requestedOrderShares,
           terms.orderPrice,
           snapshot.minOrderShares,
-          activity.side === "BUY"
-            ? Math.round(terms.orderUsd * 100) / 100
-            : undefined
+          sdkBuy?.makerAmountUsd
         )
         : null;
       guardedQuoteEvidence = snapshot ? {
         levels: snapshot.levels,
         tickSize: snapshot.tickSize,
         minOrderShares: snapshot.minOrderShares,
-        feeRate: snapshot.feeRate,
-        feeExponent: snapshot.feeExponent,
+        feeRate: snapshot.feeRate ?? 0,
+        feeExponent: snapshot.feeExponent ?? 0,
       } : null;
       const guardedDecisionTerms = {
         requestedPrice: terms.orderPrice,
-        requestedShares: terms.orderShares,
+        requestedShares: requestedOrderShares,
         quoteBestPrice: quote?.averagePrice ?? quote?.bestPrice ?? null,
         guardedTickSize: snapshot?.tickSize ?? null,
         guardedFeeRate: snapshot?.feeRate ?? 0,
         guardedFeeExponent: snapshot?.feeExponent ?? 0,
+        ...executionPolicyTerms,
         quoteEvidence: guardedQuoteEvidence,
       };
       observedExecutablePrice = quote?.fullyFillable
@@ -880,7 +928,8 @@ export async function runCopyCycle(
         targetUsd: sizing.finalUsd,
         targetShares: sizing.finalShares,
         minOrderUsd: config.app.global.risk.minOrderUsd,
-        absoluteTolerance: config.app.global.risk.slippageTolerance,
+        maxOrderUsd,
+        absoluteTolerance: absoluteSlippageTolerance,
         tickSize: snapshot?.tickSize,
       });
       observedSlippagePct = guarded.slippagePct;
@@ -897,16 +946,16 @@ export async function runCopyCycle(
             executablePrice: observedExecutablePrice,
             slippagePct: observedSlippagePct,
             orderPrice: terms.orderPrice,
-            orderShares: terms.orderShares,
+            orderShares: requestedOrderShares,
             decisionTerms: guardedDecisionTerms,
           }
         );
         continue;
       }
       if (!quote?.fullyFillable) {
-        const reason = activity.side === "BUY"
-          ? `executable depth $${Number((quote?.availableUsd ?? 0).toFixed(4))} < $${Number((Math.round(terms.orderUsd * 100) / 100).toFixed(2))}`
-          : `executable depth ${Number((quote?.availableShares ?? 0).toFixed(4))} < ${terms.orderShares} shares`;
+        const reason = sdkBuy
+          ? `executable depth $${Number((quote?.availableUsd ?? 0).toFixed(4))} < $${Number((sdkBuy?.makerAmountUsd ?? 0).toFixed(2))}`
+          : `executable depth ${Number((quote?.availableShares ?? 0).toFixed(4))} < ${requestedOrderShares} shares`;
         skipped++;
         skip(
           store,
@@ -919,7 +968,7 @@ export async function runCopyCycle(
             executablePrice: observedExecutablePrice,
             slippagePct: observedSlippagePct,
             orderPrice: terms.orderPrice,
-            orderShares: terms.orderShares,
+            orderShares: requestedOrderShares,
             decisionTerms: guardedDecisionTerms,
           }
         );
@@ -939,14 +988,14 @@ export async function runCopyCycle(
             executablePrice: observedExecutablePrice,
             slippagePct: observedSlippagePct,
             orderPrice: terms.orderPrice,
-            orderShares: terms.orderShares,
+            orderShares: requestedOrderShares,
             decisionTerms: guardedDecisionTerms,
           }
         );
         continue;
       }
       orderPrice = guarded.orderPrice;
-      orderShares = guarded.orderShares;
+      orderShares = requestedOrderShares;
       orderUsd = guarded.orderUsd;
       guardedTickSize = snapshot?.tickSize;
       guardedFeeRate = snapshot?.feeRate ?? 0;
@@ -959,10 +1008,6 @@ export async function runCopyCycle(
         orderShares,
         decisionTerms: guardedDecisionTerms,
       };
-      const maxOrderUsd = Math.min(
-        config.app.global.risk.maxOrderUsd,
-        leader.limits?.maxOrderUsd ?? Infinity
-      );
       if (orderUsd > maxOrderUsd + 1e-9) {
         skipped++;
         skip(
@@ -994,6 +1039,57 @@ export async function runCopyCycle(
           continue;
         }
       }
+    }
+
+    if (
+      !guardedExecution &&
+      activity.side === "BUY" &&
+      config.app.global.execution.orderType !== "GTC"
+    ) {
+      const meta = await fetchOrderBookMeta(
+        config.wallet.clobUrl,
+        config.wallet.chainId,
+        activity.asset
+      );
+      if (!meta) {
+        skipped++;
+        skip(store, leaderId, activity, "market metadata unavailable for SDK BUY", preview);
+        continue;
+      }
+      const tickSize = Number(meta.tickSize);
+      orderPrice = roundToTick(orderPrice, tickSize);
+      const requestedAmountUsd = submittedBuyOrderUsd(orderPrice, orderShares);
+      const sdkBuy = prepareSdkMarketBuyWithinMaxSpend({
+        requestedAmountUsd,
+        maxSpendUsd: requestedAmountUsd,
+        price: orderPrice,
+        tickSize,
+        platformFeeRate: meta.feeRate,
+        platformFeeExponent: meta.feeExponent,
+      });
+      orderShares = sdkBuy.requestedShares;
+      orderUsd = requestedAmountUsd;
+      guardedTickSize = tickSize;
+      guardedFeeRate = meta.feeRate;
+      guardedFeeExponent = meta.feeExponent;
+      executionPolicyTerms = {
+        ...slippagePolicyTerms,
+        sdkRequestedBuyAmountUsd: requestedAmountUsd,
+        sdkMaxSpendUsd: requestedAmountUsd,
+        sdkExpectedMakerAmountUsd: sdkBuy.makerAmountUsd,
+        sdkExpectedAllInSpendUsd: sdkBuy.allInSpendUsd,
+        sdkTickSize: tickSize,
+        sdkPlatformFeeRate: meta.feeRate,
+        sdkPlatformFeeExponent: meta.feeExponent,
+      };
+      executionAudit = {
+        leaderPrice,
+        executablePrice: null,
+        slippagePct: null,
+        orderPrice,
+        orderShares,
+        decisionTerms: executionPolicyTerms,
+      };
     }
 
     if (activity.side === "BUY") {
@@ -1146,19 +1242,36 @@ export async function runCopyCycle(
       const slip = risk.checkSlippage(leaderPrice, ref);
       if (!slip.allow) {
         skipped++;
-        skip(store, leaderId, activity, slip.reason ?? "slippage", preview);
+        skip(store, leaderId, activity, slip.reason ?? "slippage", preview, {
+          leaderPrice,
+          executablePrice: ref,
+          slippagePct: calculateCopySlippageLossPct(activity.side, leaderPrice, ref),
+          orderPrice,
+          orderShares,
+          decisionTerms: executionPolicyTerms,
+        });
         continue;
       }
     }
 
+    const expectedBuyMakerAmountUsd = typeof executionPolicyTerms.sdkExpectedMakerAmountUsd === "number"
+      ? executionPolicyTerms.sdkExpectedMakerAmountUsd
+      : undefined;
     const orderReq = {
       tokenId: activity.asset,
       side: activity.side,
       price: orderPrice,
       size: orderShares,
       expectedTickSize: guardedTickSize,
-      feeRate: guardedExecution ? guardedFeeRate : undefined,
-      feeExponent: guardedExecution ? guardedFeeExponent : undefined,
+      feeRate: guardedExecution || expectedBuyMakerAmountUsd !== undefined
+        ? guardedFeeRate
+        : undefined,
+      feeExponent: guardedExecution || expectedBuyMakerAmountUsd !== undefined
+        ? guardedFeeExponent
+        : undefined,
+      buyAmountUsd: expectedBuyMakerAmountUsd !== undefined ? orderUsd : undefined,
+      buyMaxSpendUsd: expectedBuyMakerAmountUsd !== undefined ? orderUsd : undefined,
+      expectedBuyMakerAmountUsd,
     };
 
     const tradeKeys = sourceTradeKeys;
@@ -1178,6 +1291,7 @@ export async function runCopyCycle(
         auditReason: sizing.reasoning,
         market,
         decisionTerms: {
+          ...executionPolicyTerms,
           orderType: config.app.global.execution.orderType,
           requestedPrice: orderPrice,
           requestedShares: orderShares,
@@ -1215,6 +1329,7 @@ export async function runCopyCycle(
           market,
           intentId: liveOrderIntentId,
           decisionTerms: {
+            ...executionPolicyTerms,
             orderType: config.app.global.execution.orderType,
             requestedPrice: orderPrice,
             requestedShares: orderShares,
@@ -1299,6 +1414,7 @@ export async function runCopyCycle(
         cashInitialUsd: config.app.global.risk.startingCapitalUsd,
         market,
         decisionTerms: {
+          ...executionPolicyTerms,
           orderType: config.app.global.execution.orderType,
           requestedPrice: orderPrice,
           requestedShares: orderShares,
@@ -1360,6 +1476,7 @@ export async function runCopyCycle(
         market,
         intentId: liveOrderIntentId,
         decisionTerms: {
+          ...executionPolicyTerms,
           orderType: config.app.global.execution.orderType,
           requestedPrice: orderPrice,
           requestedShares: orderShares,

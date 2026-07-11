@@ -23,6 +23,13 @@ const candidateArmSchema = z.object({
   minPrice: z.number().min(0).max(1).optional(),
   maxPrice: z.number().min(0).max(1).optional(),
 }).strict().superRefine((arm, context) => {
+  if ((arm.minPrice === undefined) !== (arm.maxPrice === undefined)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "minPrice and maxPrice must be supplied together",
+      path: [arm.minPrice === undefined ? "minPrice" : "maxPrice"],
+    });
+  }
   if (arm.minPrice !== undefined && arm.maxPrice !== undefined && arm.minPrice >= arm.maxPrice) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -154,7 +161,8 @@ const candidateSchemaValidator = (() => {
     validate: (_rules: string[], value: unknown) => {
       if (!value || typeof value !== "object") return true;
       const arm = value as CandidateArmRuleInput;
-      return !(arm.minPrice !== undefined && arm.maxPrice !== undefined && arm.minPrice >= arm.maxPrice)
+      return !((arm.minPrice === undefined) !== (arm.maxPrice === undefined))
+      && !(arm.minPrice !== undefined && arm.maxPrice !== undefined && arm.minPrice >= arm.maxPrice)
       && !(arm.fixedUsd !== undefined
         && arm.maxPositionUsd !== undefined
         && arm.fixedUsd > arm.maxPositionUsd)
@@ -228,6 +236,19 @@ export function validateCandidateCohortJson(input: unknown): unknown {
               ? `${path} freshIntakeEvidenceSha256 is required when freshIntakePassed is true`
               : `${path} freshIntakeEvidenceSha256 is only allowed when freshIntakePassed is true`;
           }
+          if (error.keyword === "x-candidateArmRules") {
+            const path = error.instancePath || "/";
+            const arm = error.instancePath
+              .split("/")
+              .filter(Boolean)
+              .reduce<unknown>((value, key) => {
+                if (!value || typeof value !== "object") return undefined;
+                return (value as Record<string, unknown>)[key];
+              }, input) as CandidateArmRuleInput | undefined;
+            if (arm && ((arm.minPrice === undefined) !== (arm.maxPrice === undefined))) {
+              return `${path} minPrice and maxPrice must be supplied together`;
+            }
+          }
           return `${error.instancePath || "/"} ${error.message ?? "is invalid"}`;
         })
         .join("; ")
@@ -243,8 +264,8 @@ interface ResolvedArm {
   maxOpenMarkets: number;
   dailyLossCapPct: number;
   slippageTolerance: number;
-  minPrice: number;
-  maxPrice: number;
+  minPrice?: number;
+  maxPrice?: number;
 }
 
 const ARM_ORDER: readonly CandidateArmName[] = candidateArmNames;
@@ -256,8 +277,6 @@ const ARM_DEFAULTS: Record<CandidateArmName, ResolvedArm> = {
     maxOpenMarkets: 10,
     dailyLossCapPct: 5,
     slippageTolerance: 0.015,
-    minPrice: 0.1,
-    maxPrice: 0.7,
   },
   standard: {
     fixedUsd: 2,
@@ -266,8 +285,6 @@ const ARM_DEFAULTS: Record<CandidateArmName, ResolvedArm> = {
     maxOpenMarkets: 15,
     dailyLossCapPct: 8,
     slippageTolerance: 0.025,
-    minPrice: 0.05,
-    maxPrice: 0.8,
   },
   aggressive: {
     fixedUsd: 5,
@@ -276,8 +293,6 @@ const ARM_DEFAULTS: Record<CandidateArmName, ResolvedArm> = {
     maxOpenMarkets: 20,
     dailyLossCapPct: 10,
     slippageTolerance: 0.04,
-    minPrice: 0.02,
-    maxPrice: 0.9,
   },
 };
 
@@ -307,7 +322,12 @@ function resolveArm(name: CandidateArmName, override?: CandidateArmInput): Resol
   if (!(arm.slippageTolerance > 0 && arm.slippageTolerance <= 0.05)) {
     throw new Error(`${name}.slippageTolerance must be > 0 and <= 0.05`);
   }
-  if (!(arm.minPrice >= 0 && arm.maxPrice <= 1 && arm.minPrice < arm.maxPrice)) {
+  if ((arm.minPrice === undefined) !== (arm.maxPrice === undefined)) {
+    throw new Error(`${name}.minPrice and ${name}.maxPrice must be supplied together`);
+  }
+  if (arm.minPrice !== undefined
+    && arm.maxPrice !== undefined
+    && !(arm.minPrice >= 0 && arm.maxPrice <= 1 && arm.minPrice < arm.maxPrice)) {
     throw new Error(`${name} price range must satisfy 0 <= minPrice < maxPrice <= 1`);
   }
   return arm;
@@ -370,6 +390,7 @@ export function buildCandidateExperimentConfig(
           max_order_usd: arm.fixedUsd,
           min_order_usd: 1,
           slippage_tolerance: arm.slippageTolerance,
+          slippage_tolerance_mode: "relative_pct",
           max_position_per_token_usd: arm.maxPositionUsd,
           position_cap_basis: "cost",
           sync_wallet_balance: false,
@@ -400,8 +421,8 @@ export function buildCandidateExperimentConfig(
               max_daily_volume_usd: arm.maxDailyVolumeUsd,
             },
             filters: {
-              min_price: arm.minPrice,
-              max_price: arm.maxPrice,
+              ...(arm.minPrice !== undefined ? { min_price: arm.minPrice } : {}),
+              ...(arm.maxPrice !== undefined ? { max_price: arm.maxPrice } : {}),
               sides: ["BUY", "SELL"],
             },
           },

@@ -60,6 +60,7 @@ export function previewRuntimeConfig(
           maxOrderUsd: 25,
           minOrderUsd: 1,
           slippageTolerance: 0,
+          slippageToleranceMode: "absolute_price",
           maxPositionPerTokenUsd: 0,
           syncWalletBalance: false,
         },

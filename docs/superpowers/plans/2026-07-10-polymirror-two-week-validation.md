@@ -15,10 +15,10 @@
 - Official `@polymarket/client` is exactly pinned to `0.1.0-beta.14`. Only the contract-tested credential patch remains; official `0.005` and `0.0025` tick sizes are decoded, rounded, formatted, and contract-tested without a private Gamma parser.
 - Preview risk state is sticky per experiment (`ACTIVE | SETTLE_ONLY | QUARANTINED`). Daily loss, liquidation drawdown, ledger drift, stale exchange state, repeated settlement failure, and capacity gates stop new BUY entries while preserving SELL, REDEEM, and recovery. DATA recovery requires a continuous 60-minute healthy window and reviewed reactivation.
 - Liquidation equity uses executable SELL depth; missing depth is valued at zero and recorded as a quality gap. `/health` exposes persistent settlement failures, closed-market open positions, liquidation drawdown/coverage, SQLite-plus-WAL footprint/growth, and enabled-versus-polled account counts.
-- The `quality12-20260711-v1` seed contains exactly ec47, dance, LinaBell, and pada with three fixed 200U preview arms. It remains watchlist-only until a fresh official leaderboard/activity capture approves each Candidate and binds its immutable evidence SHA-256. No historical address is automatically enabled.
-- Shadow deployment is isolated at `/opt/polymirror/cohorts/quality12-20260711`, port 8081, with strict path separation, resource limits, exact-image provenance, 12/12 first-poll and collector gates, capacity preflight, and failure cleanup that preserves data and never replaces a running shadow cohort.
+- Per the user's latest explicit scope, `quality6-20260711-v1` contains only b55 and dance with three fixed 200U preview arms each. It remains watchlist-only until a fresh official leaderboard/activity capture approves each Candidate and binds its immutable evidence SHA-256. The older quality12 seed is historical input only and is rejected by the deploy gate.
+- Shadow deployment is isolated at `/opt/polymirror/cohorts/quality6-20260711`, port 8081, with strict path separation, resource limits, exact-image provenance, 6/6 first-poll and collector gates, capacity preflight, and failure cleanup that preserves data and never replaces a running shadow cohort.
 - The production server has not yet received this v10 branch. Before rollout it must be re-read, WAL-safely backed up, checksummed, snapshotted, and expanded from 40GB to 80GB. The existing preview process and all historical databases remain untouched until those gates pass.
-- Fresh local verification after the v10 fixes: `npm test` passed 77 files / 529 tests; lint, build, official-registry high-severity audit, Compose parse, shell syntax, and `git diff --check` passed. The dashboard retains its existing non-fatal chunk-size warning; dependency audit has no high/critical findings.
+- Fresh local verification after the v10 and exact6 fixes: `npm test` passed 81 files / 579 tests; lint, build, official-registry high-severity audit, Compose/shadow gates, shell syntax, and `git diff --check` passed. Independent final review reports Critical 0 / Important 0. The dashboard retains its existing non-fatal chunk-size warning; dependency audit has no high/critical findings.
 
 ## Global Constraints
 
@@ -180,10 +180,10 @@
 - [x] Pin the official SDK and prove `0.005/0.0025` settlement and order-price compatibility with real redacted fixtures.
 - [x] Add v10 occurrence deduplication, persistent settlement failures, sticky experiment controls, liquidation equity, capacity guards, and hourly operator tables.
 - [x] Prove multi-token and multi-leader settlement is atomic, single-terminal, idempotent, and deterministically replayable.
-- [x] Build immutable fresh Candidate intake and a fail-closed isolated 12-account shadow deployment gate.
+- [x] Build immutable fresh Candidate intake and a fail-closed isolated 6-account shadow deployment gate.
 - [x] Close all local Critical/Important review findings and pass the full local verification suite.
 - [ ] Re-read the live server; create WAL-safe backup, checksums, and an EBS snapshot; expand the root volume to 80GB.
 - [ ] Replay the five sports settlement remnants on database copies, then roll the pinned v10 image over the existing preview-only service with exact rollback.
-- [ ] Capture fresh Candidate evidence within 30 minutes of shadow launch; enable only approved Candidates and start the isolated quality12 cohort.
+- [ ] Capture fresh b55 and dance evidence within 30 minutes of shadow launch; enable only approved Candidates and start the isolated quality6 cohort.
 - [ ] Pass the 15m capacity check and the 60m data-quality gate before stopping old dance BUY entries.
 - [ ] Continue 6h, 24h, and 14d evidence gates; remain preview-only regardless of outcome until a second explicit live-canary confirmation.

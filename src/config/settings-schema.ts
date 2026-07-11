@@ -12,6 +12,7 @@ const orderType = z.enum(["GTC", "FAK", "FOK"]);
 const conflictMode = z.enum(["skip_both", "net", "priority_leader"]);
 const proxyModeDto = z.enum(["none", "static", "dynamic"]);
 const copyPriceModeDto = z.enum(["leader_limit", "executable_guarded"]);
+const slippageToleranceModeDto = z.enum(["absolute_price", "relative_pct"]);
 
 export const proxySettingsPatchSchema = z.object({
   mode: proxyModeDto,
@@ -40,6 +41,7 @@ export const globalSettingsPatchSchema = z.object({
       maxOrderUsd: z.number().positive().optional(),
       minOrderUsd: z.number().positive().optional(),
       slippageTolerance: z.number().nonnegative().optional(),
+      slippageToleranceMode: slippageToleranceModeDto.optional(),
       maxPositionPerTokenUsd: z.number().nonnegative().optional(),
       positionCapBasis: z.enum(["market", "cost"]).optional(),
       syncWalletBalance: z.boolean().optional(),
@@ -175,6 +177,9 @@ export function globalConfigToDto(global: Record<string, unknown>) {
       maxOrderUsd: r.max_order_usd ?? 50,
       minOrderUsd: r.min_order_usd ?? 1,
       slippageTolerance: r.slippage_tolerance ?? 0.03,
+      slippageToleranceMode:
+        (r.slippage_tolerance_mode as "absolute_price" | "relative_pct" | undefined)
+        ?? "absolute_price",
       maxPositionPerTokenUsd: r.max_position_per_token_usd ?? 0,
       positionCapBasis: ((r.position_cap_basis as "market" | "cost" | undefined) ?? "market"),
       syncWalletBalance: r.sync_wallet_balance ?? true,
@@ -241,6 +246,9 @@ function applyGlobalPatchToRecord(g: Record<string, unknown>, patch: GlobalSetti
     if (r.maxOrderUsd !== undefined) risk.max_order_usd = r.maxOrderUsd;
     if (r.minOrderUsd !== undefined) risk.min_order_usd = r.minOrderUsd;
     if (r.slippageTolerance !== undefined) risk.slippage_tolerance = r.slippageTolerance;
+    if (r.slippageToleranceMode !== undefined) {
+      risk.slippage_tolerance_mode = r.slippageToleranceMode;
+    }
     if (r.maxPositionPerTokenUsd !== undefined) {
       risk.max_position_per_token_usd = r.maxPositionPerTokenUsd;
     }

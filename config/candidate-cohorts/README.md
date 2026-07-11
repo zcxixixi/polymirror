@@ -1,8 +1,9 @@
 # Candidate cohort seeds
 
-`quality12-20260711-v1.json` is a deterministic, watchlist-only seed. It always
-generates twelve isolated 200U preview accounts for ec47, dance,
-LinaBell, and pada, but every seed Candidate has `freshIntakePassed: false`.
+`quality6-20260711-v1.json` is the current deterministic, watchlist-only seed. It
+generates six isolated 200U preview accounts for b55 and dance, but every seed
+Candidate has `freshIntakePassed: false`. The older quality12 seed remains only
+as historical watchlist input and is not accepted by the shadow deploy gate.
 The accounts remain visible while copy trading and their leaders stay disabled.
 
 Do not turn the tracked seed into a deployment approval. Before a maintenance

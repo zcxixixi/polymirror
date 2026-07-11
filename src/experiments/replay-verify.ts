@@ -6,11 +6,21 @@ import type { RuntimeConfig, LeaderConfig } from "../config/types.js";
 import type { Activity } from "../monitor/data-api.js";
 import { passActivityFilters } from "../engine/filters.js";
 import { calculateOrderSize } from "../engine/sizing.js";
-import { prepareExecutableGuardedOrder, prepareGuardedOrderTerms } from "../engine/execution-price.js";
-import { quoteExecutableOrderBook, type OrderBookLevelLike } from "../executor/orderbook.js";
+import {
+  prepareExecutableGuardedOrder,
+  prepareGuardedOrderTerms,
+  resolveAbsoluteSlippageTolerance,
+  submittedBuyOrderUsd,
+} from "../engine/execution-price.js";
+import {
+  quoteExecutableOrderBook,
+  roundToTick,
+  type OrderBookLevelLike,
+} from "../executor/orderbook.js";
 import { aggregateTrades } from "../engine/aggregate.js";
 import { stableSkipReasonCode } from "../state/store.js";
 import { calculateCopySlippageLossPct } from "../sim/copy-slippage.js";
+import { prepareSdkMarketBuyWithinMaxSpend } from "../executor/fees.js";
 import { normalizedPayloadJson } from "./provenance.js";
 import { verifyExperimentArchive, type ArchiveVerificationOptions } from "./archive.js";
 import type { ExperimentStateSnapshot } from "./manifest.js";
@@ -28,6 +38,37 @@ interface RawEvidence { rawEventId: string; sourceId: string | null; payloadHash
 
 function round(value: number): number { return Math.round((value + Number.EPSILON) * 1e8) / 1e8; }
 function roundSettlementUsd(value: number): number { return Math.round(value * 100) / 100; }
+function guardedExecutionConstraints(
+  config: RuntimeConfig,
+  leader: LeaderConfig,
+  leaderPrice: number,
+  terms: Record<string, unknown>
+): {
+  maxOrderUsd?: number;
+  buyNotionalMode: "raw_legacy" | "submitted_cents";
+  absoluteTolerance: number;
+} {
+  const buyNotionalMode = terms.buyNotionalMode === undefined
+    ? "raw_legacy"
+    : requiredString(terms, "buyNotionalMode");
+  if (buyNotionalMode !== "raw_legacy" && buyNotionalMode !== "submitted_cents") {
+    throw new Error("Unknown guarded BUY notional mode");
+  }
+  return {
+    ...(buyNotionalMode === "submitted_cents" ? {
+      maxOrderUsd: Math.min(
+        config.app.global.risk.maxOrderUsd,
+        leader.limits?.maxOrderUsd ?? Infinity
+      ),
+    } : {}),
+    buyNotionalMode,
+    absoluteTolerance: resolveAbsoluteSlippageTolerance(
+      leaderPrice,
+      config.app.global.risk.slippageTolerance,
+      config.app.global.risk.slippageToleranceMode ?? "absolute_price"
+    ),
+  };
+}
 function requiredNumber(terms: Record<string, unknown>, key: string): number {
   const value = terms[key];
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`Invalid accounting evidence: ${key} is required and finite`);
@@ -43,6 +84,95 @@ function requiredString(terms: Record<string, unknown>, key: string): string {
   const value = terms[key];
   if (typeof value !== "string" || !value) throw new Error(`Invalid decision evidence: ${key} is required`);
   return value;
+}
+
+function validateStoredSlippagePolicy(
+  terms: Record<string, unknown>,
+  config: RuntimeConfig,
+  leaderPrice: number
+): number {
+  const expectedMode = config.app.global.risk.slippageToleranceMode ?? "absolute_price";
+  const expectedConfigured = config.app.global.risk.slippageTolerance;
+  const expectedAbsolute = resolveAbsoluteSlippageTolerance(
+    leaderPrice,
+    expectedConfigured,
+    expectedMode
+  );
+  if (terms.slippageToleranceMode === undefined) {
+    if (expectedMode === "relative_pct") {
+      throw new Error("Relative slippage decision lacks immutable policy evidence");
+    }
+    return expectedAbsolute;
+  }
+  if (terms.buyNotionalMode !== "submitted_cents") {
+    throw new Error("Slippage decision lacks submitted-cent BUY notional evidence");
+  }
+  const storedMode = requiredString(terms, "slippageToleranceMode");
+  const storedConfigured = requiredNumber(terms, "configuredSlippageTolerance");
+  const storedAbsolute = requiredNumber(terms, "absoluteSlippageTolerance");
+  if (
+    storedMode !== expectedMode ||
+    Math.abs(storedConfigured - expectedConfigured) > 1e-12 ||
+    Math.abs(storedAbsolute - expectedAbsolute) > 1e-12
+  ) {
+    throw new Error("Stored slippage policy differs from the experiment manifest");
+  }
+  return expectedAbsolute;
+}
+
+function resolveReplaySdkMarketBuy(input: {
+  side: "BUY" | "SELL";
+  orderType: RuntimeConfig["app"]["global"]["execution"]["orderType"];
+  orderPrice: number;
+  orderShares: number;
+  orderUsd: number;
+  tickSize: number;
+  feeRate: number;
+  feeExponent: number;
+  terms: Record<string, unknown>;
+}): { requestedShares: number; requiredUsd?: number } {
+  if (input.side !== "BUY" || input.terms.sdkRequestedBuyAmountUsd === undefined) {
+    return { requestedShares: input.orderShares };
+  }
+  if (input.orderType === "GTC") {
+    throw new Error("GTC BUY cannot carry SDK market-order max-spend evidence");
+  }
+  if (input.terms.buyNotionalMode !== "submitted_cents") {
+    throw new Error("SDK BUY max-spend evidence lacks submitted-cent mode");
+  }
+  const storedTickSize = optionalFinite(input.terms, "sdkTickSize");
+  const storedFeeRate = optionalFinite(input.terms, "sdkPlatformFeeRate");
+  const storedFeeExponent = optionalFinite(input.terms, "sdkPlatformFeeExponent");
+  const tickSize = storedTickSize ?? input.tickSize;
+  const feeRate = storedFeeRate ?? input.feeRate;
+  const feeExponent = storedFeeExponent ?? input.feeExponent;
+  if (
+    (storedTickSize !== undefined && Math.abs(storedTickSize - input.tickSize) > 1e-12) ||
+    (storedFeeRate !== undefined && Math.abs(storedFeeRate - input.feeRate) > 1e-12) ||
+    (storedFeeExponent !== undefined && Math.abs(storedFeeExponent - input.feeExponent) > 1e-12)
+  ) {
+    throw new Error("Stored SDK BUY market metadata differs");
+  }
+  const sdkBuy = prepareSdkMarketBuyWithinMaxSpend({
+    requestedAmountUsd: input.orderUsd,
+    maxSpendUsd: input.orderUsd,
+    price: input.orderPrice,
+    tickSize,
+    platformFeeRate: feeRate,
+    platformFeeExponent: feeExponent,
+  });
+  if (
+    Math.abs(requiredNumber(input.terms, "sdkRequestedBuyAmountUsd") - input.orderUsd) > 1e-8 ||
+    Math.abs(requiredNumber(input.terms, "sdkMaxSpendUsd") - input.orderUsd) > 1e-8 ||
+    Math.abs(requiredNumber(input.terms, "sdkExpectedMakerAmountUsd") - sdkBuy.makerAmountUsd) > 1e-8 ||
+    Math.abs(requiredNumber(input.terms, "sdkExpectedAllInSpendUsd") - sdkBuy.allInSpendUsd) > 1e-8
+  ) {
+    throw new Error("Stored SDK BUY max-spend evidence differs");
+  }
+  return {
+    requestedShares: sdkBuy.requestedShares,
+    requiredUsd: sdkBuy.makerAmountUsd,
+  };
 }
 function pct(copied: number, detected: number): number { return detected === 0 ? 0 : Math.round(copied / detected * 10_000) / 100; }
 function replaySkipReasonCode(reason: string): string {
@@ -286,25 +416,37 @@ function validateAndApplyTrade(
     const feeRate = requiredNumber(quoteEvidence, "feeRate");
     const feeExponent = requiredNumber(quoteEvidence, "feeExponent");
     const leaderPrice = requiredNumber(terms, "leaderPrice");
+    validateStoredSlippagePolicy(terms, config, leaderPrice);
     const prepared = prepareGuardedOrderTerms({ side, leaderPrice, targetUsd: sizing.finalUsd,
       targetShares: sizing.finalShares, minOrderUsd: config.app.global.risk.minOrderUsd,
-      absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+      ...guardedExecutionConstraints(config, leader, leaderPrice, terms), tickSize });
     if (!prepared.allow || prepared.orderPrice === null) throw new Error("Stored quote evidence cannot produce a guarded order");
+    const replayOrder = resolveReplaySdkMarketBuy({
+      side, orderType: config.app.global.execution.orderType,
+      orderPrice: prepared.orderPrice, orderShares: prepared.orderShares,
+      orderUsd: prepared.orderUsd, tickSize, feeRate, feeExponent, terms,
+    });
     const quote = quoteExecutableOrderBook(quoteEvidence.levels as OrderBookLevelLike[], side,
-      prepared.orderShares, prepared.orderPrice, minOrderShares,
-      side === "BUY" ? Math.round(prepared.orderUsd * 100) / 100 : undefined);
+      replayOrder.requestedShares, prepared.orderPrice, minOrderShares,
+      replayOrder.requiredUsd);
     const guarded = prepareExecutableGuardedOrder({ side, leaderPrice,
       executablePrice: quote.fullyFillable ? quote.averagePrice : quote.bestPrice,
       targetUsd: sizing.finalUsd, targetShares: sizing.finalShares,
       minOrderUsd: config.app.global.risk.minOrderUsd,
-      absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+      ...guardedExecutionConstraints(config, leader, leaderPrice, terms), tickSize });
     if (!quote.fullyFillable || !quote.meetsMinOrderSize || !guarded.allow || guarded.orderPrice === null) throw new Error("Stored quote evidence rejects guarded execution");
-    if (Math.abs(requestedPrice - guarded.orderPrice) > 1e-8 || Math.abs(requestedShares - guarded.orderShares) > 1e-8) throw new Error("Quote/order terms mismatch during guarded re-execution");
+    if (Math.abs(requestedPrice - guarded.orderPrice) > 1e-8 || Math.abs(requestedShares - replayOrder.requestedShares) > 1e-8) throw new Error("Quote/order terms mismatch during guarded re-execution");
     if (optionalFinite(terms, "quoteBestPrice") !== quote.averagePrice || optionalFinite(terms, "guardedTickSize") !== tickSize ||
       optionalFinite(terms, "guardedFeeRate") !== feeRate || optionalFinite(terms, "guardedFeeExponent") !== feeExponent) {
       throw new Error("Stored quote metadata mismatch during guarded re-execution");
     }
-    if (Math.abs(filledUsd - filledShares * requestedPrice) > 1e-6) throw new Error("Quote/order fill notional mismatch");
+    const sdkFullFill = side === "BUY"
+      && replayOrder.requiredUsd !== undefined
+      && Math.abs(filledUsd - replayOrder.requiredUsd) <= 1e-8
+      && Math.abs(filledShares - replayOrder.requestedShares) <= 1e-8;
+    if (!sdkFullFill && Math.abs(filledUsd - filledShares * requestedPrice) > 1e-6) {
+      throw new Error("Quote/order fill notional mismatch");
+    }
   }
   if (filledShares <= 0 || filledShares - requestedShares > 1e-8 || filledUsd < 0 || feeUsd < 0) throw new Error("Invalid accounting evidence: fill bounds");
   const key = stateKey(leader.id, activity.asset);
@@ -890,6 +1032,30 @@ function validateSkip(
       decision.reasonCode === stableSkipReasonCode(reason)) {
       return { marksSeen: true };
     }
+    if (config.app.global.copyPriceMode === "leader_limit" && reason.startsWith("slippage ")) {
+      const leaderPrice = requiredNumber(terms, "leaderPrice");
+      const referencePrice = requiredNumber(terms, "executablePrice");
+      if (Math.abs(leaderPrice - (activity.price ?? NaN)) > 1e-12) {
+        throw new Error("Leader-limit slippage evidence has a different leader price");
+      }
+      const absoluteTolerance = validateStoredSlippagePolicy(terms, config, leaderPrice);
+      const delta = Math.abs(referencePrice - leaderPrice);
+      const expectedReason = `slippage ${delta.toFixed(4)} > ${absoluteTolerance}`;
+      const expectedPct = calculateCopySlippageLossPct(
+        activity.side,
+        leaderPrice,
+        referencePrice
+      );
+      if (
+        delta <= absoluteTolerance ||
+        reason !== expectedReason ||
+        decision.reasonCode !== stableSkipReasonCode(reason) ||
+        Math.abs(requiredNumber(terms, "slippagePct") - (expectedPct ?? NaN)) > 1e-8
+      ) {
+        throw new Error("Leader-limit slippage SKIP differs from immutable price evidence");
+      }
+      return { marksSeen: false };
+    }
     const quoteEvidence = terms.quoteEvidence;
     if (quoteEvidence && typeof quoteEvidence === "object" && config.app.global.copyPriceMode === "executable_guarded") {
       const leader = config.app.leaders.find((candidate) => candidate.id === activity.leaderId);
@@ -899,24 +1065,32 @@ function validateSkip(
       const tickSize = requiredNumber(quoteTerms, "tickSize");
       const minOrderShares = requiredNumber(quoteTerms, "minOrderShares");
       const leaderPrice = activity.price ?? NaN;
+      validateStoredSlippagePolicy(terms, config, leaderPrice);
       const prepared = prepareGuardedOrderTerms({ side: activity.side, leaderPrice,
         targetUsd: group.sizing.finalUsd, targetShares: group.sizing.finalShares,
         minOrderUsd: config.app.global.risk.minOrderUsd,
-        absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+        ...guardedExecutionConstraints(config, leader, leaderPrice, terms), tickSize });
       if (!prepared.allow || prepared.orderPrice === null) throw new Error("Guarded SKIP has invalid immutable order terms");
+      const replayOrder = resolveReplaySdkMarketBuy({
+        side: activity.side, orderType: config.app.global.execution.orderType,
+        orderPrice: prepared.orderPrice,
+        orderShares: prepared.orderShares, orderUsd: prepared.orderUsd,
+        tickSize, feeRate: requiredNumber(quoteTerms, "feeRate"),
+        feeExponent: requiredNumber(quoteTerms, "feeExponent"), terms,
+      });
       const quote = quoteExecutableOrderBook(quoteTerms.levels as OrderBookLevelLike[], activity.side,
-        prepared.orderShares, prepared.orderPrice, minOrderShares,
-        activity.side === "BUY" ? Math.round(prepared.orderUsd * 100) / 100 : undefined);
+        replayOrder.requestedShares, prepared.orderPrice, minOrderShares,
+        replayOrder.requiredUsd);
       const guarded = prepareExecutableGuardedOrder({ side: activity.side, leaderPrice,
         executablePrice: quote.fullyFillable ? quote.averagePrice : quote.bestPrice,
         targetUsd: group.sizing.finalUsd, targetShares: group.sizing.finalShares,
         minOrderUsd: config.app.global.risk.minOrderUsd,
-        absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+        ...guardedExecutionConstraints(config, leader, leaderPrice, terms), tickSize });
       const expected = new Set<string>();
       if (!guarded.allow || guarded.orderPrice === null) expected.add(guarded.reason ?? "guarded execution rejected");
-      if (!quote.fullyFillable) expected.add(activity.side === "BUY"
-        ? `executable depth $${Number(quote.availableUsd.toFixed(4))} < $${Number((Math.round(prepared.orderUsd * 100) / 100).toFixed(2))}`
-        : `executable depth ${Number(quote.availableShares.toFixed(4))} < ${prepared.orderShares} shares`);
+      if (!quote.fullyFillable) expected.add(replayOrder.requiredUsd !== undefined
+        ? `executable depth $${Number(quote.availableUsd.toFixed(4))} < $${Number(replayOrder.requiredUsd.toFixed(2))}`
+        : `executable depth ${Number(quote.availableShares.toFixed(4))} < ${replayOrder.requestedShares} shares`);
       if (!quote.meetsMinOrderSize) expected.add(`market min order ${Number(quote.minOrderShares.toFixed(4))} > ${Number(quote.filledShares.toFixed(4))} shares`);
       if (guarded.allow && guarded.orderPrice !== null) {
         const maxOrderUsd = Math.min(config.app.global.risk.maxOrderUsd, leader.limits?.maxOrderUsd ?? Infinity);
@@ -971,11 +1145,35 @@ function validateAndApplyFill(
   const cumulativeShares = requiredNumber(terms, "filledShares");
   const cumulativeUsd = requiredNumber(terms, "filledUsd");
   const feeUsd = requiredNumber(terms, "feeUsd");
+  let replayGuardedBuy: { requestedShares: number; requiredUsd?: number } | undefined;
   if (config.app.global.copyPriceMode === "leader_limit") {
-    if (Math.abs(requestedShares - sizing.finalShares) > 1e-8 || Math.abs(requestedPrice - (activity.price ?? NaN)) > 1e-8) {
+    let expectedShares = sizing.finalShares;
+    let expectedPrice = activity.price ?? NaN;
+    if (side === "BUY" && terms.sdkRequestedBuyAmountUsd !== undefined) {
+      const tickSize = requiredNumber(terms, "sdkTickSize");
+      expectedPrice = roundToTick(expectedPrice, tickSize);
+      const submittedUsd = submittedBuyOrderUsd(expectedPrice, sizing.finalShares);
+      replayGuardedBuy = resolveReplaySdkMarketBuy({
+        side,
+        orderType: config.app.global.execution.orderType,
+        orderPrice: expectedPrice,
+        orderShares: sizing.finalShares,
+        orderUsd: submittedUsd,
+        tickSize,
+        feeRate: requiredNumber(terms, "sdkPlatformFeeRate"),
+        feeExponent: requiredNumber(terms, "sdkPlatformFeeExponent"),
+        terms,
+      });
+      expectedShares = replayGuardedBuy.requestedShares;
+    }
+    if (Math.abs(requestedShares - expectedShares) > 1e-8 || Math.abs(requestedPrice - expectedPrice) > 1e-8) {
       throw new Error("Re-execution sizing/order terms differ");
     }
   } else {
+    const leader = config.app.leaders.find(
+      (candidate) => candidate.id === activity.leaderId
+    );
+    if (!leader) throw new Error("Guarded replay fill has no configured leader");
     const evidence = terms.quoteEvidence;
     if (!evidence || typeof evidence !== "object") throw new Error("Guarded replay requires stored quote evidence");
     const quoteEvidence = evidence as Record<string, unknown>;
@@ -985,20 +1183,27 @@ function validateAndApplyFill(
     const feeRate = requiredNumber(quoteEvidence, "feeRate");
     const feeExponent = requiredNumber(quoteEvidence, "feeExponent");
     const leaderPrice = requiredNumber(terms, "leaderPrice");
+    validateStoredSlippagePolicy(terms, config, leaderPrice);
     const prepared = prepareGuardedOrderTerms({ side, leaderPrice, targetUsd: sizing.finalUsd,
       targetShares: sizing.finalShares, minOrderUsd: config.app.global.risk.minOrderUsd,
-      absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+      ...guardedExecutionConstraints(config, leader, leaderPrice, terms), tickSize });
     if (!prepared.allow || prepared.orderPrice === null) throw new Error("Stored quote evidence cannot produce a guarded order");
+    const replayOrder = resolveReplaySdkMarketBuy({
+      side, orderType: config.app.global.execution.orderType,
+      orderPrice: prepared.orderPrice, orderShares: prepared.orderShares,
+      orderUsd: prepared.orderUsd, tickSize, feeRate, feeExponent, terms,
+    });
+    replayGuardedBuy = replayOrder;
     const quote = quoteExecutableOrderBook(quoteEvidence.levels as OrderBookLevelLike[], side,
-      prepared.orderShares, prepared.orderPrice, minOrderShares,
-      side === "BUY" ? Math.round(prepared.orderUsd * 100) / 100 : undefined);
+      replayOrder.requestedShares, prepared.orderPrice, minOrderShares,
+      replayOrder.requiredUsd);
     const guarded = prepareExecutableGuardedOrder({ side, leaderPrice,
       executablePrice: quote.fullyFillable ? quote.averagePrice : quote.bestPrice,
       targetUsd: sizing.finalUsd, targetShares: sizing.finalShares,
       minOrderUsd: config.app.global.risk.minOrderUsd,
-      absoluteTolerance: config.app.global.risk.slippageTolerance, tickSize });
+      ...guardedExecutionConstraints(config, leader, leaderPrice, terms), tickSize });
     if (!quote.fullyFillable || !quote.meetsMinOrderSize || !guarded.allow || guarded.orderPrice === null ||
-      Math.abs(requestedPrice - guarded.orderPrice) > 1e-8 || Math.abs(requestedShares - guarded.orderShares) > 1e-8 ||
+      Math.abs(requestedPrice - guarded.orderPrice) > 1e-8 || Math.abs(requestedShares - replayOrder.requestedShares) > 1e-8 ||
       optionalFinite(terms, "quoteBestPrice") !== quote.averagePrice || optionalFinite(terms, "guardedTickSize") !== tickSize ||
       optionalFinite(terms, "guardedFeeRate") !== feeRate || optionalFinite(terms, "guardedFeeExponent") !== feeExponent) {
       throw new Error("Guarded quote/order metadata differs during re-execution");
@@ -1010,7 +1215,11 @@ function validateAndApplyFill(
     throw new Error("Invalid accounting evidence: cumulative fill bounds");
   }
   const executionPrice = optionalFinite(terms, "price") ?? requestedPrice;
-  if (Math.abs(deltaUsd - deltaShares * executionPrice) > 1e-6) {
+  const sdkFullFill = side === "BUY"
+    && replayGuardedBuy?.requiredUsd !== undefined
+    && Math.abs(deltaUsd - replayGuardedBuy.requiredUsd) <= 1e-8
+    && Math.abs(deltaShares - replayGuardedBuy.requestedShares) <= 1e-8;
+  if (!sdkFullFill && Math.abs(deltaUsd - deltaShares * executionPrice) > 1e-6) {
     throw new Error("Execution-price evidence does not match the cumulative fill delta");
   }
   const leaderPrice = optionalFinite(terms, "leaderPrice");

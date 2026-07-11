@@ -5,6 +5,7 @@ export type PositionCapBasis = "market" | "cost";
 export type ConflictMode = "skip_both" | "net" | "priority_leader";
 export type TradeSide = "BUY" | "SELL";
 export type CopyPriceMode = "leader_limit" | "executable_guarded";
+export type SlippageToleranceMode = "absolute_price" | "relative_pct";
 export type TradingBackendKind = "secure";
 
 export type ProxyMode = "none" | "static" | "dynamic";
@@ -42,6 +43,8 @@ export interface RiskConfig {
   maxOrderUsd: number;
   minOrderUsd: number;
   slippageTolerance: number;
+  /** Legacy/default is absolute price points; relative_pct scales by leader price. */
+  slippageToleranceMode: SlippageToleranceMode;
   /** 0 = disabled. Caps combined wallet exposure per token across all leaders. */
   maxPositionPerTokenUsd: number;
   /**

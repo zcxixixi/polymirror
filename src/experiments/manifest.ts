@@ -36,6 +36,13 @@ export function canonicalRedactedConfig(config: RuntimeConfig): string {
 
 export function decisionConfigProjection(config: RuntimeConfig): unknown {
   const { global, leaders } = config.app;
+  const {
+    slippageToleranceMode,
+    ...legacyCompatibleRisk
+  } = global.risk;
+  const decisionRisk = slippageToleranceMode === "relative_pct"
+    ? global.risk
+    : legacyCompatibleRisk;
   return {
     app: {
       global: {
@@ -46,7 +53,7 @@ export function decisionConfigProjection(config: RuntimeConfig): unknown {
         maxTradeAgeHours: global.maxTradeAgeHours,
         buyDedupWindowMs: global.buyDedupWindowMs,
         tradeAggregationWindowMs: global.tradeAggregationWindowMs,
-        risk: global.risk,
+        risk: decisionRisk,
         execution: global.execution,
         conflict: global.conflict,
       },

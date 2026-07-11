@@ -11,6 +11,7 @@ import type {
   TradingBackend,
 } from "./trading-backend.js";
 import { calculatePlatformFeeUsd } from "./fees.js";
+import { submittedBuyOrderUsd } from "../engine/execution-price.js";
 
 function isTerminalStatus(status: string): boolean {
   const s = status.toLowerCase();
@@ -90,12 +91,14 @@ export class SecureTradingBackend implements TradingBackend {
 
     const sdkOrderType = req.orderType === "FOK" ? SdkOrderType.FOK : SdkOrderType.FAK;
     if (req.side === "BUY") {
-      const amount = Math.round(parseFloat(price) * req.size * 100) / 100;
+      const amount = req.buyAmountUsd
+        ?? submittedBuyOrderUsd(parseFloat(price), req.size);
+      const maxSpend = req.buyMaxSpendUsd ?? amount;
       const resp = await client.placeMarketOrder({
         tokenId: req.tokenId,
         side: OrderSide.BUY,
         amount,
-        maxSpend: amount,
+        maxSpend,
         maxPrice: price,
         orderType: sdkOrderType,
       });

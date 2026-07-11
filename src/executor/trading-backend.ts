@@ -7,6 +7,8 @@ export interface SubmitOrderRequest {
   side: TradeSide;
   price: number;
   size: number;
+  buyAmountUsd?: number;
+  buyMaxSpendUsd?: number;
   orderType: OrderType;
   tickSize: string;
   negRisk: boolean;

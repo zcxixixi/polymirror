@@ -6,6 +6,7 @@ export const orderType = z.enum(["GTC", "FAK", "FOK"]);
 export const conflictMode = z.enum(["skip_both", "net", "priority_leader"]);
 export const proxyMode = z.enum(["none", "static", "dynamic", "fixed"]);
 export const copyPriceMode = z.enum(["leader_limit", "executable_guarded"]);
+export const slippageToleranceMode = z.enum(["absolute_price", "relative_pct"]);
 
 export const proxyYamlSchema = z
   .object({
@@ -35,6 +36,7 @@ export const globalYamlSchema = z.object({
     max_order_usd: z.number().positive().default(50),
     min_order_usd: z.number().positive().default(1),
     slippage_tolerance: z.number().nonnegative().default(0.03),
+    slippage_tolerance_mode: slippageToleranceMode.default("absolute_price"),
     max_position_per_token_usd: z.number().nonnegative().default(0),
     position_cap_basis: z.enum(["market", "cost"]).default("market"),
     sync_wallet_balance: z.boolean().default(true),

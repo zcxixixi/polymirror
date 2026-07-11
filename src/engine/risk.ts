@@ -1,6 +1,7 @@
 import type { GlobalConfig } from "../config/types.js";
 import type { StateStore } from "../state/store.js";
 import { logError } from "../notify/logger.js";
+import { resolveAbsoluteSlippageTolerance } from "./execution-price.js";
 
 export interface RiskCheckResult {
   allow: boolean;
@@ -104,10 +105,15 @@ export class RiskGate {
   checkSlippage(leaderPrice: number, referencePrice: number): RiskCheckResult {
     const tol = this.global.risk.slippageTolerance;
     if (tol <= 0) return { allow: true };
-    if (Math.abs(referencePrice - leaderPrice) > tol) {
+    const absoluteTol = resolveAbsoluteSlippageTolerance(
+      leaderPrice,
+      tol,
+      this.global.risk.slippageToleranceMode ?? "absolute_price"
+    );
+    if (Math.abs(referencePrice - leaderPrice) > absoluteTol) {
       return {
         allow: false,
-        reason: `slippage ${Math.abs(referencePrice - leaderPrice).toFixed(4)} > ${tol}`,
+        reason: `slippage ${Math.abs(referencePrice - leaderPrice).toFixed(4)} > ${absoluteTol}`,
       };
     }
     return { allow: true };

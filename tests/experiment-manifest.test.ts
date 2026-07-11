@@ -127,6 +127,19 @@ describe("experiment manifest", () => {
     expect(canonical).toBe(canonicalRedactedConfig(JSON.parse(JSON.stringify(first))));
   });
 
+  it("keeps the legacy absolute slippage default backward-compatible in decision identity", () => {
+    const explicitAbsolute = previewRuntimeConfig();
+    explicitAbsolute.app.global.risk.slippageToleranceMode = "absolute_price";
+    const legacy = structuredClone(explicitAbsolute);
+    delete (legacy.app.global.risk as Partial<typeof legacy.app.global.risk>)
+      .slippageToleranceMode;
+    const relative = structuredClone(explicitAbsolute);
+    relative.app.global.risk.slippageToleranceMode = "relative_pct";
+
+    expect(configSha256(explicitAbsolute)).toBe(configSha256(legacy));
+    expect(configSha256(relative)).not.toBe(configSha256(legacy));
+  });
+
   it("ignores operational settings but hashes every decision and execution input", () => {
     const base = previewRuntimeConfig();
     const operational = structuredClone(base);

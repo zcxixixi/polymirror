@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { globalYamlSchema } from "../src/config/document.js";
 import {
   buildCandidateExperimentConfig,
@@ -122,6 +123,7 @@ describe("buildCandidateExperimentConfig", () => {
               max_open_markets: arm.maxOpenMarkets,
               max_order_usd: arm.fixedUsd,
               slippage_tolerance: arm.slippageTolerance,
+              slippage_tolerance_mode: "relative_pct",
               max_position_per_token_usd: arm.maxPositionUsd,
             },
             execution: { order_type: "FOK" },
@@ -136,10 +138,82 @@ describe("buildCandidateExperimentConfig", () => {
               max_position_usd: arm.maxPositionUsd,
               max_daily_volume_usd: arm.maxDailyVolumeUsd,
             },
+            filters: { sides: ["BUY", "SELL"] },
           }],
         });
+        const filters = account!.leaders[0]!.filters;
+        expect(filters?.min_price).toBeUndefined();
+        expect(filters?.max_price).toBeUndefined();
       }
     }
+  });
+
+  it("builds only the user-approved b55 and dance watchlist into six preview arms", () => {
+    const input = validateCandidateCohortJson(JSON.parse(
+      readFileSync("config/candidate-cohorts/quality6-20260711-v1.json", "utf8")
+    ));
+    const result = buildCandidateExperimentConfig(defaults(), input);
+
+    expect(input.candidates.map(({ id, address }) => [id, address])).toEqual([
+      ["b55", "0xb55fa1296e6ec55d0ce53d93b9237389f11764d4"],
+      ["dance", "0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82"],
+    ]);
+    expect(result.accounts).toHaveLength(6);
+    expect(result.accounts.every((account) =>
+      account.global.risk.enable_copy_trading === false
+      && account.leaders[0]?.enabled === false
+      && account.global.preview_mode === true
+    )).toBe(true);
+    expect(result.accounts.map((account) => account.id)).toEqual([
+      "exp_quality6-20260711-v1_b55_conservative_200",
+      "exp_quality6-20260711-v1_b55_standard_200",
+      "exp_quality6-20260711-v1_b55_aggressive_200",
+      "exp_quality6-20260711-v1_dance_conservative_200",
+      "exp_quality6-20260711-v1_dance_standard_200",
+      "exp_quality6-20260711-v1_dance_aggressive_200",
+    ]);
+  });
+
+  it("omits price filters by default while preserving explicit paired overrides", () => {
+    const result = buildCandidateExperimentConfig(defaults(), cohort({
+      arms: {
+        standard: { minPrice: 0.2, maxPrice: 0.85 },
+      },
+    }));
+
+    const conservative = result.accounts.find((account) =>
+      account.id.endsWith("_conservative_200")
+    );
+    const standard = result.accounts.find((account) =>
+      account.id.endsWith("_standard_200")
+    );
+    expect(conservative?.leaders[0]?.filters).toEqual({ sides: ["BUY", "SELL"] });
+    expect(standard?.leaders[0]?.filters).toEqual({
+      min_price: 0.2,
+      max_price: 0.85,
+      sides: ["BUY", "SELL"],
+    });
+  });
+
+  it.each([
+    ["minimum only", { minPrice: 0.2 }],
+    ["maximum only", { maxPrice: 0.8 }],
+  ])("requires explicit price overrides to be paired: %s", (_name, arm) => {
+    const input = cohort({ arms: { standard: arm } });
+    expect(() => validateCandidateCohortJson(input)).toThrow(/minPrice.*maxPrice|paired/i);
+    expect(() => candidateCohortSchema.parse(input)).toThrow(/minPrice.*maxPrice|paired/i);
+  });
+
+  it("publishes paired price overrides as a standard JSON Schema constraint", () => {
+    const published = JSON.parse(
+      readFileSync("config/candidate-cohort.schema.json", "utf8")
+    );
+    const validate = new Ajv2020({ strict: false }).compile(published);
+
+    expect(validate(cohort({ arms: { standard: { minPrice: 0.2 } } }))).toBe(false);
+    expect(validate(cohort({
+      arms: { standard: { minPrice: 0.2, maxPrice: 0.8 } },
+    }))).toBe(true);
   });
 
   it("rejects duplicate candidates and unsafe arm overrides", () => {
@@ -338,6 +412,9 @@ describe("buildCandidateExperimentConfig", () => {
     ]);
     expect(published["x-candidateCohortRules"]).toContain("unique candidate IDs");
     expect(published.$defs.arm["x-candidateArmRules"]).toContain("minPrice < maxPrice");
+    expect(published.$defs.arm["x-candidateArmRules"]).toContain(
+      "minPrice and maxPrice must be supplied together"
+    );
   });
 
   it.each([

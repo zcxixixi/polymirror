@@ -194,6 +194,7 @@ function mapGlobal(raw: GlobalYaml) {
       maxOrderUsd: raw.risk.max_order_usd,
       minOrderUsd: raw.risk.min_order_usd,
       slippageTolerance: raw.risk.slippage_tolerance,
+      slippageToleranceMode: raw.risk.slippage_tolerance_mode,
       maxPositionPerTokenUsd: raw.risk.max_position_per_token_usd,
       positionCapBasis: raw.risk.position_cap_basis,
       syncWalletBalance: raw.risk.sync_wallet_balance,

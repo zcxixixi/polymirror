@@ -4,7 +4,7 @@ set -eu
 # Starts an isolated preview-only cohort. It refuses any path alias to the
 # production config/data/reports and never stops the port-8080 service.
 production_root="${POLYMIRROR_PRODUCTION_ROOT:-/opt/polymirror}"
-root="${SHADOW_ROOT:-$production_root/cohorts/quality12-20260711}"
+root="${SHADOW_ROOT:-$production_root/cohorts/quality6-20260711}"
 export SHADOW_CONFIG="${SHADOW_CONFIG:-$root/config.yaml}"
 export SHADOW_DATA_DIR="${SHADOW_DATA_DIR:-$root/data}"
 export SHADOW_REPORTS_DIR="${SHADOW_REPORTS_DIR:-$root/reports}"
@@ -151,10 +151,8 @@ if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0
   throw new Error("intake evidence is stale or has an invalid capture time");
 }
 const expected = [
-  ["ec47", "0xec47cb4e0a4f4e375d9787debf7c874214f21119"],
+  ["b55", "0xb55fa1296e6ec55d0ce53d93b9237389f11764d4"],
   ["dance", "0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82"],
-  ["linabell", "0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8"],
-  ["pada", "0x714a685b5454ea4d52979563bbafa77b8168ab2f"],
 ];
 const normalized = (value) => Array.isArray(value)
   ? value.map(normalized)
@@ -165,7 +163,7 @@ const normalized = (value) => Array.isArray(value)
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const canonicalHash = (value) => sha256(JSON.stringify(normalized(value)));
 
-if (approved.cohortId !== "quality12-20260711-v1") {
+if (approved.cohortId !== "quality6-20260711-v1") {
   throw new Error("approved cohort ID mismatch");
 }
 if (manifest.seedCohortId !== approved.cohortId) {
@@ -270,7 +268,7 @@ fi
 
 # Validate the exact mounted document through the built application. This also
 # proves that the generated YAML enables exactly the Candidates approved above.
-# The same validated 12-account roster is the collector's fail-closed scope.
+# The same validated 6-account roster is the collector's fail-closed scope.
 SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
   --env-file "$POLYMIRROR_ENV_FILE" \
   -v "$SHADOW_CONFIG:/app/config.yaml:ro" \
@@ -287,16 +285,16 @@ SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
       approved: row.freshIntakePassed === true,
     }]));
     const arms = new Map([
-      ["conservative", { fixed: 1, position: 10, volume: 40, markets: 10, loss: 5, slip: 0.015, min: 0.1, max: 0.7 }],
-      ["standard", { fixed: 2, position: 20, volume: 80, markets: 15, loss: 8, slip: 0.025, min: 0.05, max: 0.8 }],
-      ["aggressive", { fixed: 5, position: 40, volume: 160, markets: 20, loss: 10, slip: 0.04, min: 0.02, max: 0.9 }],
+      ["conservative", { fixed: 1, position: 10, volume: 40, markets: 10, loss: 5, slip: 0.015 }],
+      ["standard", { fixed: 2, position: 20, volume: 80, markets: 15, loss: 8, slip: 0.025 }],
+      ["aggressive", { fixed: 5, position: 40, volume: 160, markets: 20, loss: 10, slip: 0.04 }],
     ]);
-    if (loaded.accounts.length !== 12) throw new Error("quality12 requires exactly 12 accounts");
+    if (loaded.accounts.length !== 6) throw new Error("quality6 requires exactly 6 accounts");
     let copyEnabled = 0;
     const expectedIds = new Set();
     for (const [candidateId, candidate] of addresses) {
       for (const [armName, arm] of arms) {
-        const id = `exp_quality12-20260711-v1_${candidateId}_${armName}_200`;
+        const id = `exp_quality6-20260711-v1_${candidateId}_${armName}_200`;
         expectedIds.add(id);
         const account = loaded.accounts.find((row) => row.id === id);
         if (!account || account.enabled !== true) throw new Error(`missing enabled account: ${id}`);
@@ -317,8 +315,8 @@ SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
           || leader.limits?.maxOrderUsd !== arm.fixed
           || leader.limits?.maxPositionUsd !== arm.position
           || leader.limits?.maxDailyVolumeUsd !== arm.volume
-          || leader.filters?.minPrice !== arm.min
-          || leader.filters?.maxPrice !== arm.max
+          || leader.filters?.minPrice !== undefined
+          || leader.filters?.maxPrice !== undefined
           || JSON.stringify(leader.filters?.sides) !== JSON.stringify(["BUY", "SELL"])
           || g.risk.maxOrderUsd !== arm.fixed
           || g.risk.maxPositionPerTokenUsd !== arm.position
@@ -326,24 +324,25 @@ SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
           || g.risk.maxOpenMarkets !== arm.markets
           || g.risk.dailyLossCapPct !== arm.loss
           || g.risk.slippageTolerance !== arm.slip
+          || g.risk.slippageToleranceMode !== "relative_pct"
           || g.risk.positionCapBasis !== "cost"
           || g.risk.syncWalletBalance !== false) {
-          throw new Error(`quality12 arm mismatch: ${id}`);
+          throw new Error(`quality6 arm mismatch: ${id}`);
         }
         if (candidate.approved) copyEnabled += 1;
       }
     }
     if (loaded.accounts.some((account) => !expectedIds.has(account.id))) {
-      throw new Error("unexpected account in quality12 config");
+      throw new Error("unexpected account in quality6 config");
     }
     if (copyEnabled === 0) throw new Error("no approved Candidate is copy-enabled");
     process.stdout.write(serializeRequiredReportAccounts(
       loaded.accounts.map((account) => account.id),
-      12
+      6
     ));
   ')"
 export SHADOW_REPORT_ACCOUNTS
-echo "validated 12 preview accounts for collector scope"
+echo "validated 6 preview accounts for collector scope"
 
 docker compose -p "$project" -f "$compose_file" config >/dev/null
 existing_running="$(docker compose -p "$project" -f "$compose_file" \
@@ -386,8 +385,8 @@ while [ "$attempt" -lt 60 ]; do
           || health.pendingOrders !== 0
           || health.settlementFailures !== 0 || health.closedMarketOpenPositions !== 0
           || !Array.isArray(health.walletDrifts) || health.walletDrifts.length !== 0
-          || health.enabledAccountCount !== 12 || health.polledAccountCount !== 12
-          || !Array.isArray(health.experiments) || health.experiments.length !== 12) {
+           || health.enabledAccountCount !== 6 || health.polledAccountCount !== 6
+           || !Array.isArray(health.experiments) || health.experiments.length !== 6) {
           process.exit(1);
         }
       '; then
@@ -404,7 +403,7 @@ while [ "$attempt" -lt 60 ]; do
       || fail "container image does not match validated image"
     collector_logs="$(docker compose -p "$project" -f "$compose_file" \
       logs --no-color --tail 200 polymirror-shadow-collector 2>/dev/null || true)"
-    if printf '%s' "$collector_logs" | grep -q '"accountCount":12'; then
+     if printf '%s' "$collector_logs" | grep -q '"accountCount":6'; then
       collector_ready=1
     fi
   fi

@@ -5,12 +5,12 @@ import { readRuntimeProvenance } from "../src/experiments/provenance.js";
 import { serializeRequiredReportAccounts } from "../src/sim/cohort-table-accounts.js";
 
 describe("Candidate deployment provenance", () => {
-  it("serializes exactly 12 shadow report accounts and rejects an incomplete roster", () => {
-    const accountIds = Array.from({ length: 12 }, (_, index) => `quality12-${index}`);
+  it("serializes exactly 6 shadow report accounts and rejects an incomplete roster", () => {
+    const accountIds = Array.from({ length: 6 }, (_, index) => `quality6-${index}`);
 
-    expect(serializeRequiredReportAccounts(accountIds, 12)).toBe(accountIds.join(","));
-    expect(() => serializeRequiredReportAccounts(accountIds.slice(0, 11), 12)).toThrow(
-      /requires exactly 12 unique account ids/
+    expect(serializeRequiredReportAccounts(accountIds, 6)).toBe(accountIds.join(","));
+    expect(() => serializeRequiredReportAccounts(accountIds.slice(0, 5), 6)).toThrow(
+      /requires exactly 6 unique account ids/
     );
   });
 
@@ -144,6 +144,10 @@ describe("Candidate deployment provenance", () => {
     expect(compose).toMatch(/depends_on:\s+polymirror-shadow:\s+condition: service_healthy/s);
     expect(compose).toMatch(/polymirror-shadow:[\s\S]*healthcheck:[\s\S]*lastPollAt/);
     expect(compose).toMatch(/polymirror-shadow:[\s\S]*healthcheck:[\s\S]*status !== "ok"/);
+    expect(compose).toContain("health.enabledAccountCount !== 6");
+    expect(compose).toContain("health.polledAccountCount !== 6");
+    expect(compose).toContain("health.experiments.length !== 6");
+    expect(compose).not.toContain("health.enabledAccountCount !== 12");
     expect(compose).toMatch(/polymirror-shadow-collector:[\s\S]*healthcheck:\s+disable: true/);
     expect(compose).toContain('cpus: "${SHADOW_CPUS:-1.0}"');
     expect(compose).toContain('mem_limit: "${SHADOW_MEMORY_LIMIT:-1024m}"');
@@ -157,6 +161,9 @@ describe("Candidate deployment provenance", () => {
     expect(deploy).toContain('g.copyPriceMode !== "executable_guarded"');
     expect(deploy).toContain('g.execution.orderType !== "FOK"');
     expect(deploy).toContain("g.risk.startingCapitalUsd !== 200");
+    expect(deploy).toContain('g.risk.slippageToleranceMode !== "relative_pct"');
+    expect(deploy).toContain("leader.filters?.minPrice !== undefined");
+    expect(deploy).toContain("leader.filters?.maxPrice !== undefined");
     expect(deploy).toMatch(/docker compose .* up -d --no-build/s);
     expect(deploy).toMatch(/docker compose .* stop/s);
     expect(deploy).not.toMatch(/docker compose .* down -v/);
@@ -179,12 +186,13 @@ describe("Candidate deployment provenance", () => {
     expect(deploy).toContain("freshIntakeEvidenceSha256");
     expect(deploy).toContain("SHADOW_MAX_INTAKE_AGE_HOURS");
     expect(deploy).toContain("intake evidence is stale");
-    expect(deploy).toContain("quality12-20260711-v1");
-    expect(deploy).toContain("0xec47cb4e0a4f4e375d9787debf7c874214f21119");
+    expect(deploy).toContain("quality6-20260711-v1");
+    expect(deploy).toContain("0xb55fa1296e6ec55d0ce53d93b9237389f11764d4");
     expect(deploy).toContain("0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82");
-    expect(deploy).toContain("0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8");
-    expect(deploy).toContain("0x714a685b5454ea4d52979563bbafa77b8168ab2f");
-    expect(deploy).toContain("loaded.accounts.length !== 12");
+    expect(deploy).not.toContain("0xec47cb4e0a4f4e375d9787debf7c874214f21119");
+    expect(deploy).not.toContain("0xf0ed9e68e6cd3ee712260abeaec32de56a7d47d8");
+    expect(deploy).not.toContain("0x714a685b5454ea4d52979563bbafa77b8168ab2f");
+    expect(deploy).toContain("loaded.accounts.length !== 6");
     expect(deploy).toContain("serializeRequiredReportAccounts");
     expect(deploy).toContain("export SHADOW_REPORT_ACCOUNTS");
     expect(deploy).toContain("no approved Candidate is copy-enabled");
@@ -205,10 +213,10 @@ describe("Candidate deployment provenance", () => {
     expect(deploy).toContain("health.settlementFailures !== 0");
     expect(deploy).toContain("health.closedMarketOpenPositions !== 0");
     expect(deploy).toContain("health.walletDrifts.length !== 0");
-    expect(deploy).toContain("health.enabledAccountCount !== 12");
-    expect(deploy).toContain("health.polledAccountCount !== 12");
+    expect(deploy).toContain("health.enabledAccountCount !== 6");
+    expect(deploy).toContain("health.polledAccountCount !== 6");
     expect(deploy).toContain('logs --no-color --tail 200');
-    expect(deploy).toContain('"accountCount":12');
+    expect(deploy).toContain('"accountCount":6');
     expect(deploy).toContain("shadow collector first report did not succeed");
   });
 });

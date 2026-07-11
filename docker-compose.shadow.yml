@@ -36,8 +36,8 @@ services:
             || health.pendingOrders !== 0
             || health.settlementFailures !== 0 || health.closedMarketOpenPositions !== 0
             || !Array.isArray(health.walletDrifts) || health.walletDrifts.length !== 0
-            || health.enabledAccountCount !== 12 || health.polledAccountCount !== 12
-            || !Array.isArray(health.experiments) || health.experiments.length !== 12) process.exit(1);
+            || health.enabledAccountCount !== 6 || health.polledAccountCount !== 6
+            || !Array.isArray(health.experiments) || health.experiments.length !== 6) process.exit(1);
       interval: 10s
       timeout: 5s
       start_period: 30s

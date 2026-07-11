@@ -76,6 +76,29 @@ describe("SecureTradingBackend", () => {
     }
   );
 
+  it("forwards an explicitly prepared BUY amount and all-in cap to beta.14", async () => {
+    await new SecureTradingBackend(wallet).submitOrder({
+      tokenId: "token-1",
+      side: "BUY",
+      price: 0.15,
+      size: 4.9334,
+      buyAmountUsd: 2,
+      buyMaxSpendUsd: 2,
+      orderType: "FOK",
+      tickSize: "0.01",
+      negRisk: false,
+    });
+
+    expect(placeMarketOrder).toHaveBeenCalledWith({
+      tokenId: "token-1",
+      side: OrderSide.BUY,
+      amount: 2,
+      maxSpend: 2,
+      maxPrice: "0.15",
+      orderType: SdkOrderType.FOK,
+    });
+  });
+
   it("groups only confirmed taker fills by order id", async () => {
     const since = Date.parse("2026-07-10T00:00:00.000Z");
     const trade = (overrides: Record<string, unknown>) => ({

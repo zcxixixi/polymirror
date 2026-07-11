@@ -66,9 +66,14 @@
       "additionalProperties": false,
       "x-candidateArmRules": [
         "minPrice < maxPrice",
+        "minPrice and maxPrice must be supplied together",
         "fixedUsd <= maxPositionUsd",
         "fixedUsd <= maxDailyVolumeUsd"
       ],
+      "dependentRequired": {
+        "minPrice": ["maxPrice"],
+        "maxPrice": ["minPrice"]
+      },
       "properties": {
         "fixedUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 },
         "maxPositionUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 50 },

@@ -10,6 +10,7 @@ import { fetchResolvedMarketOutcome } from "../src/monitor/market-resolve.js";
 import {
   fetchBestExecutablePrice,
   fetchExecutableOrderBookSnapshot,
+  fetchOrderBookMeta,
 } from "../src/executor/orderbook.js";
 import { previewRuntimeConfig, testActivity, testLeader } from "./helpers/fixtures.js";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -35,6 +36,7 @@ vi.mock("../src/executor/orderbook.js", async (importOriginal) => {
     ...actual,
     fetchBestExecutablePrice: vi.fn(),
     fetchExecutableOrderBookSnapshot: vi.fn(),
+    fetchOrderBookMeta: vi.fn(),
   };
 });
 
@@ -42,6 +44,7 @@ const mockPollLeaders = vi.mocked(pollLeaders);
 const mockFetchResolvedMarketOutcome = vi.mocked(fetchResolvedMarketOutcome);
 const mockFetchBestExecutablePrice = vi.mocked(fetchBestExecutablePrice);
 const mockFetchExecutableOrderBookSnapshot = vi.mocked(fetchExecutableOrderBookSnapshot);
+const mockFetchOrderBookMeta = vi.mocked(fetchOrderBookMeta);
 
 let dir: string;
 let store: StateStore;
@@ -53,8 +56,10 @@ beforeEach(() => {
   mockFetchResolvedMarketOutcome.mockReset();
   mockFetchBestExecutablePrice.mockReset();
   mockFetchExecutableOrderBookSnapshot.mockReset();
+  mockFetchOrderBookMeta.mockReset();
   mockFetchBestExecutablePrice.mockResolvedValue(null);
   mockFetchExecutableOrderBookSnapshot.mockResolvedValue(null);
+  mockFetchOrderBookMeta.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -273,6 +278,71 @@ describe("runCopyCycle", () => {
     });
   });
 
+  it.each(["FOK", "FAK"] as const)(
+    "keeps a leader_limit %s BUY inside the SDK all-in cap",
+    async (orderType) => {
+      const activity = testActivity({ price: 0.153 });
+      const config = previewRuntimeConfig([
+        testLeader({ strategy: { type: "FIXED", copySize: 2 } }),
+      ]);
+      config.app.global.execution.orderType = orderType;
+      const experiment = store.startOrResumeExperiment({
+        accountId: `leader-limit-${orderType.toLowerCase()}`,
+        candidateAddresses: [],
+        config,
+        gitSha: "git",
+        imageDigest: "image",
+        lockfileHash: "lock",
+        trustClass: "candidate",
+      });
+      mockPollLeaders.mockResolvedValue([
+        { leaderId: "whale", fetched: 1, candidates: [activity] },
+      ]);
+      mockFetchOrderBookMeta.mockResolvedValue({
+        tickSize: "0.01",
+        negRisk: false,
+        feeRate: 0.25,
+        feeExponent: 0,
+      });
+
+      const result = await runCopyCycle(config, store);
+
+      expect(result).toMatchObject({ copied: 1, skipped: 0, errors: [] });
+      expect(store.getPosition("whale", activity.asset!)).toBe(4.8667);
+      expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
+        price: 0.15,
+        size: 4.8667,
+        feeUsd: 1.216675,
+      });
+      expect(store.listDecisions().at(-1)?.exactTerms).toMatchObject({
+        orderType,
+        requestedPrice: 0.15,
+        requestedShares: 4.8667,
+        filledShares: 4.8667,
+        filledUsd: 0.73,
+        sdkRequestedBuyAmountUsd: 1.96,
+        sdkMaxSpendUsd: 1.96,
+        sdkExpectedMakerAmountUsd: 0.73,
+        sdkExpectedAllInSpendUsd: 1.946675,
+        sdkTickSize: 0.01,
+        sdkPlatformFeeRate: 0.25,
+        sdkPlatformFeeExponent: 0,
+      });
+      expect(store.getCashBalance(config.app.global.risk.startingCapitalUsd)).toBeCloseTo(
+        config.app.global.risk.startingCapitalUsd - 1.946675,
+        8
+      );
+      const archived = await archiveExperimentEvidence({
+        dbPath: join(dir, "test.db"),
+        experimentId: experiment.experimentId,
+        archiveDir: join(dir, `leader-limit-${orderType.toLowerCase()}-archive`),
+      });
+      expect(verifyExperimentReplay(archived.manifestPath, {
+        sourceDbPath: join(dir, "test.db"),
+      }).match).toBe(true);
+    }
+  );
+
   it("rejects an executable_guarded preview trade when adverse slippage is too high", async () => {
     const activity = testActivity({ price: 0.5 });
     const config = previewRuntimeConfig([
@@ -296,7 +366,7 @@ describe("runCopyCycle", () => {
     expect(result).toMatchObject({ copied: 0, skipped: 1 });
     expect(store.getPosition("whale", activity.asset!)).toBe(0);
     expect(store.listAuditLog({ action: "SKIP" }).items[0]).toMatchObject({
-      size: 1.93,
+      size: 1.92,
       price: 0.52,
       leaderPrice: 0.5,
       executablePrice: 0.7,
@@ -315,6 +385,7 @@ describe("runCopyCycle", () => {
     ]);
     config.app.global.copyPriceMode = "executable_guarded";
     config.app.global.risk.slippageTolerance = 0.02;
+    config.app.global.execution.orderType = "FOK";
     store.startOrResumeExperiment({ accountId: "guarded-copy", candidateAddresses: [], config,
       gitSha: "git", imageDigest: "image", lockfileHash: "lock", trustClass: "candidate" });
     mockPollLeaders.mockResolvedValue([
@@ -331,16 +402,26 @@ describe("runCopyCycle", () => {
     const result = await runCopyCycle(config, store);
 
     expect(result.copied).toBe(1);
-    expect(store.getPosition("whale", activity.asset!)).toBe(1.93);
+    expect(store.getPosition("whale", activity.asset!)).toBe(1.8654);
     expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
       price: 0.52,
       leaderPrice: 0.5,
       executablePrice: 0.52,
       slippagePct: 4,
-      feeUsd: 0.03005983,
+      feeUsd: 0.02905368,
+    });
+    expect(store.listDecisions().at(-1)?.exactTerms).toMatchObject({
+      buyNotionalMode: "submitted_cents",
+      configuredSlippageTolerance: 0.02,
+      slippageToleranceMode: "absolute_price",
+      absoluteSlippageTolerance: 0.02,
+      sdkRequestedBuyAmountUsd: 1,
+      sdkMaxSpendUsd: 1,
+      sdkExpectedMakerAmountUsd: 0.97,
+      sdkExpectedAllInSpendUsd: 0.99905368,
     });
     expect(store.getCashBalance(config.app.global.risk.startingCapitalUsd)).toBeCloseTo(
-      config.app.global.risk.startingCapitalUsd - 1.03365983,
+      config.app.global.risk.startingCapitalUsd - 0.99905368,
       4
     );
     const experimentId = store.getActiveExperiment()!.experimentId;
@@ -399,6 +480,15 @@ describe("runCopyCycle", () => {
     ]);
     config.app.global.copyPriceMode = "executable_guarded";
     config.app.global.risk.slippageTolerance = 0.02;
+    const experiment = store.startOrResumeExperiment({
+      accountId: "guarded-gtc-depth",
+      candidateAddresses: [],
+      config,
+      gitSha: "git",
+      imageDigest: "image",
+      lockfileHash: "lock",
+      trustClass: "candidate",
+    });
     mockPollLeaders.mockResolvedValue([
       { leaderId: "whale", fetched: 1, candidates: [activity] },
     ]);
@@ -415,11 +505,19 @@ describe("runCopyCycle", () => {
 
     expect(result).toMatchObject({ copied: 0, skipped: 1 });
     expect(store.listAuditLog({ action: "SKIP" }).items[0]).toMatchObject({
-      reason: "executable depth $0.255 < $1",
+      reason: "executable depth 0.5 < 1.92 shares",
       leaderPrice: 0.5,
       executablePrice: 0.51,
       slippagePct: 2,
     });
+    const archived = await archiveExperimentEvidence({
+      dbPath: join(dir, "test.db"),
+      experimentId: experiment.experimentId,
+      archiveDir: join(dir, "guarded-gtc-depth-archive"),
+    });
+    expect(verifyExperimentReplay(archived.manifestPath, {
+      sourceDbPath: join(dir, "test.db"),
+    }).match).toBe(true);
   });
 
   it("skips executable_guarded preview below the market minimum order size", async () => {
@@ -442,7 +540,7 @@ describe("runCopyCycle", () => {
 
     expect(result).toMatchObject({ copied: 0, skipped: 1 });
     expect(store.listAuditLog({ action: "SKIP" }).items[0]).toMatchObject({
-      reason: "market min order 5 > 1.9608 shares",
+      reason: "market min order 5 > 1.92 shares",
       leaderPrice: 0.5,
       executablePrice: 0.51,
       slippagePct: 2,
@@ -479,7 +577,7 @@ describe("runCopyCycle", () => {
     expect(store.getPosition("whale", activity.asset!)).toBe(10);
   });
 
-  it("rechecks max order USD after guarded share rounding", async () => {
+  it("caps guarded share rounding without rejecting a fixed max order", async () => {
     const activity = testActivity({ price: 0.5 });
     const config = previewRuntimeConfig([
       testLeader({
@@ -501,10 +599,12 @@ describe("runCopyCycle", () => {
 
     const result = await runCopyCycle(config, store);
 
-    expect(result).toMatchObject({ copied: 0, skipped: 1 });
-    expect(store.listAuditLog({ action: "SKIP" }).items[0].reason).toMatch(
-      /^guarded max order /
-    );
+    expect(result).toMatchObject({ copied: 1, skipped: 0 });
+    expect(store.getPosition("whale", activity.asset!)).toBe(1.92);
+    expect(store.listAuditLog({ action: "COPY" }).items[0]).toMatchObject({
+      size: 1.92,
+      price: 0.52,
+    });
   });
 
   it("stops new copying when a database is reopened under a different price mode", async () => {
