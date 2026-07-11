@@ -117,7 +117,7 @@ describe("raw event lineage", () => {
     ]);
   });
 
-  it("migrates legacy four-field observation rows by logical value and keeps the first timestamp", () => {
+  it("preserves legacy duplicate observation evidence while deduplicating future logical observations", () => {
     const raw = store.recordRawEvent({
       sourceId: "tx-legacy-duplicates:token:BUY",
       payload: { type: "TRADE", price: 0.5 },
@@ -155,7 +155,20 @@ describe("raw event lineage", () => {
         sourceTimestamp: 123,
         observedTimestamp: 1000,
       }),
+      expect.objectContaining({
+        observationKey: secondLegacyKey,
+        sourceTimestamp: 123,
+        observedTimestamp: 2000,
+      }),
     ]);
+
+    store.recordRawEvent({
+      sourceId: "tx-legacy-duplicates:token:BUY",
+      payload: { type: "TRADE", price: 0.5 },
+      sourceTimestamp: 123,
+      observedTimestamp: 3000,
+    });
+    expect(store.listRawEventObservations(raw.rawEventId)).toHaveLength(2);
   });
 
   it("deduplicates source IDs without overwriting source or first-observed timestamps", () => {

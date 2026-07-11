@@ -1088,9 +1088,6 @@ export class StateStore {
   }
 
   private migrate(): void {
-    const storedSchemaVersion = Number((this.db.prepare(
-      "SELECT value FROM schema_metadata WHERE key='schema_version'"
-    ).get() as { value: string } | undefined)?.value ?? 0);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decision_observation_links (
         link_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1133,21 +1130,9 @@ export class StateStore {
     if (!observationCols.some((column) => column.name === "observation_key")) {
       this.db.exec("ALTER TABLE raw_event_observations ADD COLUMN observation_key TEXT");
     }
-    if (!Number.isFinite(storedSchemaVersion) || storedSchemaVersion < 7) {
-      this.db.exec(`
-        DROP TRIGGER IF EXISTS raw_event_observations_no_delete;
-        DELETE FROM raw_event_observations
-        WHERE EXISTS (
-          SELECT 1 FROM raw_event_observations AS earlier
-          WHERE earlier.raw_event_id = raw_event_observations.raw_event_id
-            AND earlier.payload_hash = raw_event_observations.payload_hash
-            AND earlier.source_timestamp = raw_event_observations.source_timestamp
-            AND earlier.observation_id < raw_event_observations.observation_id
-        );
-        CREATE TRIGGER raw_event_observations_no_delete BEFORE DELETE ON raw_event_observations
-        BEGIN SELECT RAISE(ABORT, 'raw observations are append-only'); END;
-      `);
-    }
+    // Historical duplicate observations are immutable evidence. recordRawEvent's
+    // logical NOT EXISTS guard prevents new duplicates without rewriting or
+    // deleting legacy rows during schema migration.
     const cols = this.db.prepare("PRAGMA table_info(positions)").all() as { name: string }[];
     if (!cols.some((c) => c.name === "avg_entry_price")) {
       this.db.exec("ALTER TABLE positions ADD COLUMN avg_entry_price REAL NOT NULL DEFAULT 0");
