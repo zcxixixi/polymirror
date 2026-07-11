@@ -187,12 +187,7 @@ export class SecureTradingBackend implements TradingBackend {
     let shares = 0;
     let usd = 0;
     let feeUsd = 0;
-    const feeMeta = await fetchOrderBookMeta(
-      this.wallet.clobUrl,
-      this.wallet.chainId,
-      tokenId
-    );
-    if (!feeMeta) throw new Error(`market fee metadata unavailable for ${tokenId}`);
+    let feeMeta: Awaited<ReturnType<typeof fetchOrderBookMeta>> | undefined;
     for await (const page of client.listAccountTrades({ tokenId })) {
       for (const trade of page.items) {
         if (!acceptedStatuses.has(String(trade.status ?? "").toUpperCase())) continue;
@@ -200,6 +195,14 @@ export class SecureTradingBackend implements TradingBackend {
           const matchedShares = parseFloat(String(trade.size ?? "0"));
           const price = parseFloat(String(trade.price ?? "0"));
           if (matchedShares > 0 && price > 0) {
+            if (feeMeta === undefined) {
+              feeMeta = await fetchOrderBookMeta(
+                this.wallet.clobUrl,
+                this.wallet.chainId,
+                tokenId
+              );
+            }
+            if (!feeMeta) throw new Error(`market fee metadata unavailable for ${tokenId}`);
             const notional = matchedShares * price;
             shares += matchedShares;
             usd += notional;
@@ -219,12 +222,6 @@ export class SecureTradingBackend implements TradingBackend {
               const notional = matchedShares * price;
               shares += matchedShares;
               usd += notional;
-              feeUsd += calculatePlatformFeeUsd(
-                matchedShares,
-                price,
-                feeMeta.feeRate,
-                feeMeta.feeExponent
-              );
             }
           }
         }
@@ -256,6 +253,7 @@ export class SecureTradingBackend implements TradingBackend {
       price: number;
       shares: number;
       matchedAt: number;
+      liquidityRole: "TAKER" | "MAKER";
     }): Promise<void> => {
       const side = input.sideValue === "BUY" || input.sideValue === "SELL"
         ? input.sideValue
@@ -275,22 +273,25 @@ export class SecureTradingBackend implements TradingBackend {
       }
 
       const usd = input.price * input.shares;
-      let feeMeta = feeMetaByToken.get(input.tokenId);
-      if (feeMeta === undefined) {
-        feeMeta = await fetchOrderBookMeta(
-          this.wallet.clobUrl,
-          this.wallet.chainId,
-          input.tokenId
+      let feeUsd = 0;
+      if (input.liquidityRole === "TAKER") {
+        let feeMeta = feeMetaByToken.get(input.tokenId);
+        if (feeMeta === undefined) {
+          feeMeta = await fetchOrderBookMeta(
+            this.wallet.clobUrl,
+            this.wallet.chainId,
+            input.tokenId
+          );
+          feeMetaByToken.set(input.tokenId, feeMeta);
+        }
+        if (!feeMeta) throw new Error(`market fee metadata unavailable for ${input.tokenId}`);
+        feeUsd = calculatePlatformFeeUsd(
+          input.shares,
+          input.price,
+          feeMeta.feeRate,
+          feeMeta.feeExponent
         );
-        feeMetaByToken.set(input.tokenId, feeMeta);
       }
-      if (!feeMeta) throw new Error(`market fee metadata unavailable for ${input.tokenId}`);
-      const feeUsd = calculatePlatformFeeUsd(
-        input.shares,
-        input.price,
-        feeMeta.feeRate,
-        feeMeta.feeExponent
-      );
       const existing = groups.get(input.orderId);
       if (!existing) {
         groups.set(input.orderId, {
@@ -329,6 +330,7 @@ export class SecureTradingBackend implements TradingBackend {
             price: parseFloat(String(trade.price ?? "0")),
             shares: parseFloat(String(trade.size ?? "0")),
             matchedAt,
+            liquidityRole: "TAKER",
           });
         }
 
@@ -347,6 +349,7 @@ export class SecureTradingBackend implements TradingBackend {
               price: parseFloat(String(maker.price ?? "0")),
               shares: parseFloat(String(maker.matchedAmount ?? "0")),
               matchedAt,
+              liquidityRole: "MAKER",
             });
           }
         }

@@ -211,14 +211,14 @@ describe("SecureTradingBackend", () => {
         averagePrice: 0.45,
         shares: 3.5,
         usd: 1.575,
-        feeUsd: 0.05359922,
-        cashDeltaUsd: -1.62859922,
+        feeUsd: 0,
+        cashDeltaUsd: -1.575,
         matchedAt: Date.parse("2026-07-10T00:00:01.000Z"),
       },
     ]);
   });
 
-  it("uses market fee semantics even when maker trade bps is null", async () => {
+  it("never charges platform fees to maker BUY fills", async () => {
     fetchOrder.mockResolvedValue({
       sizeMatched: "3.5",
       originalSize: "10",
@@ -263,9 +263,43 @@ describe("SecureTradingBackend", () => {
         terminal: false,
         filledUsd: 1.575,
         averagePrice: 0.45,
-        feeUsd: 0.05359922,
+        feeUsd: 0,
       },
     });
+  });
+
+  it("recovers maker SELL fills without reducing proceeds by a platform fee", async () => {
+    const since = Date.parse("2026-07-10T00:00:00.000Z");
+    listAccountTrades.mockReturnValue(
+      (async function* () {
+        yield {
+          items: [{
+            status: "CONFIRMED",
+            traderSide: "MAKER",
+            matchedAt: "2026-07-10T00:00:01.000Z",
+            makerOrders: [{
+              orderId: "maker-sell",
+              tokenId: "maker-token",
+              side: "SELL",
+              price: "0.45",
+              matchedAmount: "3.5",
+              feeRateBps: "9999",
+              makerAddress: wallet.proxyAddress,
+            }],
+          }],
+        };
+      })()
+    );
+
+    const fills = await new SecureTradingBackend(wallet).listRecentCompletedFills(since);
+
+    expect(fills).toEqual([expect.objectContaining({
+      orderId: "maker-sell",
+      side: "SELL",
+      usd: 1.575,
+      feeUsd: 0,
+      cashDeltaUsd: 1.575,
+    })]);
   });
 
   it("returns trade-weighted fill details for an open partially filled order", async () => {
