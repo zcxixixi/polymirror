@@ -1087,17 +1087,23 @@ export class StateStore {
     return this.db.transaction(() => {
       const active = this.getActiveExperiment(input.accountId);
       const candidates = [...input.candidateAddresses].sort();
-      const sameIdentity = active?.configHash === hash
+      const sameDecisionIdentity = active?.configHash === hash
+        && active.canonicalConfigJson === canonicalDecisionConfigJson(input.config)
         && JSON.stringify(active.candidateAddresses) === JSON.stringify(candidates)
-        && active.gitSha === input.gitSha
-        && active.imageDigest === input.imageDigest
-        && active.lockfileHash === input.lockfileHash
         && active.schemaVersion === STATE_SCHEMA_VERSION
         && active.trustClass === input.trustClass;
+      const sameIdentity = sameDecisionIdentity
+        && active.gitSha === input.gitSha
+        && active.imageDigest === input.imageDigest
+        && active.lockfileHash === input.lockfileHash;
       if (sameIdentity) {
         this.consumePendingLegacyKillSwitch(active!);
         return this.getExperiment(active!.experimentId)!;
       }
+      const buildOnlyRotation = Boolean(active && sameDecisionIdentity);
+      const inheritedControl = buildOnlyRotation
+        ? this.readExperimentControl(active!.experimentId)
+        : undefined;
       if (active) {
         const pending = this.db.prepare("SELECT COUNT(*) AS count FROM pending_orders").get() as { count: number };
         if (pending.count > 0) {
@@ -1147,10 +1153,67 @@ export class StateStore {
         active?.experimentId ?? null,
         normalizedPayloadJson(newStartState)
       );
+      if (buildOnlyRotation) {
+        this.inheritBuildOnlyRuntimeSafetyState({
+          previousExperimentId: active!.experimentId,
+          nextExperimentId: experimentId,
+          previousControl: inheritedControl,
+          occurredAt: now,
+        });
+      }
       const experiment = this.getExperiment(experimentId)!;
       if (experiment.state === "ACTIVE") this.consumePendingLegacyKillSwitch(experiment);
       return this.getExperiment(experimentId)!;
     })();
+  }
+
+  private inheritBuildOnlyRuntimeSafetyState(input: {
+    previousExperimentId: string;
+    nextExperimentId: string;
+    previousControl?: ExperimentControlRow;
+    occurredAt: number;
+  }): void {
+    const control = input.previousControl;
+    if (control && control.state !== "ACTIVE") {
+      if (!control.reasonCode || control.triggeredAt === null) {
+        throw new Error("non-active experiment control is incomplete");
+      }
+      const inherited = this.db.prepare(
+        `INSERT INTO experiment_controls
+         (experiment_id, copy_state, reason_code, details_json, triggered_at,
+          healthy_since, reviewed_at)
+         SELECT ?, copy_state, reason_code, details_json, triggered_at, NULL, NULL
+         FROM experiment_controls
+         WHERE experiment_id = ? AND copy_state <> 'ACTIVE'`
+      ).run(
+        input.nextExperimentId,
+        input.previousExperimentId
+      );
+      if (inherited.changes !== 1) {
+        throw new Error("failed to inherit non-active experiment control");
+      }
+      this.insertExperimentControlAudit({
+        experimentId: input.nextExperimentId,
+        fromState: control.state,
+        toState: control.state,
+        reasonCode: control.reasonCode,
+        details: {
+          event: "BUILD_PROVENANCE_CONTROL_INHERITED",
+          fromExperimentId: input.previousExperimentId,
+        },
+        occurredAt: input.occurredAt,
+        reviewedAt: null,
+      });
+    }
+    this.db.prepare(
+      `INSERT INTO settlement_failures
+       (experiment_id, account_id, leader_id, condition_id, slug, error_code,
+        error_message, first_seen_at, last_seen_at, failure_count, resolved_at)
+       SELECT ?, account_id, leader_id, condition_id, slug, error_code,
+              error_message, first_seen_at, last_seen_at, failure_count, NULL
+       FROM settlement_failures
+       WHERE experiment_id = ? AND resolved_at IS NULL`
+    ).run(input.nextExperimentId, input.previousExperimentId);
   }
 
   getExperiment(experimentId: string): ExperimentManifestRow | undefined {
@@ -1241,7 +1304,9 @@ export class StateStore {
         if (!row) continue;
         this.db.prepare("UPDATE experiments SET state = 'ABORTED', ended_at = ? WHERE experiment_id = ?")
           .run(now, row.experimentId);
-        this.db.prepare("UPDATE experiments SET state = 'ACTIVE', ended_at = NULL WHERE experiment_id = ?")
+        this.db.prepare(
+          "UPDATE experiments SET state = 'ACTIVE', ended_at = NULL, end_state_json = NULL WHERE experiment_id = ?"
+        )
           .run(row.previousExperimentId);
       }
     })();
@@ -1899,6 +1964,49 @@ export class StateStore {
 
   getLatestEquitySnapshot(experimentId?: string): EquitySnapshotRow | null {
     return this.listEquitySnapshots(experimentId).at(-1) ?? null;
+  }
+
+  getCodeLineagePeakEquity(experimentId?: string): number | null {
+    let experiment = experimentId
+      ? this.getExperiment(experimentId)
+      : this.getActiveExperiment();
+    const visited = new Set<string>();
+    let peak: number | null = null;
+    while (experiment && !visited.has(experiment.experimentId)) {
+      visited.add(experiment.experimentId);
+      const row = this.db.prepare(
+        `SELECT MAX(peak_equity_usd) AS peakEquityUsd
+         FROM equity_snapshots WHERE experiment_id = ?`
+      ).get(experiment.experimentId) as { peakEquityUsd: number | null };
+      if (row.peakEquityUsd !== null) {
+        peak = peak === null ? row.peakEquityUsd : Math.max(peak, row.peakEquityUsd);
+      }
+      if (!experiment.previousExperimentId) return peak;
+      const previous = this.getExperiment(experiment.previousExperimentId);
+      if (!previous || !this.isBuildOnlyExperimentTransition(previous, experiment)) {
+        return peak;
+      }
+      experiment = previous;
+    }
+    return peak;
+  }
+
+  private isBuildOnlyExperimentTransition(
+    previous: ExperimentManifestRow,
+    next: ExperimentManifestRow
+  ): boolean {
+    return next.previousExperimentId === previous.experimentId
+      && next.accountId === previous.accountId
+      && next.configHash === previous.configHash
+      && next.canonicalConfigJson === previous.canonicalConfigJson
+      && JSON.stringify(next.candidateAddresses) === JSON.stringify(previous.candidateAddresses)
+      && next.schemaVersion === previous.schemaVersion
+      && next.trustClass === previous.trustClass
+      && (
+        next.gitSha !== previous.gitSha
+        || next.imageDigest !== previous.imageDigest
+        || next.lockfileHash !== previous.lockfileHash
+      );
   }
 
   recordSettlementFailure(input: RecordSettlementFailureInput): SettlementFailureRow {

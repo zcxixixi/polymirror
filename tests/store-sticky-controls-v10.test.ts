@@ -175,6 +175,257 @@ describe("sticky experiment controls", () => {
     expect(store.getExperimentControl(next.experimentId)?.state).toBe("ACTIVE");
   });
 
+  it("inherits a sticky stop across build-only provenance rotations", () => {
+    store.setExperimentControl({
+      experimentId,
+      state: "SETTLE_ONLY",
+      reasonCode: "MANUAL_LEGACY_SETTLE_ONLY",
+      details: { operator: "migration" },
+      triggeredAt: 1_000,
+    });
+    const config = previewRuntimeConfig();
+
+    const upgraded = store.startOrResumeExperiment({
+      accountId: "candidate-sticky",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-upgraded",
+      imageDigest: "image-upgraded",
+      lockfileHash: "lock-upgraded",
+      trustClass: "candidate",
+    }, 2_000);
+
+    expect(upgraded.previousExperimentId).toBe(experimentId);
+    expect(store.getExperimentControl(upgraded.experimentId)).toEqual({
+      experimentId: upgraded.experimentId,
+      state: "SETTLE_ONLY",
+      reasonCode: "MANUAL_LEGACY_SETTLE_ONLY",
+      details: { operator: "migration" },
+      triggeredAt: 1_000,
+      healthySince: null,
+      reviewedAt: null,
+    });
+    expect(store.listExperimentControlAudit(upgraded.experimentId)).toEqual([
+      expect.objectContaining({
+        fromState: "SETTLE_ONLY",
+        toState: "SETTLE_ONLY",
+        reasonCode: "MANUAL_LEGACY_SETTLE_ONLY",
+        occurredAt: 2_000,
+        details: {
+          event: "BUILD_PROVENANCE_CONTROL_INHERITED",
+          fromExperimentId: experimentId,
+        },
+      }),
+    ]);
+
+    const rolledBack = store.startOrResumeExperiment({
+      accountId: "candidate-sticky",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-sticky",
+      imageDigest: "image-sticky",
+      lockfileHash: "lock-sticky",
+      trustClass: "candidate",
+    }, 3_000);
+    expect(store.getExperimentControl(rolledBack.experimentId)).toMatchObject({
+      state: "SETTLE_ONLY",
+      reasonCode: "MANUAL_LEGACY_SETTLE_ONLY",
+      triggeredAt: 1_000,
+    });
+  });
+
+  it("restarts the 60 minute recovery window after a DATA quarantine build upgrade", () => {
+    store.setExperimentControl({
+      experimentId,
+      state: "QUARANTINED",
+      reasonCode: "DATA_CAPACITY_LOW",
+      details: { projectedDaysRemaining: 1.05 },
+      triggeredAt: 1_000,
+    });
+    store.markExperimentDataHealthy({ experimentId, healthyAt: 1_500 });
+    const config = previewRuntimeConfig();
+
+    const upgraded = store.startOrResumeExperiment({
+      accountId: "candidate-sticky",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-upgraded",
+      imageDigest: "image-upgraded",
+      lockfileHash: "lock-upgraded",
+      trustClass: "candidate",
+    }, 2_000);
+
+    expect(store.getExperimentControl(upgraded.experimentId)).toEqual({
+      experimentId: upgraded.experimentId,
+      state: "QUARANTINED",
+      reasonCode: "DATA_CAPACITY_LOW",
+      details: { projectedDaysRemaining: 1.05 },
+      triggeredAt: 1_000,
+      healthySince: null,
+      reviewedAt: null,
+    });
+    expect(() => store.reactivateQuarantinedExperiment({
+      experimentId: upgraded.experimentId,
+      reviewedAt: 2_000 + HOUR_MS,
+    })).toThrow(/healthy/i);
+  });
+
+  it("carries unresolved settlement failures and liquidation peak only across build lineage", () => {
+    store.adjustCash(-2, 200);
+    store.applyCopyFill("sports", "token-a", "BUY", 4, 0.5);
+    store.addRealizedPnl(1.25);
+    const raw = store.recordRawEvent({
+      sourceId: "build-lineage-evidence",
+      payload: { leaderId: "sports", side: "BUY", tokenId: "token-a" },
+      sourceTimestamp: 900,
+      observedTimestamp: 900,
+      experimentId,
+    });
+    store.recordDecision({
+      rawEventId: raw.rawEventId,
+      action: "SKIP",
+      reasonCode: "policy_skip",
+      exactTerms: { reason: "fixture" },
+      decidedAt: 950,
+    });
+    store.audit({ action: "ERROR", reason: "fixture", preview: true });
+    const economicBefore = {
+      cashUsd: store.readCashBalance(200),
+      realizedPnlUsd: store.getTotalRealizedPnl(),
+      positions: store.listPositions(),
+      rawEvents: store.listRawEvents(),
+      decisions: store.listDecisions(),
+      auditCount: store.listAuditLog().total,
+    };
+    store.recordSettlementFailure({
+      experimentId,
+      leaderId: "sports",
+      conditionId: "condition-a",
+      errorCode: "gamma_schema_incompatible",
+      errorMessage: "tick size changed",
+      observedAt: 1_000,
+    });
+    store.recordSettlementFailure({
+      experimentId,
+      leaderId: "sports",
+      conditionId: "condition-a",
+      errorCode: "gamma_schema_incompatible",
+      errorMessage: "tick size still changed",
+      observedAt: 1_500,
+    });
+    store.recordEquitySnapshot({
+      experimentId,
+      observedAt: 1_600,
+      cashUsd: 170,
+      liquidationValueUsd: 20,
+      equityUsd: 190,
+      openCostUsd: 25,
+      quoteCoverage: 1,
+      drawdownPct: 13.63636364,
+      peakEquityUsd: 220,
+      missingTokenCount: 0,
+    });
+    const config = previewRuntimeConfig();
+
+    const upgraded = store.startOrResumeExperiment({
+      accountId: "candidate-sticky",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-upgraded",
+      imageDigest: "image-upgraded",
+      lockfileHash: "lock-upgraded",
+      trustClass: "candidate",
+    }, 2_000);
+
+    expect(store.getExperiment(experimentId)?.endState).toEqual(upgraded.startState);
+    expect({
+      cashUsd: store.readCashBalance(200),
+      realizedPnlUsd: store.getTotalRealizedPnl(),
+      positions: store.listPositions(),
+      rawEvents: store.listRawEvents(),
+      decisions: store.listDecisions(),
+      auditCount: store.listAuditLog().total,
+    }).toEqual(economicBefore);
+    expect(store.listActiveSettlementFailures(upgraded.experimentId)).toEqual([
+      expect.objectContaining({
+        experimentId: upgraded.experimentId,
+        firstSeenAt: 1_000,
+        lastSeenAt: 1_500,
+        count: 2,
+      }),
+    ]);
+    expect(store.getLatestEquitySnapshot(upgraded.experimentId)).toBeNull();
+    expect(store.getCodeLineagePeakEquity(upgraded.experimentId)).toBe(220);
+    expect(store.recordSettlementFailure({
+      experimentId: upgraded.experimentId,
+      leaderId: "sports",
+      conditionId: "condition-a",
+      errorCode: "gamma_schema_incompatible",
+      errorMessage: "tick size still changed",
+      observedAt: 2_500,
+    }).count).toBe(3);
+    expect(store.resolveSettlementFailure({
+      experimentId: upgraded.experimentId,
+      leaderId: "sports",
+      conditionId: "condition-a",
+      resolvedAt: 3_000,
+    })).toBe(1);
+    expect(store.listActiveSettlementFailures(upgraded.experimentId)).toEqual([]);
+
+    const changed = previewRuntimeConfig();
+    changed.app.global.risk.maxOrderUsd += 1;
+    const fresh = store.startOrResumeExperiment({
+      accountId: "candidate-sticky",
+      candidateAddresses: changed.app.leaders.map((leader) => leader.address!),
+      config: changed,
+      gitSha: "git-upgraded",
+      imageDigest: "image-upgraded",
+      lockfileHash: "lock-upgraded",
+      trustClass: "candidate",
+    }, 4_000);
+    expect(store.listActiveSettlementFailures(fresh.experimentId)).toEqual([]);
+    expect(store.getCodeLineagePeakEquity(fresh.experimentId)).toBeNull();
+  });
+
+  it("inherits build-only controls atomically through prepared activation and abort", () => {
+    store.setExperimentControl({
+      experimentId,
+      state: "QUARANTINED",
+      reasonCode: "ACCOUNTING_DRIFT",
+      details: { differenceUsd: 0.02 },
+      triggeredAt: 1_000,
+    });
+    const config = previewRuntimeConfig();
+    store.beginExperimentBatch();
+    const prepared = store.startOrResumeExperiment({
+      accountId: "candidate-sticky",
+      candidateAddresses: config.app.leaders.map((leader) => leader.address!),
+      config,
+      gitSha: "git-prepared",
+      imageDigest: "image-prepared",
+      lockfileHash: "lock-prepared",
+      trustClass: "candidate",
+    }, 2_000);
+    expect(prepared.state).toBe("PREPARED");
+    expect(store.getExperimentControl(prepared.experimentId)).toMatchObject({
+      state: "QUARANTINED",
+      reasonCode: "ACCOUNTING_DRIFT",
+    });
+    store.commitExperimentBatch();
+    store.finalizePreparedExperiments([prepared.experimentId], 2_100);
+    expect(store.getActiveExperiment("candidate-sticky")?.experimentId)
+      .toBe(prepared.experimentId);
+
+    store.abortPreparedExperiments([prepared.experimentId], 2_200);
+    expect(store.getActiveExperiment("candidate-sticky")?.experimentId).toBe(experimentId);
+    expect(store.getExperiment(experimentId)?.endState).toBeNull();
+    expect(store.getExperimentControl(experimentId)).toMatchObject({
+      state: "QUARANTINED",
+      reasonCode: "ACCOUNTING_DRIFT",
+      triggeredAt: 1_000,
+    });
+  });
+
   it("reactivates only a DATA quarantine after 60 healthy minutes and review", () => {
     store.setExperimentControl({
       experimentId,

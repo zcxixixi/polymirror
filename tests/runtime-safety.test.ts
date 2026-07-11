@@ -111,6 +111,77 @@ describe("evaluateRuntimeSafety", () => {
     expect(store.isKillSwitchActive()).toBe(true);
   });
 
+  it("preserves the starting-capital fallback on the first equity assessment", async () => {
+    const config = start();
+    mockEquity.mockResolvedValue({
+      ...equity(160, 20),
+      peakEquityUsd: 200,
+    });
+
+    const result = await evaluateRuntimeSafety(config, store, {
+      nowMs: 10_000,
+      forceEquityRefresh: true,
+    });
+
+    expect(mockEquity).toHaveBeenCalledWith(config, store, undefined);
+    expect(result.control).toMatchObject({
+      state: "SETTLE_ONLY",
+      reasonCode: "RISK_MAX_LIQUIDATION_DRAWDOWN",
+    });
+  });
+
+  it("keeps the liquidation high-water mark across repeated build upgrades", async () => {
+    const config = start();
+    const first = store.getActiveExperiment("safety")!;
+    store.recordEquitySnapshot({
+      experimentId: first.experimentId,
+      observedAt: 1_000,
+      cashUsd: 250,
+      liquidationValueUsd: 0,
+      equityUsd: 250,
+      openCostUsd: 0,
+      quoteCoverage: 1,
+      drawdownPct: 0,
+      peakEquityUsd: 250,
+      missingTokenCount: 0,
+    });
+    const second = store.startOrResumeExperiment({
+      accountId: "safety",
+      candidateAddresses: [],
+      config,
+      gitSha: "git-2",
+      imageDigest: "image-2",
+      lockfileHash: "lock-2",
+      trustClass: "candidate",
+    }, 2_000);
+    const third = store.startOrResumeExperiment({
+      accountId: "safety",
+      candidateAddresses: [],
+      config,
+      gitSha: "git-3",
+      imageDigest: "image-3",
+      lockfileHash: "lock-3",
+      trustClass: "candidate",
+    }, 3_000);
+    expect(second.previousExperimentId).toBe(first.experimentId);
+    expect(third.previousExperimentId).toBe(second.experimentId);
+    mockEquity.mockResolvedValue({
+      ...equity(225, 10),
+      peakEquityUsd: 250,
+    });
+
+    const result = await evaluateRuntimeSafety(config, store, {
+      nowMs: 10_000,
+      forceEquityRefresh: true,
+    });
+
+    expect(mockEquity).toHaveBeenCalledWith(config, store, 250);
+    expect(result.control).toMatchObject({
+      state: "SETTLE_ONLY",
+      reasonCode: "RISK_MAX_LIQUIDATION_DRAWDOWN",
+    });
+  });
+
   it("starts a reviewed healthy window only after data issues clear", async () => {
     const config = start();
     store.setExperimentControl({

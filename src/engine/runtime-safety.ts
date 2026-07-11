@@ -137,6 +137,7 @@ export async function evaluateRuntimeSafety(
   }
 
   const latest = store.getLatestEquitySnapshot(experiment.experimentId);
+  const lineagePeakEquityUsd = store.getCodeLineagePeakEquity(experiment.experimentId);
   const refreshEquity = config.app.global.previewMode && (
     options.forceEquityRefresh
     || !latest
@@ -147,7 +148,7 @@ export async function evaluateRuntimeSafety(
     equity = await assessLiquidationEquity(
       config,
       store,
-      latest?.peakEquityUsd
+      lineagePeakEquityUsd ?? undefined
     );
     store.recordEquitySnapshot({
       experimentId: experiment.experimentId,

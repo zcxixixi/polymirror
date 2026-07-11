@@ -6,6 +6,9 @@ import {
   resolveCohortTableAccounts,
   selectExactCohortReports,
 } from "../src/sim/cohort-table-accounts.js";
+import { readCohortOperationalEvidence } from "../src/sim/cohort-operational-evidence.js";
+import { StateStore } from "../src/state/store.js";
+import { previewRuntimeConfig } from "./helpers/fixtures.js";
 
 let dir: string;
 let dataDir: string;
@@ -93,5 +96,96 @@ describe("selectExactCohortReports", () => {
       ["acct-a"],
       [{ accountId: "acct-a" }, { accountId: "acct-a" }]
     )).toThrow(/duplicate/i);
+  });
+});
+
+describe("readCohortOperationalEvidence", () => {
+  it("counts only the active experiment after build-only failures are carried forward", () => {
+    const accountId = "evidence-account";
+    addAccount(accountId);
+    const dbPath = join(dataDir, accountId, "preview.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const first = store.startOrResumeExperiment({
+      accountId,
+      candidateAddresses: [],
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    }, 1_000);
+    store.setExperimentControl({
+      experimentId: first.experimentId,
+      state: "QUARANTINED",
+      reasonCode: "DATA_SETTLEMENT_FAILURE",
+      triggeredAt: 1_100,
+    });
+    store.recordSettlementFailure({
+      experimentId: first.experimentId,
+      leaderId: "sports",
+      conditionId: "condition-a",
+      errorCode: "gamma_schema",
+      errorMessage: "bad schema",
+      observedAt: 1_200,
+    });
+    const second = store.startOrResumeExperiment({
+      accountId,
+      candidateAddresses: [],
+      config,
+      gitSha: "git-b",
+      imageDigest: "image-b",
+      lockfileHash: "lock-b",
+      trustClass: "candidate",
+    }, 2_000);
+    expect(second.previousExperimentId).toBe(first.experimentId);
+
+    expect(readCohortOperationalEvidence(dbPath)).toEqual({
+      controlState: "QUARANTINED",
+      settlementFailures: 1,
+    });
+    store.close();
+  });
+
+  it("does not leak historical failures across a new decision experiment", () => {
+    const accountId = "fresh-experiment-account";
+    addAccount(accountId);
+    const dbPath = join(dataDir, accountId, "preview.db");
+    const store = new StateStore(dbPath);
+    const config = previewRuntimeConfig();
+    const first = store.startOrResumeExperiment({
+      accountId,
+      candidateAddresses: [],
+      config,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    }, 1_000);
+    store.recordSettlementFailure({
+      experimentId: first.experimentId,
+      leaderId: "sports",
+      conditionId: "condition-a",
+      errorCode: "gamma_schema",
+      errorMessage: "bad schema",
+      observedAt: 1_200,
+    });
+    const changed = previewRuntimeConfig();
+    changed.app.global.risk.maxOrderUsd += 1;
+    store.startOrResumeExperiment({
+      accountId,
+      candidateAddresses: [],
+      config: changed,
+      gitSha: "git-a",
+      imageDigest: "image-a",
+      lockfileHash: "lock-a",
+      trustClass: "candidate",
+    }, 2_000);
+
+    expect(readCohortOperationalEvidence(dbPath)).toEqual({
+      controlState: "ACTIVE",
+      settlementFailures: 0,
+    });
+    store.close();
   });
 });
