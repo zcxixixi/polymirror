@@ -111,6 +111,19 @@ describe("evaluateRuntimeSafety", () => {
     expect(store.isKillSwitchActive()).toBe(true);
   });
 
+  it("allows an isolated preview experiment to continue until total simulated loss", async () => {
+    const config = start();
+    config.app.global.risk.maxLiquidationDrawdownPct = 100;
+    mockEquity.mockResolvedValue(equity(2, 99));
+
+    const result = await evaluateRuntimeSafety(config, store, {
+      nowMs: 10_000,
+      forceEquityRefresh: true,
+    });
+
+    expect(result.control?.state).toBe("ACTIVE");
+  });
+
   it("preserves the starting-capital fallback on the first equity assessment", async () => {
     const config = start();
     mockEquity.mockResolvedValue({

@@ -30,6 +30,7 @@ export const globalYamlSchema = z.object({
   risk: z.object({
     enable_copy_trading: z.boolean().default(true),
     daily_loss_cap_pct: z.number().positive().default(20),
+    max_liquidation_drawdown_pct: z.number().positive().max(100).default(10),
     starting_capital_usd: z.number().positive().default(1000),
     max_daily_volume_usd: z.number().nonnegative().default(2000),
     max_open_markets: z.number().int().positive().default(30),

@@ -37,6 +37,7 @@ export interface GlobalConfig {
 export interface RiskConfig {
   enableCopyTrading: boolean;
   dailyLossCapPct: number;
+  maxLiquidationDrawdownPct: number;
   startingCapitalUsd: number;
   maxDailyVolumeUsd: number;
   maxOpenMarkets: number;

@@ -62,6 +62,7 @@ const candidateSchema = z.object({
   address: z.string().regex(/^0x[A-Fa-f0-9]{40}$/).optional(),
   username: z.string().min(1).optional(),
   freshIntakePassed: z.boolean(),
+  simulationOnlyEnabled: z.boolean().optional(),
   freshIntakeEvidenceSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict().superRefine((candidate, context) => {
   if (candidate.freshIntakePassed && !candidate.freshIntakeEvidenceSha256) {
@@ -371,7 +372,8 @@ export function buildCandidateExperimentConfig(
     ARM_ORDER.map((armName) => {
       const arm = arms[armName];
       const configured = Boolean(candidate.address || candidate.username?.trim());
-      const copyEnabled = configured && candidate.freshIntakePassed;
+      const copyEnabled = configured
+        && (candidate.freshIntakePassed || candidate.simulationOnlyEnabled === true);
       const id = `exp_${input.cohortId}_${candidate.id}_${armName}_200`;
       if (id.length > 64) throw new Error(`generated account id exceeds 64 characters: ${id}`);
 
@@ -384,7 +386,8 @@ export function buildCandidateExperimentConfig(
           ...defaults.risk,
           enable_copy_trading: copyEnabled,
           starting_capital_usd: 200,
-          daily_loss_cap_pct: arm.dailyLossCapPct,
+          daily_loss_cap_pct: candidate.simulationOnlyEnabled ? 100 : arm.dailyLossCapPct,
+          max_liquidation_drawdown_pct: candidate.simulationOnlyEnabled ? 100 : 10,
           max_daily_volume_usd: arm.maxDailyVolumeUsd,
           max_open_markets: arm.maxOpenMarkets,
           max_order_usd: arm.fixedUsd,

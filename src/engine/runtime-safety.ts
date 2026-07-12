@@ -10,7 +10,6 @@ import {
 } from "./liquidation-equity.js";
 
 const EQUITY_REFRESH_MS = 60_000;
-const MAX_LIQUIDATION_DRAWDOWN_PCT = 10;
 
 export interface RuntimeSafetyResult {
   control: ExperimentControlRow | null;
@@ -168,7 +167,7 @@ export async function evaluateRuntimeSafety(
   if (equity && equity.quoteCoverage < 1) dataIssues.push("liquidation_quote_gap");
   if (
     equity
-    && equity.drawdownPct >= MAX_LIQUIDATION_DRAWDOWN_PCT
+    && equity.drawdownPct >= config.app.global.risk.maxLiquidationDrawdownPct
     && control.state === "ACTIVE"
   ) {
     control = store.setExperimentControl({

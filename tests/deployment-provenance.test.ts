@@ -195,7 +195,8 @@ describe("Candidate deployment provenance", () => {
     expect(deploy).toContain("loaded.accounts.length !== 6");
     expect(deploy).toContain("serializeRequiredReportAccounts");
     expect(deploy).toContain("export SHADOW_REPORT_ACCOUNTS");
-    expect(deploy).toContain("no approved Candidate is copy-enabled");
+    expect(deploy).toContain("no Candidate is copy-enabled");
+    expect(deploy).toContain("simulationOnlyEnabled");
     expect(deploy).toContain("org.opencontainers.image.revision");
     expect(deploy).toContain("image revision does not match HEAD");
     expect(deploy).toContain("container image does not match validated image");

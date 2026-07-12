@@ -54,6 +54,7 @@ export function previewRuntimeConfig(
         risk: {
           enableCopyTrading: true,
           dailyLossCapPct: 20,
+          maxLiquidationDrawdownPct: 10,
           startingCapitalUsd: 500,
           maxDailyVolumeUsd: 500,
           maxOpenMarkets: 15,

@@ -188,6 +188,7 @@ function mapGlobal(raw: GlobalYaml) {
     risk: {
       enableCopyTrading: raw.risk.enable_copy_trading,
       dailyLossCapPct: raw.risk.daily_loss_cap_pct,
+      maxLiquidationDrawdownPct: raw.risk.max_liquidation_drawdown_pct,
       startingCapitalUsd: raw.risk.starting_capital_usd,
       maxDailyVolumeUsd: raw.risk.max_daily_volume_usd,
       maxOpenMarkets: raw.risk.max_open_markets,

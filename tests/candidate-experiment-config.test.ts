@@ -148,7 +148,7 @@ describe("buildCandidateExperimentConfig", () => {
     }
   });
 
-  it("builds only the user-approved b55 and dance watchlist into six preview arms", () => {
+  it("builds the user-authorized b55 and dance simulation-only cohort into six active preview arms", () => {
     const input = validateCandidateCohortJson(JSON.parse(
       readFileSync("config/candidate-cohorts/quality6-20260711-v1.json", "utf8")
     ));
@@ -160,8 +160,10 @@ describe("buildCandidateExperimentConfig", () => {
     ]);
     expect(result.accounts).toHaveLength(6);
     expect(result.accounts.every((account) =>
-      account.global.risk.enable_copy_trading === false
-      && account.leaders[0]?.enabled === false
+      account.global.risk.enable_copy_trading === true
+      && account.global.risk.daily_loss_cap_pct === 100
+      && account.global.risk.max_liquidation_drawdown_pct === 100
+      && account.leaders[0]?.enabled === true
       && account.global.preview_mode === true
     )).toBe(true);
     expect(result.accounts.map((account) => account.id)).toEqual([
@@ -394,7 +396,8 @@ describe("buildCandidateExperimentConfig", () => {
       };
     }).items;
     expect(Object.keys(candidateItems.properties).sort()).toEqual([
-      "address", "freshIntakeEvidenceSha256", "freshIntakePassed", "id", "username",
+      "address", "freshIntakeEvidenceSha256", "freshIntakePassed", "id",
+      "simulationOnlyEnabled", "username",
     ]);
     expect(candidateItems.required.sort()).toEqual(["freshIntakePassed", "id"]);
     expect(candidateItems["x-candidateFreshIntakeRules"]).toContain(

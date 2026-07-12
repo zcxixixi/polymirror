@@ -179,7 +179,7 @@ if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length !== expected
   throw new Error("intake evidence roster mismatch");
 }
 const evidenceRoot = realpathSync(dirname(manifestPath));
-let approvedCount = 0;
+let enabledCount = 0;
 for (const [id, address] of expected) {
   const candidate = approved.candidates.find((row) => row.id === id);
   const artifact = manifest.artifacts.find((row) => row.candidateId === id);
@@ -205,7 +205,7 @@ for (const [id, address] of expected) {
     throw new Error(`intake evidence payload mismatch: ${id}`);
   }
   if (candidate.freshIntakePassed === true) {
-    approvedCount += 1;
+    enabledCount += 1;
     if (candidate.freshIntakeEvidenceSha256 !== artifact.sha256 || artifact.approved !== true) {
       throw new Error(`freshIntakeEvidenceSha256 mismatch: ${id}`);
     }
@@ -213,10 +213,12 @@ for (const [id, address] of expected) {
     || candidate.freshIntakeEvidenceSha256 !== undefined
     || artifact.approved !== false) {
     throw new Error(`watchlist-only Candidate approval mismatch: ${id}`);
+  } else if (candidate.simulationOnlyEnabled === true) {
+    enabledCount += 1;
   }
 }
-if (approvedCount === 0) throw new Error("no approved Candidate in intake evidence");
-console.log(`validated ${approvedCount} approved Candidate(s)`);
+if (enabledCount === 0) throw new Error("no approved or simulation-authorized Candidate");
+console.log(`validated ${enabledCount} preview Candidate(s)`);
 NODE
 
 capacity_fields="$(node --input-type=module -e '
@@ -282,7 +284,8 @@ SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
     const approved = JSON.parse(readFileSync("/app/approved-cohort.json", "utf8"));
     const addresses = new Map(approved.candidates.map((row) => [row.id, {
       address: String(row.address).toLowerCase(),
-      approved: row.freshIntakePassed === true,
+      enabled: row.freshIntakePassed === true || row.simulationOnlyEnabled === true,
+      simulationOnly: row.simulationOnlyEnabled === true,
     }]));
     const arms = new Map([
       ["conservative", { fixed: 1, position: 10, volume: 40, markets: 10, loss: 5, slip: 0.015 }],
@@ -304,8 +307,8 @@ SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
         if (g.copyPriceMode !== "executable_guarded") throw new Error(`unguarded account rejected: ${id}`);
         if (g.execution.orderType !== "FOK") throw new Error(`non-FOK account rejected: ${id}`);
         if (g.risk.startingCapitalUsd !== 200) throw new Error(`non-200U account rejected: ${id}`);
-        if (g.risk.enableCopyTrading !== candidate.approved
-          || leader?.enabled !== candidate.approved) {
+        if (g.risk.enableCopyTrading !== candidate.enabled
+          || leader?.enabled !== candidate.enabled) {
           throw new Error(`approval/copy mismatch: ${id}`);
         }
         if (leader?.id !== candidateId || leader?.address?.toLowerCase() !== candidate.address) {
@@ -322,20 +325,21 @@ SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
           || g.risk.maxPositionPerTokenUsd !== arm.position
           || g.risk.maxDailyVolumeUsd !== arm.volume
           || g.risk.maxOpenMarkets !== arm.markets
-          || g.risk.dailyLossCapPct !== arm.loss
+          || g.risk.dailyLossCapPct !== (candidate.simulationOnly ? 100 : arm.loss)
+          || g.risk.maxLiquidationDrawdownPct !== (candidate.simulationOnly ? 100 : 10)
           || g.risk.slippageTolerance !== arm.slip
           || g.risk.slippageToleranceMode !== "relative_pct"
           || g.risk.positionCapBasis !== "cost"
           || g.risk.syncWalletBalance !== false) {
           throw new Error(`quality6 arm mismatch: ${id}`);
         }
-        if (candidate.approved) copyEnabled += 1;
+        if (candidate.enabled) copyEnabled += 1;
       }
     }
     if (loaded.accounts.some((account) => !expectedIds.has(account.id))) {
       throw new Error("unexpected account in quality6 config");
     }
-    if (copyEnabled === 0) throw new Error("no approved Candidate is copy-enabled");
+    if (copyEnabled === 0) throw new Error("no Candidate is copy-enabled");
     process.stdout.write(serializeRequiredReportAccounts(
       loaded.accounts.map((account) => account.id),
       6

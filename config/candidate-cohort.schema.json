@@ -43,6 +43,9 @@
           "freshIntakePassed": {
             "type": "boolean"
           },
+          "simulationOnlyEnabled": {
+            "type": "boolean"
+          },
           "freshIntakeEvidenceSha256": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"

@@ -35,6 +35,7 @@ export const globalSettingsPatchSchema = z.object({
     .object({
       enableCopyTrading: z.boolean().optional(),
       dailyLossCapPct: z.number().positive().optional(),
+      maxLiquidationDrawdownPct: z.number().positive().max(100).optional(),
       startingCapitalUsd: z.number().positive().optional(),
       maxDailyVolumeUsd: z.number().nonnegative().optional(),
       maxOpenMarkets: z.number().int().positive().optional(),
@@ -171,6 +172,7 @@ export function globalConfigToDto(global: Record<string, unknown>) {
     risk: {
       enableCopyTrading: r.enable_copy_trading ?? true,
       dailyLossCapPct: r.daily_loss_cap_pct ?? 20,
+      maxLiquidationDrawdownPct: r.max_liquidation_drawdown_pct ?? 10,
       startingCapitalUsd: r.starting_capital_usd ?? 1000,
       maxDailyVolumeUsd: r.max_daily_volume_usd ?? 2000,
       maxOpenMarkets: r.max_open_markets ?? 30,
@@ -240,6 +242,9 @@ function applyGlobalPatchToRecord(g: Record<string, unknown>, patch: GlobalSetti
     const r = patch.risk;
     if (r.enableCopyTrading !== undefined) risk.enable_copy_trading = r.enableCopyTrading;
     if (r.dailyLossCapPct !== undefined) risk.daily_loss_cap_pct = r.dailyLossCapPct;
+    if (r.maxLiquidationDrawdownPct !== undefined) {
+      risk.max_liquidation_drawdown_pct = r.maxLiquidationDrawdownPct;
+    }
     if (r.startingCapitalUsd !== undefined) risk.starting_capital_usd = r.startingCapitalUsd;
     if (r.maxDailyVolumeUsd !== undefined) risk.max_daily_volume_usd = r.maxDailyVolumeUsd;
     if (r.maxOpenMarkets !== undefined) risk.max_open_markets = r.maxOpenMarkets;
