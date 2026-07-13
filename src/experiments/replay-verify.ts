@@ -37,7 +37,8 @@ interface RawObservationEvidence { rawEventId: string; payloadHash: string; payl
 interface RawEvidence { rawEventId: string; sourceId: string | null; payloadHash: string; payloadJson: string; observedTimestamp: number; observationCount: number; rawOrder: number; observations: RawObservationEvidence[] }
 
 function round(value: number): number { return Math.round((value + Number.EPSILON) * 1e8) / 1e8; }
-function roundSettlementUsd(value: number): number { return Math.round(value * 100) / 100; }
+function roundSettlementCostUsd(value: number): number { return round(value); }
+function roundSettlementPayoutUsd(value: number): number { return Math.round(value * 1e6) / 1e6; }
 function guardedExecutionConstraints(
   config: RuntimeConfig,
   leader: LeaderConfig,
@@ -1314,8 +1315,8 @@ function validateAndApplyRedeem(
       const rowCost = requiredNumber(row, "costBasisUsd");
       const rowPayout = requiredNumber(row, "grossPayoutUsd");
       const rowPnl = requiredNumber(row, "realizedPnlUsd");
-      const expectedCost = roundSettlementUsd(position.shares * position.avgEntryPrice);
-      const expectedPayout = roundSettlementUsd(position.shares * payoutPerShare);
+      const expectedCost = roundSettlementCostUsd(position.shares * position.avgEntryPrice);
+      const expectedPayout = roundSettlementPayoutUsd(position.shares * payoutPerShare);
       if (Math.abs(shares - position.shares) > 1e-8 || Math.abs(rowCost - expectedCost) > 1e-6
         || Math.abs(rowPayout - expectedPayout) > 1e-6 || Math.abs(rowPnl - (rowPayout - rowCost)) > 1e-6) {
         throw new Error("Aggregated settlement accounting evidence differs");
@@ -1326,8 +1327,8 @@ function validateAndApplyRedeem(
       positions.delete(key);
     }
     actualShares = round(actualShares);
-    actualCost = roundSettlementUsd(actualCost);
-    actualPayout = roundSettlementUsd(actualPayout);
+    actualCost = roundSettlementCostUsd(actualCost);
+    actualPayout = roundSettlementPayoutUsd(actualPayout);
     if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
       throw new Error("Aggregated settlement totals differ");
     }
@@ -1353,8 +1354,8 @@ function validateAndApplyRedeem(
       closedPositions++;
       positions.delete(key);
     }
-    actualCost = roundSettlementUsd(actualCost);
-    actualPayout = roundSettlementUsd(actualPayout);
+    actualCost = roundSettlementCostUsd(actualCost);
+    actualPayout = roundSettlementPayoutUsd(actualPayout);
     if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
       throw new Error("Outcome evidence accounting differs");
     }
@@ -1376,8 +1377,8 @@ function validateAndApplyRedeem(
     const key = stateKey(leaderId, tokenId);
     const position = positions.get(key);
     if (!position) throw new Error("Settlement attempts to close a missing position");
-    const actualCost = roundSettlementUsd(position.shares * position.avgEntryPrice);
-    const actualPayout = roundSettlementUsd(position.shares * payoutPerShare);
+    const actualCost = roundSettlementCostUsd(position.shares * position.avgEntryPrice);
+    const actualPayout = roundSettlementPayoutUsd(position.shares * payoutPerShare);
     if (Math.abs(actualCost - cost) > 1e-6 || Math.abs(actualPayout - payout) > 1e-6) {
       throw new Error("Settlement accounting evidence differs");
     }

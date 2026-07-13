@@ -2775,13 +2775,13 @@ export class StateStore {
 
       const positions = this.listPositionsByCondition(entry.leaderId, entry.conditionId);
       const closedPositions = positions.length;
-      const costUsd = roundUsd(
+      const costUsd = roundAccounting(
         positions.reduce((sum, p) => sum + p.shares * p.avgEntryPrice, 0)
       );
-      const payoutUsd = roundUsd(
+      const payoutUsd = roundCashUsd(
         positions.reduce((sum, p) => sum + (winners.has(p.tokenId) ? p.shares : 0), 0)
       );
-      const realizedPnl = roundUsd(payoutUsd - costUsd);
+      const realizedPnl = roundAccounting(payoutUsd - costUsd);
 
       for (const pos of positions) {
         this.db
@@ -2844,9 +2844,9 @@ export class StateStore {
       }
 
       this.markSeen(entry.tradeKey, entry.leaderId);
-      const payoutUsd = roundUsd(entry.payoutUsd);
-      const costUsd = roundUsd(row.shares * row.avgEntryPrice);
-      const realizedPnl = roundUsd(payoutUsd - costUsd);
+      const payoutUsd = roundCashUsd(entry.payoutUsd);
+      const costUsd = roundAccounting(row.shares * row.avgEntryPrice);
+      const realizedPnl = roundAccounting(payoutUsd - costUsd);
 
       this.db
         .prepare(
@@ -2904,9 +2904,9 @@ export class StateStore {
 
       if (rows.length === 0) return 0;
       const settlements = rows.map((row) => {
-        const payoutUsd = roundUsd(row.shares * payoutPerShare);
-        const costUsd = roundUsd(row.shares * row.avgEntryPrice);
-        const realizedPnl = roundUsd(payoutUsd - costUsd);
+        const payoutUsd = roundCashUsd(row.shares * payoutPerShare);
+        const costUsd = roundAccounting(row.shares * row.avgEntryPrice);
+        const realizedPnl = roundAccounting(payoutUsd - costUsd);
         return {
           leaderId: row.leaderId,
           tokenId,
@@ -2929,9 +2929,13 @@ export class StateStore {
       const totalShares = Math.round(
         settlements.reduce((sum, row) => sum + row.shares, 0) * 100_000_000
       ) / 100_000_000;
-      const costBasisUsd = roundUsd(settlements.reduce((sum, row) => sum + row.costBasisUsd, 0));
-      const grossPayoutUsd = roundUsd(settlements.reduce((sum, row) => sum + row.grossPayoutUsd, 0));
-      const realizedPnlUsd = roundUsd(settlements.reduce((sum, row) => sum + row.realizedPnlUsd, 0));
+      const costBasisUsd = roundAccounting(
+        settlements.reduce((sum, row) => sum + row.costBasisUsd, 0)
+      );
+      const grossPayoutUsd = roundCashUsd(
+        settlements.reduce((sum, row) => sum + row.grossPayoutUsd, 0)
+      );
+      const realizedPnlUsd = roundAccounting(grossPayoutUsd - costBasisUsd);
       if (realizedPnlUsd !== 0) this.addRealizedPnl(realizedPnlUsd);
       if (preview && cashInitialUsd !== undefined && grossPayoutUsd !== 0) {
         this.adjustCash(grossPayoutUsd, cashInitialUsd);

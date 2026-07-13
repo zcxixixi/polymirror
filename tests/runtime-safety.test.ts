@@ -72,6 +72,27 @@ describe("evaluateRuntimeSafety", () => {
     });
   });
 
+  it("does not quarantine balanced fractional settlements after repeated sub-cent payouts", async () => {
+    const config = start();
+    for (let index = 0; index < 4; index++) {
+      const tokenId = `fractional-${index}`;
+      store.applyCopyFill("leader", tokenId, "BUY", 1, 0.333333);
+      store.adjustCash(-0.333333, 200);
+      store.recordTokenSettlement(tokenId, 0.333333, true, 200, {
+        settlementSource: "token_resolution",
+        conditionId: `condition-${index}`,
+      });
+    }
+
+    const result = await evaluateRuntimeSafety(config, store, {
+      nowMs: 10_000,
+      forceEquityRefresh: true,
+    });
+
+    expect(result.capitalDeltaUsd).toBe(0);
+    expect(result.control?.state).toBe("ACTIVE");
+  });
+
   it("quarantines a settlement failure after three observations", async () => {
     const config = start();
     for (let index = 0; index < 3; index++) {
