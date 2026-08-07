@@ -112,6 +112,10 @@
 
 ## 获取进一步帮助
 
+### 如何联系项目方？
+
+通过 Telegram 社区：[t.me/laoshalab](https://t.me/laoshalab)。Dashboard 侧边栏底部也有同一入口。也可对照 CHANGELOG 或在仓库提交 Issue。
+
 | 文档 | 适用场景 |
 |------|----------|
 | **PRODUCT_SCOPE.md** | 自托管边界 · 非 SaaS |

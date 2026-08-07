@@ -2,7 +2,7 @@ import type { AccountApiContext } from "../accounts/manager.js";
 import type { ApiContext } from "./routes.js";
 import type { LeaderConfig } from "../config/types.js";
 import { readNormalizedConfigDocument, removeLeaderFromAccount, writeNormalizedConfigDocument } from "../config/write.js";
-import { ClobExecutor } from "../executor/clob.js";
+import { cancelPendingOrderWithFillReconcile } from "../engine/mode-transition.js";
 import { isPreviewOrderId } from "../engine/pending-orders.js";
 import { buildUnfollowMessage, liquidateLeaderPositions } from "../engine/unfollow-liquidate.js";
 import { syncAggregateHealth } from "../notify/health.js";
@@ -34,7 +34,6 @@ async function cancelLeaderPendingOrders(
 
   const config = actx.getConfig();
   const preview = config.app.global.previewMode;
-  const executor = preview ? null : new ClobExecutor(config.wallet, config.app.global);
 
   let cancelled = 0;
   let failed = 0;
@@ -47,13 +46,14 @@ async function cancelLeaderPendingOrders(
       continue;
     }
 
-    const result = await executor!.cancelOrder(row.orderId);
+    const result = await cancelPendingOrderWithFillReconcile(config, actx.store, row.orderId, {
+      reasonTag: "unfollow",
+    });
     if (!result.ok) {
       failed++;
-      errors.push(`${row.orderId.slice(0, 12)}: ${result.error ?? "cancel failed"}`);
+      errors.push(`${row.orderId.slice(0, 12)}: ${result.error}`);
       continue;
     }
-    actx.store.removePendingOrder(row.orderId);
     cancelled++;
   }
 

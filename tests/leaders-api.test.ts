@@ -89,3 +89,31 @@ describe("findLeaderIdForTrader", () => {
     expect(findLeaderIdForTrader(leaders, "0x" + "c".repeat(40), "unknown")).toBeUndefined();
   });
 });
+
+describe("duplicate leader address detection", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "pm-leader-dup-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects same address already present in account leaders", () => {
+    const address = "0x" + "a".repeat(40);
+    const path = writeTestConfig(dir, [
+      {
+        id: "existing",
+        address,
+        enabled: true,
+        strategy: { type: "PERCENTAGE", copy_size: 5 },
+      },
+    ]);
+    const normalized = readNormalizedConfigDocument(path);
+    const account = normalized.accounts[0]!;
+    const dup = account.leaders.find((l) => l.address?.toLowerCase() === address.toLowerCase());
+    expect(dup?.id).toBe("existing");
+  });
+});

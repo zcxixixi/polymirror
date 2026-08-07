@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Wallet } from "ethers";
 import { createSecureClient, relayerApiKey, type ApiKeyCreds, type SecureClient, type SecureClientOptions } from "@polymarket/client";
 import { signerFrom } from "@polymarket/client/ethers-v5";
@@ -12,14 +13,19 @@ import { logInfo, logError } from "../notify/logger.js";
 import { ensureUndiciGlobalProxy } from "../util/proxy.js";
 
 // Keyed per wallet so multi-account live runs never reuse another wallet's
-// SecureClient / approval state (cacheKey includes proxyAddress + creds + mode).
+// SecureClient / approval state (includes private-key fingerprint so rotations invalidate).
 const clientByKey = new Map<string, Promise<SecureClient>>();
 const tradingReadyByKey = new Map<string, Promise<void>>();
 const approvalsReadyByKey = new Map<string, boolean>();
 
+function privateKeyFingerprint(privateKey: string): string {
+  return createHash("sha256").update(privateKey.trim().toLowerCase()).digest("hex").slice(0, 16);
+}
+
 function cacheKey(wallet: WalletConfig): string {
   return [
     wallet.proxyAddress,
+    privateKeyFingerprint(wallet.privateKey),
     wallet.apiKey ?? "",
     wallet.relayerApiKey ?? "",
     wallet.relayerApiKeyAddress ?? "",

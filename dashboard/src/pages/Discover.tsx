@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { apiFetch } from "../api/client";
+import { apiFetch, getActiveAccountId } from "../api/client";
 import {
   type DiscoverCategory,
   type DiscoverOrderBy,
@@ -14,14 +14,20 @@ import {
 import { AddTraderModal } from "../components/AddTraderModal";
 import { UnfollowLeaderButton } from "../components/UnfollowLeaderButton";
 import { PageHeader } from "../components/ui/PageHeader";
+import { useToast } from "../components/ui/Toast";
 import { useT } from "../i18n/I18nProvider";
+import { parseFollowTarget } from "../utils/leaderId";
 
 export function DiscoverPage() {
   const t = useT();
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const accountId = getActiveAccountId();
   const [category, setCategory] = useState<DiscoverCategory>("OVERALL");
   const [timePeriod, setTimePeriod] = useState<DiscoverTimePeriod>("MONTH");
   const [orderBy, setOrderBy] = useState<DiscoverOrderBy>("PNL");
   const [modalTrader, setModalTrader] = useState<DiscoverTraderRow | null>(null);
+  const [lookup, setLookup] = useState("");
 
   const categories = useMemo(
     () =>
@@ -48,13 +54,16 @@ export function DiscoverPage() {
     [t]
   );
 
-  const queryKey = useMemo(() => ["discover", category, timePeriod, orderBy], [category, timePeriod, orderBy]);
+  const queryKey = useMemo(
+    () => ["discover", accountId, category, timePeriod, orderBy],
+    [accountId, category, timePeriod, orderBy]
+  );
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey,
     queryFn: () =>
       apiFetch<DiscoverResponse>(
-        discoverQuery({ category, timePeriod, orderBy, limit: 30 })
+        discoverQuery({ category, timePeriod, orderBy, limit: 30, accountId })
       ),
     staleTime: 60_000,
   });
@@ -78,6 +87,37 @@ export function DiscoverPage() {
           </button>
         }
       />
+
+      <form
+        className="panel discover-lookup"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const target = parseFollowTarget(lookup);
+          if (!target) {
+            toast(t("discover.lookupInvalid"), "error");
+            return;
+          }
+          if (target.mode === "address") {
+            navigate(`/discover/trader/${encodeURIComponent(target.address)}`);
+            return;
+          }
+          navigate(`/leaders/new?username=${encodeURIComponent(target.username)}`);
+        }}
+      >
+        <label className="form-label">
+          {t("discover.lookupLabel")}
+          <input
+            type="text"
+            className="mono"
+            value={lookup}
+            onChange={(e) => setLookup(e.target.value)}
+            placeholder={t("discover.lookupPlaceholder")}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <button type="submit">{t("discover.lookupSubmit")}</button>
+      </form>
 
       <div className="discover-filters">
         <div className="filter-group">

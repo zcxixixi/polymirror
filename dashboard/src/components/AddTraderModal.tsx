@@ -30,8 +30,10 @@ export function AddTraderModal({ trader, onClose, onSuccess }: Props) {
         limits: { maxOrderUsd: parseFloat(maxOrderUsd) },
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["leaders"] });
-      queryClient.invalidateQueries({ queryKey: ["discover"] });
+      void queryClient.invalidateQueries({ queryKey: ["leaders"] });
+      void queryClient.invalidateQueries({ queryKey: ["discover"] });
+      void queryClient.invalidateQueries({ queryKey: ["discover-trader"] });
+      void queryClient.invalidateQueries({ queryKey: ["status"] });
       onSuccess();
       onClose();
     },

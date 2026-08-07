@@ -55,8 +55,13 @@ export async function listRedeemablePositions(
   for await (const page of paginator) {
     for (const p of page.items) {
       const conditionId = p.conditionId != null ? String(p.conditionId) : "";
+      const raw = p as { tokenId?: unknown; asset?: unknown };
       const tokenId =
-        p.tokenId != null ? String(p.tokenId) : p.asset != null ? String(p.asset) : "";
+        raw.tokenId != null
+          ? String(raw.tokenId)
+          : raw.asset != null
+            ? String(raw.asset)
+            : "";
       if (!conditionId || !tokenId) continue;
       const size = num(p.size);
       if (size < 0.01) continue;

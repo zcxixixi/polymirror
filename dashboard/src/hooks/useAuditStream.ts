@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { accountApi, getToken, type AuditRow } from "../api/client";
+import { accountApi, getActiveAccountId, getToken, type AuditRow } from "../api/client";
 
 interface UseAuditStreamOptions {
   enabled?: boolean;
+  /** When this changes, the SSE connection is torn down and restarted. */
+  accountId?: string | null;
   onAudit?: (row: AuditRow) => void;
 }
 
@@ -25,11 +27,16 @@ function parseSseChunk(buffer: string): { events: { event: string; data: string 
   return { events, rest };
 }
 
-export function useAuditStream({ enabled = true, onAudit }: UseAuditStreamOptions = {}) {
+export function useAuditStream({
+  enabled = true,
+  accountId,
+  onAudit,
+}: UseAuditStreamOptions = {}) {
   const [connected, setConnected] = useState(false);
   const lastIdRef = useRef(0);
   const onAuditRef = useRef(onAudit);
   onAuditRef.current = onAudit;
+  const activeAccountId = accountId ?? getActiveAccountId();
 
   const reset = useCallback(() => {
     lastIdRef.current = 0;
@@ -40,6 +47,9 @@ export function useAuditStream({ enabled = true, onAudit }: UseAuditStreamOption
       setConnected(false);
       return;
     }
+
+    // New account (or reconnect): start from the latest cursor for that stream.
+    lastIdRef.current = 0;
 
     const ac = new AbortController();
     let retryMs = 2000;
@@ -99,7 +109,7 @@ export function useAuditStream({ enabled = true, onAudit }: UseAuditStreamOption
           }
 
           setConnected(false);
-        } catch (e) {
+        } catch {
           if (ac.signal.aborted) return;
           setConnected(false);
           await new Promise((r) => setTimeout(r, retryMs));
@@ -113,7 +123,7 @@ export function useAuditStream({ enabled = true, onAudit }: UseAuditStreamOption
       ac.abort();
       setConnected(false);
     };
-  }, [enabled]);
+  }, [enabled, activeAccountId]);
 
   return { connected, reset };
 }

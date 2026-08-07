@@ -10,6 +10,7 @@ import {
 } from "../api/leaders";
 import { useToast } from "./ui/Toast";
 import { useT } from "../i18n/I18nProvider";
+import { suggestLeaderId } from "../utils/leaderId";
 
 interface Props {
   initial: LeaderFormData;
@@ -120,7 +121,17 @@ export function LeaderForm({ initial, isEdit }: Props) {
             type="text"
             className="mono"
             value={form.address}
-            onChange={(e) => set("address", e.target.value)}
+            onChange={(e) => {
+              const address = e.target.value;
+              setForm((f) => ({
+                ...f,
+                address,
+                id:
+                  !isEdit && (!f.id || f.id.startsWith("trader_"))
+                    ? suggestLeaderId(undefined, address.trim())
+                    : f.id,
+              }));
+            }}
             placeholder="0x..."
             required
           />
@@ -131,7 +142,17 @@ export function LeaderForm({ initial, isEdit }: Props) {
           <input
             type="text"
             value={form.username}
-            onChange={(e) => set("username", e.target.value)}
+            onChange={(e) => {
+              const username = e.target.value;
+              setForm((f) => ({
+                ...f,
+                username,
+                id:
+                  !isEdit && (!f.id || f.id.startsWith("trader_"))
+                    ? suggestLeaderId(username, "")
+                    : f.id,
+              }));
+            }}
             placeholder="polymarket-handle"
             required
           />

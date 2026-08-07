@@ -22,6 +22,8 @@ import {
 } from "../config/write.js";
 import { assertLiveTradingAllowed, assertLiveTradingForAccounts } from "../engine/risk.js";
 import { applyProxyFromYaml } from "../util/proxy.js";
+import { withReloadLock } from "../engine/cycle-lock.js";
+import { resetSecureClientCache } from "../executor/secure-client.js";
 
 export interface AccountApiContext {
   accountId: string;
@@ -139,12 +141,24 @@ export class AccountManager {
   }
 
   async reloadConfig(): Promise<void> {
+    await withReloadLock(() => this.reloadConfigUnlocked());
+  }
+
+  /**
+   * Reload config/stores without taking the control-plane lock.
+   * Callers that already hold `withReloadLock` (e.g. flush → write → reload)
+   * must use this to avoid nested locking.
+   */
+  async reloadConfigUnlocked(): Promise<void> {
     this.normalized = readNormalizedConfig(this.configFileKey);
     const multi = loadMultiAccountConfig(this.configFileKey);
     assertLiveTradingForAccounts(multi.accounts);
     applyProxyFromYaml(this.normalized.defaultsGlobal.proxy);
     this.pollIntervalMs = multi.pollIntervalMs;
     this.healthPort = multi.healthPort;
+
+    // Drop cached SecureClients so wallet/key changes after reload take effect.
+    resetSecureClientCache();
 
     const configIds = new Set(multi.accounts.map((a) => a.id));
     for (const id of [...this.runtimes.keys()]) {

@@ -1,6 +1,6 @@
-import type { Activity } from "../src/monitor/data-api.js";
-import { POLYMARKET_BUILDER_CODE } from "../src/config/builder.js";
-import type { LeaderConfig, RuntimeConfig } from "../src/config/types.js";
+import type { Activity } from "../../src/monitor/data-api.js";
+import { POLYMARKET_BUILDER_CODE } from "../../src/config/builder.js";
+import type { LeaderConfig, RuntimeConfig } from "../../src/config/types.js";
 
 export function testActivity(overrides: Partial<Activity> = {}): Activity {
   return {

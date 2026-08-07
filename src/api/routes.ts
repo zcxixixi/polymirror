@@ -167,7 +167,7 @@ export async function handleApiRequest(
   }
 
   if (path === "/api/kill-switch/reset" && method === "POST") {
-    return resetKillSwitch(legacy);
+    return resetKillSwitch(ctx, actx);
   }
 
   if (path === "/api/copy-trading/stop" && method === "POST") {
@@ -508,6 +508,29 @@ async function handleCreateLeader(
     if (account?.leaders.some((l) => l.id === input.id)) {
       return { status: 409, body: { error: `Leader id already exists: ${input.id}` } };
     }
+
+    if (input.mode === "address") {
+      const addr = input.address!.trim().toLowerCase();
+      const dup = account?.leaders.find((l) => l.address?.toLowerCase() === addr);
+      if (dup) {
+        return {
+          status: 409,
+          body: { error: `Already following this address as leader: ${dup.id}` },
+        };
+      }
+    } else {
+      const user = input.username!.replace(/^@/, "").trim().toLowerCase();
+      const dup = account?.leaders.find(
+        (l) => l.username?.replace(/^@/, "").trim().toLowerCase() === user
+      );
+      if (dup) {
+        return {
+          status: 409,
+          body: { error: `Already following this username as leader: ${dup.id}` },
+        };
+      }
+    }
+
     const row = leaderWriteToYaml(input);
     const next = upsertLeaderInAccount(normalized, actx.accountId, row);
     writeNormalizedConfigDocument(ctx.configPath, next);

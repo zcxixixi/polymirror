@@ -5,6 +5,10 @@ import { dirname, join } from "node:path";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
 
+/** Must match daemon `health_port` / HEALTH_PORT (templates default to 8080). */
+const apiPort = process.env.VITE_API_PORT || process.env.HEALTH_PORT || "8080";
+const apiOrigin = `http://127.0.0.1:${apiPort}`;
+
 export default defineConfig({
   plugins: [react()],
   base: "/",
@@ -18,8 +22,8 @@ export default defineConfig({
       allow: [rootDir, join(rootDir, "..")],
     },
     proxy: {
-      "/api": "http://127.0.0.1:8081",
-      "/health": "http://127.0.0.1:8081",
+      "/api": apiOrigin,
+      "/health": apiOrigin,
     },
   },
 });

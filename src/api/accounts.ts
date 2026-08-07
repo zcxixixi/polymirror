@@ -13,6 +13,7 @@ import {
   upsertEnvFile,
   walletEnvKeys,
   walletEnvSuffix,
+  walletEnvSuffixesCollide,
 } from "../config/env-file.js";
 import { loadWalletConfig } from "../config/load.js";
 import {
@@ -67,12 +68,27 @@ export async function createAccount(
 
     const privateKey = normalizePrivateKey(input.privateKey)!;
     const walletEnv = walletEnvSuffix(input.id);
+    const envCollision = normalized.accounts.find(
+      (a) =>
+        walletEnvSuffixesCollide(a.id, input.id) ||
+        (a.wallet_env ?? walletEnvSuffix(a.id)) === walletEnv
+    );
+    if (envCollision) {
+      return {
+        status: 409,
+        body: {
+          error:
+            `Account id "${input.id}" collides with "${envCollision.id}" on .env key suffix ` +
+            `(${walletEnv || "(default)"}). Use a distinct id (e.g. avoid default/Default or acc-1/acc_1).`,
+        },
+      };
+    }
     const signatureType = resolvedSignatureType(input);
 
     const envUpdates = walletEnvKeys(walletEnv, {
       privateKey,
       address: input.address.trim(),
-      signatureType: signatureType !== 0 ? signatureType : undefined,
+      signatureType,
     });
     upsertEnvFile(envUpdates);
     applyEnvToProcess(envUpdates);
@@ -255,7 +271,7 @@ export async function updateAccount(
     const envUpdates = walletEnvKeys(walletEnv, {
       privateKey: nextPrivateKey,
       address: nextAddress,
-      signatureType: signatureType !== 0 ? signatureType : undefined,
+      signatureType,
     });
     upsertEnvFile(envUpdates);
     applyEnvToProcess(envUpdates);

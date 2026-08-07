@@ -58,6 +58,7 @@ export function SettingsPage() {
   const [priorityText, setPriorityText] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [confirmLive, setConfirmLive] = useState(false);
+  const [confirmPreview, setConfirmPreview] = useState(false);
   const [tgToken, setTgToken] = useState("");
   const [tgChatId, setTgChatId] = useState("");
 
@@ -135,7 +136,10 @@ export function SettingsPage() {
 
   const reload = useMutation({
     mutationFn: reloadConfig,
-    onSuccess: () => toast(t("settings.reloaded"), "success"),
+    onSuccess: () => {
+      toast(t("settings.reloaded"), "success");
+      void queryClient.invalidateQueries();
+    },
     onError: (e: Error) => setErr(e.message),
   });
 
@@ -361,6 +365,7 @@ export function SettingsPage() {
               />
               enable_copy_trading
             </label>
+            <p className="muted form-hint">{t("settings.enableCopyTradingHint")}</p>
             <div className="form-row">
               <label className="form-label">
                 daily_loss_cap_pct
@@ -699,6 +704,7 @@ export function SettingsPage() {
               </button>
             </div>
 
+            <p className="muted form-hint">{t("settings.proxyGlobalHint")}</p>
             <p className="muted form-hint">{t("settings.proxyEnvFallback")}</p>
           </>
         )}
@@ -720,7 +726,7 @@ export function SettingsPage() {
                 type="button"
                 className="secondary"
                 disabled={toPreview.isPending || data.previewMode}
-                onClick={() => toPreview.mutate()}
+                onClick={() => setConfirmPreview(true)}
               >
                 {t("settings.toPreview")}
               </button>
@@ -733,6 +739,7 @@ export function SettingsPage() {
               </button>
             </div>
             <p className="muted form-hint">{t("settings.modeHint")}</p>
+            <p className="muted form-hint">{t("settings.stopVsModeHint")}</p>
           </>
         )}
 
@@ -769,6 +776,27 @@ export function SettingsPage() {
           toLive.mutate(undefined, { onSettled: () => setConfirmLive(false) });
         }}
         onCancel={() => setConfirmLive(false)}
+      />
+
+      <ConfirmModal
+        open={confirmPreview}
+        title={t("settings.confirmPreviewTitle")}
+        variant="danger"
+        confirmLabel={t("settings.confirmPreviewBtn")}
+        loading={toPreview.isPending}
+        description={
+          <>
+            <p style={{ margin: "0 0 0.75rem" }}>{t("settings.confirmPreviewP1")}</p>
+            <ul style={{ margin: 0, paddingLeft: "1.25rem", color: "var(--text-secondary)" }}>
+              <li>{t("settings.confirmPreviewLi1")}</li>
+              <li>{t("settings.confirmPreviewLi2")}</li>
+            </ul>
+          </>
+        }
+        onConfirm={() => {
+          toPreview.mutate(undefined, { onSettled: () => setConfirmPreview(false) });
+        }}
+        onCancel={() => setConfirmPreview(false)}
       />
     </>
   );

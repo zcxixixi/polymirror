@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, type AuditRow } from "../api/client";
+import { apiFetch, getActiveAccountId, type AuditRow } from "../api/client";
 import { FilterBar } from "../components/ui/FilterBar";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useAuditStream } from "../hooks/useAuditStream";
@@ -12,18 +12,19 @@ const ACTIONS = ["", "DETECT", "SKIP", "COPY", "ERROR"] as const;
 export function ActivityPage() {
   const t = useT();
   const queryClient = useQueryClient();
+  const accountId = getActiveAccountId();
   const [leaderId, setLeaderId] = useState("");
   const [action, setAction] = useState("");
   const [liveRows, setLiveRows] = useState<AuditRow[]>([]);
   const [flashIds, setFlashIds] = useState<Set<number>>(() => new Set());
 
   const leaders = useQuery({
-    queryKey: ["leaders"],
+    queryKey: ["leaders", accountId],
     queryFn: () => apiFetch<{ leaders: { id: string }[] }>("/api/leaders"),
   });
 
   const audit = useQuery({
-    queryKey: ["audit", leaderId, action],
+    queryKey: ["audit", accountId, leaderId, action],
     queryFn: () => {
       const params = new URLSearchParams({ limit: "100" });
       if (leaderId) params.set("leaderId", leaderId);
@@ -35,7 +36,8 @@ export function ActivityPage() {
 
   useEffect(() => {
     setLiveRows([]);
-  }, [leaderId, action]);
+    setFlashIds(new Set());
+  }, [leaderId, action, accountId]);
 
   const onAudit = useCallback(
     (row: AuditRow) => {
@@ -56,14 +58,14 @@ export function ActivityPage() {
         });
       }, 2200);
 
-      void queryClient.invalidateQueries({ queryKey: ["audit", leaderId, action] });
+      void queryClient.invalidateQueries({ queryKey: ["audit", accountId, leaderId, action] });
       void queryClient.invalidateQueries({ queryKey: ["audit-recent"] });
       void queryClient.invalidateQueries({ queryKey: ["stats-hourly"] });
     },
-    [leaderId, action, queryClient]
+    [accountId, leaderId, action, queryClient]
   );
 
-  const { connected } = useAuditStream({ onAudit });
+  const { connected } = useAuditStream({ accountId, onAudit });
 
   const rows = useMemo(() => {
     const map = new Map<number, AuditRow>();

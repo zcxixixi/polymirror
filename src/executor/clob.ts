@@ -115,128 +115,124 @@ export class ClobExecutor {
     const tick = parseFloat(meta.tickSize);
     const price = roundToTick(req.price, tick);
     const orderType = toOrderType(this.global.execution.orderType);
-    const retries = this.global.execution.retryLimit;
 
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const submitted = await this.backend.submitOrder({
-          tokenId: req.tokenId,
-          side: req.side,
-          price,
-          size: req.size,
-          orderType: this.global.execution.orderType,
-          tickSize: meta.tickSize,
-          negRisk: meta.negRisk,
-        });
+    try {
+      const submitted = await this.backend.submitOrder({
+        tokenId: req.tokenId,
+        side: req.side,
+        price,
+        size: req.size,
+        orderType: this.global.execution.orderType,
+        tickSize: meta.tickSize,
+        negRisk: meta.negRisk,
+      });
 
-        const postError = submitted.error ?? extractPostOrderError(submitted.raw);
-        if (postError) {
-          return {
-            preview: false,
-            error: postError,
-            filledShares: 0,
-            filledUsd: 0,
-            pendingRemaining: 0,
-          };
-        }
-
-        const immediate = {
-          takingAmount: submitted.takingAmount,
-          makingAmount: submitted.makingAmount,
-          status: submitted.status,
-        };
-        let orderId = submitted.orderId ?? extractOrderIdFromPostResponse(submitted.raw);
-
-        if (!orderId) {
-          const immFill = parseImmediateFill(immediate, req.side, price);
-          if (immFill.shares > 0) {
-            const shares = Math.min(immFill.shares, req.size);
-            const pendingRemaining = Math.max(
-              0,
-              Math.round((req.size - shares) * 100) / 100
-            );
-            if (pendingRemaining > 0) {
-              const recovered = await this.findMatchingOpenOrder(req, price);
-              if (recovered?.orderId) return recovered;
-              return {
-                preview: false,
-                error: "Partial fill without order ID — cannot track remaining GTC",
-                filledShares: shares,
-                filledUsd:
-                  immFill.usd > 0 ? immFill.usd : Math.round(shares * price * 100) / 100,
-                orderStatus: immFill.status || immediate.status || "matched",
-                pendingRemaining: 0,
-              };
-            }
-            return {
-              preview: false,
-              filledShares: shares,
-              filledUsd:
-                immFill.usd > 0 ? immFill.usd : Math.round(shares * price * 100) / 100,
-              orderStatus: immFill.status || immediate.status || "matched",
-              pendingRemaining: 0,
-            };
-          }
-
-          const recovered = await this.findMatchingOpenOrder(req, price);
-          if (recovered) return recovered;
-
-          logError("Order response missing order id", {
-            token: req.tokenId.slice(0, 12),
-            status: immediate.status,
-            response: JSON.stringify(submitted.raw).slice(0, 400),
-          });
-          return {
-            preview: false,
-            error: "Order accepted but no order ID returned",
-            filledShares: 0,
-            filledUsd: 0,
-            pendingRemaining: 0,
-          };
-        }
-
-        const fill = await this.resolveFill(
-          orderId,
-          req,
-          price,
-          orderType,
-          immediate
-        );
-
+      const postError = submitted.error ?? extractPostOrderError(submitted.raw);
+      if (postError) {
         return {
           preview: false,
-          orderId,
-          filledShares: fill.shares,
-          filledUsd: fill.usd,
-          orderStatus: fill.status,
-          pendingRemaining: fill.remaining,
-        };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (attempt < retries) {
-          const recovered = await this.findMatchingOpenOrder(req, price);
-          if (recovered) return recovered;
-          await sleep(500 * (attempt + 1));
-          continue;
-        }
-        logError("Order failed", { token: req.tokenId.slice(0, 12), error: msg });
-        return {
-          preview: false,
-          error: msg,
+          error: postError,
           filledShares: 0,
           filledUsd: 0,
           pendingRemaining: 0,
         };
       }
-    }
 
-    return {
-      preview: false,
-      error: "Order failed after retries",
-      filledShares: 0,
-      filledUsd: 0,
-      pendingRemaining: 0,
-    };
+      const immediate = {
+        takingAmount: submitted.takingAmount,
+        makingAmount: submitted.makingAmount,
+        status: submitted.status,
+      };
+      const orderId = submitted.orderId ?? extractOrderIdFromPostResponse(submitted.raw);
+
+      if (!orderId) {
+        const immFill = parseImmediateFill(immediate, req.side, price);
+        if (immFill.shares > 0) {
+          const shares = Math.min(immFill.shares, req.size);
+          const pendingRemaining = Math.max(
+            0,
+            Math.round((req.size - shares) * 100) / 100
+          );
+          if (pendingRemaining > 0) {
+            const recovered = await this.recoverAfterAmbiguousSubmit(req, price);
+            if (recovered?.orderId) return recovered;
+            // Persist known fill; remainder cannot be tracked without an order id.
+            logError("Partial fill without order ID — recording fill only", {
+              token: req.tokenId.slice(0, 12),
+              shares,
+              pendingRemaining,
+            });
+            return {
+              preview: false,
+              filledShares: shares,
+              filledUsd:
+                immFill.usd > 0 ? immFill.usd : Math.round(shares * price * 100) / 100,
+              orderStatus:
+                immFill.status ||
+                immediate.status ||
+                "matched (partial, remainder untracked)",
+              pendingRemaining: 0,
+            };
+          }
+          return {
+            preview: false,
+            filledShares: shares,
+            filledUsd:
+              immFill.usd > 0 ? immFill.usd : Math.round(shares * price * 100) / 100,
+            orderStatus: immFill.status || immediate.status || "matched",
+            pendingRemaining: 0,
+          };
+        }
+
+        const recovered = await this.recoverAfterAmbiguousSubmit(req, price);
+        if (recovered) return recovered;
+
+        logError("Order response missing order id", {
+          token: req.tokenId.slice(0, 12),
+          status: immediate.status,
+          response: JSON.stringify(submitted.raw).slice(0, 400),
+        });
+        return {
+          preview: false,
+          error: "Order accepted but no order ID returned",
+          filledShares: 0,
+          filledUsd: 0,
+          pendingRemaining: 0,
+        };
+      }
+
+      const fill = await this.resolveFill(orderId, req, price, orderType, immediate);
+
+      return {
+        preview: false,
+        orderId,
+        filledShares: fill.shares,
+        filledUsd: fill.usd,
+        orderStatus: fill.status,
+        pendingRemaining: fill.remaining,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Never re-submit after a thrown error: the first request may already have
+      // been accepted. Recover via open book / recent trades, then fail closed.
+      const recovered = await this.recoverAfterAmbiguousSubmit(req, price);
+      if (recovered) return recovered;
+      await sleep(500);
+      const recoveredAgain = await this.recoverAfterAmbiguousSubmit(req, price);
+      if (recoveredAgain) return recoveredAgain;
+
+      logError("Order failed (not retrying submit)", {
+        token: req.tokenId.slice(0, 12),
+        error: msg,
+      });
+      return {
+        preview: false,
+        error: `Ambiguous order submit failure — not retrying to avoid double-fill (${msg})`,
+        filledShares: 0,
+        filledUsd: 0,
+        pendingRemaining: 0,
+      };
+    }
   }
 
   async getOrderStatus(orderId: string, tokenId?: string): Promise<OrderStatusResult> {
@@ -263,12 +259,79 @@ export class ClobExecutor {
     }
   }
 
-  /** After a failed submit, look for a matching resting order on CLOB (timeout / lost response). */
+  /** After a failed/ambiguous submit, look for resting order or recent fill. */
   async recoverOrderAfterFailure(
     req: PlaceOrderRequest,
     expectedPrice?: number
   ): Promise<PlaceOrderResult | null> {
-    return this.findMatchingOpenOrder(req, expectedPrice);
+    return this.recoverAfterAmbiguousSubmit(req, expectedPrice);
+  }
+
+  private async recoverAfterAmbiguousSubmit(
+    req: PlaceOrderRequest,
+    expectedPrice?: number
+  ): Promise<PlaceOrderResult | null> {
+    const open = await this.findMatchingOpenOrder(req, expectedPrice);
+    if (open) return open;
+    return this.findMatchingRecentFill(req, expectedPrice);
+  }
+
+  private async findMatchingRecentFill(
+    req: PlaceOrderRequest,
+    expectedPrice?: number
+  ): Promise<PlaceOrderResult | null> {
+    if (!this.backend.findRecentMatchingFill) return null;
+    try {
+      let matchPrice = expectedPrice ?? req.price;
+      let priceTol = 0.0001;
+      if (expectedPrice === undefined) {
+        const meta = await fetchOrderBookMeta(
+          this.wallet.clobUrl,
+          this.wallet.chainId,
+          req.tokenId
+        );
+        if (meta) {
+          const tick = parseFloat(meta.tickSize);
+          matchPrice = roundToTick(req.price, tick);
+          priceTol = Math.max(tick / 2, 0.0001);
+        }
+      } else {
+        priceTol = Math.max(0.0001, matchPrice * 0.002);
+      }
+
+      const match = await this.backend.findRecentMatchingFill({
+        tokenId: req.tokenId,
+        side: req.side,
+        size: req.size,
+        price: matchPrice,
+        priceTol,
+        maxAgeMs: 120_000,
+      });
+      if (!match || match.filledShares <= 0) return null;
+
+      logInfo("Recovered recent fill after ambiguous submit", {
+        orderId: match.orderId?.slice(0, 12),
+        token: req.tokenId.slice(0, 12),
+        shares: match.filledShares,
+      });
+      return {
+        preview: false,
+        orderId: match.orderId,
+        filledShares: match.filledShares,
+        filledUsd: match.filledUsd,
+        orderStatus: `${match.status} (trade-recovered)`,
+        pendingRemaining: Math.max(
+          0,
+          Math.round((req.size - match.filledShares) * 100) / 100
+        ),
+      };
+    } catch (e) {
+      logError("Recent fill recovery failed", {
+        token: req.tokenId.slice(0, 12),
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return null;
+    }
   }
 
   /** List all open orders on CLOB (live only). */

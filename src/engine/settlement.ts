@@ -172,7 +172,7 @@ async function redeemConditionOnce(
   if (cached !== undefined) return cached;
 
   const result = await redeemConditionOnChain(wallet, conditionId);
-  const success = result.ok || result.benignFailure;
+  const success = result.ok || Boolean(result.benignFailure);
   redeemedConditionsThisCycle.set(conditionId, success);
   if (success) return true;
   errors.push(`redeem ${conditionId.slice(0, 12)}: ${result.error ?? "failed"}`);
@@ -293,11 +293,12 @@ export async function processSettlements(
     store.ensurePreviewCash(global.risk.startingCapitalUsd);
   }
 
-  const liveRedeem = shouldRedeemOnChain(preview, global, options.wallet);
+  const wallet = options.wallet;
+  const liveRedeem = shouldRedeemOnChain(preview, global, wallet);
 
   if (liveRedeem) {
     onChainRedeems += await processOnChainRedeemableScan(
-      options.wallet,
+      wallet,
       store,
       preview,
       errors
@@ -323,7 +324,7 @@ export async function processSettlements(
     if (liveRedeem) {
       const chainReady = await ensureLiveChainRedeem(
         liveRedeem,
-        options.wallet,
+        wallet,
         activity.conditionId,
         tokenId,
         "leader REDEEM",
@@ -356,7 +357,7 @@ export async function processSettlements(
     if (liveRedeem) {
       const chainReady = await ensureLiveChainRedeem(
         liveRedeem,
-        options.wallet,
+        wallet,
         settlement.conditionId,
         tokenId,
         "gamma auto-settle",

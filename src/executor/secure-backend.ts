@@ -5,10 +5,12 @@ import { formatPriceForTick } from "./orderbook.js";
 import { getSecureClient } from "./secure-client.js";
 import type {
   OpenOrderRow,
+  RecentFillMatch,
   SubmitOrderRequest,
   SubmitOrderResponse,
   TradingBackend,
 } from "./trading-backend.js";
+import type { TradeSide } from "../config/types.js";
 
 function isTerminalStatus(status: string): boolean {
   const s = status.toLowerCase();
@@ -117,6 +119,11 @@ export class SecureTradingBackend implements TradingBackend {
               status: { sizeMatched, originalSize: 0, status: "closed", terminal: true },
             };
           }
+          // Order left the book but trades are not indexed yet — do not drop pending.
+          return {
+            kind: "transient",
+            message: "order closed but trades not yet indexed",
+          };
         } catch (tradeErr) {
           const tradeMsg = tradeErr instanceof Error ? tradeErr.message : String(tradeErr);
           return { kind: "transient", message: tradeMsg };
@@ -124,6 +131,46 @@ export class SecureTradingBackend implements TradingBackend {
       }
       return { kind: "not_found" };
     }
+  }
+
+  async findRecentMatchingFill(req: {
+    tokenId: string;
+    side: TradeSide;
+    size: number;
+    price: number;
+    priceTol: number;
+    maxAgeMs: number;
+  }): Promise<RecentFillMatch | null> {
+    const client = await getSecureClient(this.wallet);
+    const cutoff = Date.now() - req.maxAgeMs;
+    const side = req.side.toUpperCase();
+    let best: RecentFillMatch | null = null;
+    let bestSizeDelta = Number.POSITIVE_INFINITY;
+
+    for await (const page of client.listAccountTrades({ tokenId: req.tokenId })) {
+      for (const trade of page.items) {
+        if (String(trade.status ?? "").toUpperCase() === "FAILED") continue;
+        const matchedAt = trade.matchedAt ? new Date(trade.matchedAt).getTime() : NaN;
+        if (Number.isFinite(matchedAt) && matchedAt < cutoff) continue;
+        if (String(trade.side ?? "").toUpperCase() !== side) continue;
+        const price = parseFloat(String(trade.price ?? "0"));
+        if (Math.abs(price - req.price) > req.priceTol) continue;
+        const size = parseFloat(String(trade.size ?? "0"));
+        if (size <= 0 || size > req.size + 0.05) continue;
+        const sizeDelta = Math.abs(size - req.size);
+        if (sizeDelta > bestSizeDelta) continue;
+        bestSizeDelta = sizeDelta;
+        best = {
+          orderId: trade.takerOrderId ? String(trade.takerOrderId) : undefined,
+          filledShares: Math.round(size * 100) / 100,
+          filledUsd: Math.round(size * price * 100) / 100,
+          price,
+          status: String(trade.status ?? "matched"),
+        };
+        if (sizeDelta <= 0.05) return best;
+      }
+    }
+    return best;
   }
 
   /** Sum shares matched against `orderId` across all account trades for `tokenId`. */

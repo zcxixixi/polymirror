@@ -13,6 +13,7 @@ import { readNormalizedConfigDocument, writeNormalizedConfigDocument } from "../
 import { applyEnvToProcess, upsertEnvFile } from "../config/env-file.js";
 import { accountMergedGlobal } from "../config/document.js";
 import { assertLiveTradingAllowed } from "../engine/risk.js";
+import { withReloadLock } from "../engine/cycle-lock.js";
 import { logInfo } from "../notify/logger.js";
 import {
   getEffectiveProxyUrl,
@@ -21,7 +22,6 @@ import {
   isProxyConfigured,
   maskProxyUrl,
 } from "../util/proxy.js";
-import { fetchWithTimeout } from "../util/fetch.js";
 import {
   flushLivePendingBeforePreview,
   migratePreviewToLiveDb,
@@ -162,28 +162,57 @@ export async function patchGlobalSettings(
 ): Promise<{ status: number; body: unknown }> {
   try {
     const patch = globalSettingsPatchSchema.parse(body);
-    if (patch.previewMode === false) {
-      assertLiveTradingAllowed(false);
-      if (actx.getConfig().app.global.previewMode) {
-        migratePreviewToLiveDb(actx.accountId, actx.store);
+    const modeChanging =
+      patch.previewMode !== undefined &&
+      patch.previewMode !== actx.getConfig().app.global.previewMode;
+
+    const apply = async (): Promise<{ status: number; body: unknown } | null> => {
+      const liveActx = root.manager.toApiContext(actx.accountId);
+      if (patch.previewMode === false) {
+        assertLiveTradingAllowed(false);
+        if (liveActx.getConfig().app.global.previewMode) {
+          migratePreviewToLiveDb(liveActx.accountId, liveActx.store);
+        }
+        patch.risk = { ...patch.risk, enableCopyTrading: patch.risk?.enableCopyTrading ?? true };
+      } else if (patch.previewMode === true && !liveActx.getConfig().app.global.previewMode) {
+        const flush = await flushLivePendingBeforePreview(liveActx.getConfig(), liveActx.store);
+        if (flush.remaining > 0) {
+          return {
+            status: 409,
+            body: {
+              error:
+                `仍有 ${flush.remaining} 笔 Live 挂单未能取消，已拒绝切换 Preview。` +
+                `请稍后重试或在 CLOB 上手动取消。`,
+              pendingRemaining: flush.remaining,
+              errors: flush.errors.slice(0, 5),
+            },
+          };
+        }
       }
-      patch.risk = { ...patch.risk, enableCopyTrading: patch.risk?.enableCopyTrading ?? true };
-    } else if (patch.previewMode === true && !actx.getConfig().app.global.previewMode) {
-      await flushLivePendingBeforePreview(actx.getConfig(), actx.store);
-    }
-    const normalized = readNormalizedConfigDocument(root.configPath);
-    if (patch.proxy) {
-      validateProxyPatch(patch.proxy, normalized.defaultsGlobal as Record<string, unknown>);
-    }
-    const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
-    writeNormalizedConfigDocument(root.configPath, next);
-    await root.reloadConfig();
-    syncAggregateHealth(root.manager.list());
-    logInfo("Global settings updated via dashboard", { accountId: actx.accountId });
-    return {
-      status: 200,
-      body: { ok: true, settings: buildSettingsSnapshot(root, actx) },
+      const normalized = readNormalizedConfigDocument(root.configPath);
+      if (patch.proxy) {
+        validateProxyPatch(patch.proxy, normalized.defaultsGlobal as Record<string, unknown>);
+      }
+      const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
+      writeNormalizedConfigDocument(root.configPath, next);
+      if (modeChanging) {
+        await root.manager.reloadConfigUnlocked();
+      } else {
+        await root.reloadConfig();
+      }
+      syncAggregateHealth(root.manager.list());
+      logInfo("Global settings updated via dashboard", { accountId: actx.accountId });
+      const fresh = root.manager.toApiContext(actx.accountId);
+      return {
+        status: 200,
+        body: { ok: true, settings: buildSettingsSnapshot(root, fresh) },
+      };
     };
+
+    if (modeChanging) {
+      return (await withReloadLock(apply))!;
+    }
+    return (await apply())!;
   } catch (e) {
     return formatSettingsError(e);
   }
@@ -293,66 +322,88 @@ export async function setPreviewMode(
   preview: boolean
 ): Promise<{ status: number; body: unknown }> {
   try {
-    const config = actx.getConfig();
-    if (!preview) {
-      assertLiveTradingAllowed(false);
-    }
+    return await withReloadLock(async () => {
+      const liveActx = root.manager.toApiContext(actx.accountId);
+      const config = liveActx.getConfig();
+      if (!preview) {
+        assertLiveTradingAllowed(false);
+      }
 
-    let flush = { resolved: 0, remaining: 0, errors: [] as string[] };
-    let migration = { seenImported: 0, positionsImported: 0, livePath: "" };
+      let flush = { resolved: 0, remaining: 0, errors: [] as string[] };
+      let migration = { seenImported: 0, positionsImported: 0, livePath: "" };
 
-    if (preview && !config.app.global.previewMode) {
-      flush = await flushLivePendingBeforePreview(config, actx.store);
-    } else if (!preview && config.app.global.previewMode) {
-      migration = migratePreviewToLiveDb(actx.accountId, actx.store);
-    }
+      if (preview && !config.app.global.previewMode) {
+        flush = await flushLivePendingBeforePreview(config, liveActx.store);
+        if (flush.remaining > 0) {
+          return {
+            status: 409,
+            body: {
+              error:
+                `仍有 ${flush.remaining} 笔 Live 挂单未能取消，已拒绝切换 Preview。` +
+                `请稍后重试或在 CLOB 上手动取消。`,
+              pendingRemaining: flush.remaining,
+              errors: flush.errors.slice(0, 5),
+            },
+          };
+        }
+      } else if (!preview && config.app.global.previewMode) {
+        migration = migratePreviewToLiveDb(liveActx.accountId, liveActx.store);
+      }
 
-    const normalized = readNormalizedConfigDocument(root.configPath);
-    const patch: GlobalSettingsPatch = { previewMode: preview };
-    if (!preview) {
-      patch.risk = { enableCopyTrading: true };
-    }
-    const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
-    writeNormalizedConfigDocument(root.configPath, next);
-    await root.reloadConfig();
-    syncAggregateHealth(root.manager.list());
-    const rt = root.manager.require(actx.accountId);
-    rt.health.previewMode = preview;
-    logInfo(`Mode switched via dashboard: account=${actx.accountId} preview=${preview}`, {
-      pendingResolved: flush.resolved,
-      pendingRemaining: flush.remaining,
-      seenImported: migration.seenImported,
-      positionsImported: migration.positionsImported,
+      const normalized = readNormalizedConfigDocument(root.configPath);
+      const patch: GlobalSettingsPatch = { previewMode: preview };
+      if (!preview) {
+        patch.risk = { enableCopyTrading: true };
+      }
+      const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, patch);
+      writeNormalizedConfigDocument(root.configPath, next);
+      await root.manager.reloadConfigUnlocked();
+      syncAggregateHealth(root.manager.list());
+      const rt = root.manager.require(actx.accountId);
+      rt.health.previewMode = preview;
+      logInfo(`Mode switched via dashboard: account=${actx.accountId} preview=${preview}`, {
+        pendingResolved: flush.resolved,
+        pendingRemaining: flush.remaining,
+        seenImported: migration.seenImported,
+        positionsImported: migration.positionsImported,
+      });
+
+      const flushNote = formatPendingFlushNote(flush);
+      const migrateNote =
+        migration.seenImported > 0 || migration.positionsImported > 0
+          ? `已合并 Preview：${migration.seenImported} 条去重、${migration.positionsImported} 条引擎持仓（仅跟踪，链上为准）。`
+          : "";
+      const message = preview
+        ? `已切换 Preview（引擎已热重载 preview.db）。${flushNote}`.trim()
+        : `已切换 Live（引擎已热重载 polymirror.db）。${migrateNote}请确认钱包 USDC 充足。`.trim();
+
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          accountId: actx.accountId,
+          previewMode: preview,
+          message,
+        },
+      };
     });
-
-    const flushNote = formatPendingFlushNote(flush);
-    const migrateNote =
-      migration.seenImported > 0 || migration.positionsImported > 0
-        ? `已合并 Preview：${migration.seenImported} 条去重、${migration.positionsImported} 条引擎持仓（仅跟踪，链上为准）。`
-        : "";
-    const message = preview
-      ? `已切换 Preview（引擎已热重载 preview.db）。${flushNote}`.trim()
-      : `已切换 Live（引擎已热重载 polymirror.db）。${migrateNote}请确认钱包 USDC 充足。`.trim();
-
-    return {
-      status: 200,
-      body: {
-        ok: true,
-        accountId: actx.accountId,
-        previewMode: preview,
-        message,
-      },
-    };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { status: 400, body: { error: msg } };
   }
 }
 
-export function resetKillSwitch(ctx: LegacyCtx): { status: number; body: unknown } {
-  ctx.store.resetKillSwitch();
-  logInfo("Kill switch reset via dashboard", { accountId: ctx.accountId });
-  return { status: 200, body: { ok: true, risk: buildRiskSnapshot(ctx) } };
+export function resetKillSwitch(
+  root: ApiContext,
+  actx: AccountApiContext
+): { status: number; body: unknown } {
+  const live = root.manager.toApiContext(actx.accountId);
+  live.store.resetKillSwitch();
+  const rt = root.manager.require(actx.accountId);
+  rt.health.killSwitchActive = false;
+  syncAggregateHealth(root.manager.list());
+  logInfo("Kill switch reset via dashboard", { accountId: actx.accountId });
+  return { status: 200, body: { ok: true, risk: buildRiskSnapshot(live) } };
 }
 
 export async function stopCopyTrading(
@@ -360,40 +411,56 @@ export async function stopCopyTrading(
   actx: AccountApiContext
 ): Promise<{ status: number; body: unknown }> {
   try {
-    const config = actx.getConfig();
-    const flush = await flushLivePendingBeforePreview(config, actx.store);
+    return await withReloadLock(async () => {
+      const liveActx = root.manager.toApiContext(actx.accountId);
+      const config = liveActx.getConfig();
+      const flush = await flushLivePendingBeforePreview(config, liveActx.store);
+      if (flush.remaining > 0) {
+        return {
+          status: 409,
+          body: {
+            error:
+              `仍有 ${flush.remaining} 笔 Live 挂单未能取消，已拒绝停止跟单。` +
+              `请稍后重试或在 CLOB 上手动取消。`,
+            pendingRemaining: flush.remaining,
+            errors: flush.errors.slice(0, 5),
+          },
+        };
+      }
 
-    const normalized = readNormalizedConfigDocument(root.configPath);
-    const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, {
-      previewMode: true,
-      risk: { enableCopyTrading: false },
-    });
-    writeNormalizedConfigDocument(root.configPath, next);
-    await root.reloadConfig();
-    syncAggregateHealth(root.manager.list());
-    const rt = root.manager.require(actx.accountId);
-    rt.health.previewMode = true;
-    logInfo(`Copy trading stopped via dashboard: account=${actx.accountId}`, {
-      pendingResolved: flush.resolved,
-      pendingRemaining: flush.remaining,
-    });
-
-    const flushNote = formatPendingFlushNote(flush);
-    const message =
-      `已停止跟单：Preview 模式，跟单开关已关闭。${flushNote}`.trim() ||
-      "已停止跟单：Preview 模式，跟单开关已关闭。";
-
-    return {
-      status: 200,
-      body: {
-        ok: true,
-        accountId: actx.accountId,
+      const normalized = readNormalizedConfigDocument(root.configPath);
+      const next = applyAccountGlobalSettingsPatch(normalized, actx.accountId, {
         previewMode: true,
-        copyTradingEnabled: false,
-        message,
-        risk: buildRiskSnapshot(actx),
-      },
-    };
+        risk: { enableCopyTrading: false },
+      });
+      writeNormalizedConfigDocument(root.configPath, next);
+      await root.manager.reloadConfigUnlocked();
+      syncAggregateHealth(root.manager.list());
+      const rt = root.manager.require(actx.accountId);
+      rt.health.previewMode = true;
+      logInfo(`Copy trading stopped via dashboard: account=${actx.accountId}`, {
+        pendingResolved: flush.resolved,
+        pendingRemaining: flush.remaining,
+      });
+
+      const flushNote = formatPendingFlushNote(flush);
+      const message =
+        `已停止跟单：Preview 模式，跟单开关已关闭。${flushNote}`.trim() ||
+        "已停止跟单：Preview 模式，跟单开关已关闭。";
+
+      const fresh = root.manager.toApiContext(actx.accountId);
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          accountId: actx.accountId,
+          previewMode: true,
+          copyTradingEnabled: false,
+          message,
+          risk: buildRiskSnapshot(fresh),
+        },
+      };
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { status: 400, body: { error: msg } };

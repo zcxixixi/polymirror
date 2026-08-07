@@ -4,7 +4,7 @@
 #   global:
 #     poll_interval_ms: 5000
 #     preview_mode: true
-#     health_port: 8081
+#     health_port: 8080
 #     risk: { ... }
 # accounts:
 #   - id: main

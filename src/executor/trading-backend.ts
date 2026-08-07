@@ -29,12 +29,33 @@ export interface OpenOrderRow {
   size: number;
 }
 
+/** Recent account trade used to recover after an ambiguous submit. */
+export interface RecentFillMatch {
+  orderId?: string;
+  filledShares: number;
+  filledUsd: number;
+  price: number;
+  status: string;
+}
+
 export interface TradingBackend {
   readonly kind: WalletConfig["tradingBackend"];
   submitOrder(req: SubmitOrderRequest): Promise<SubmitOrderResponse>;
   getOrderStatus(orderId: string, tokenId?: string): Promise<OrderStatusResult>;
   cancelOrder(orderId: string): Promise<{ ok: boolean; error?: string }>;
   listOpenOrders(filter?: { tokenId?: string }): Promise<OpenOrderRow[]>;
+  /**
+   * Look for a recent account trade matching side/size/price (post-submit recovery).
+   * Used when the order left the open book before we observed an order id.
+   */
+  findRecentMatchingFill?(req: {
+    tokenId: string;
+    side: TradeSide;
+    size: number;
+    price: number;
+    priceTol: number;
+    maxAgeMs: number;
+  }): Promise<RecentFillMatch | null>;
 }
 
 export function createTradingBackend(wallet: WalletConfig): TradingBackend {

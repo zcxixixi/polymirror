@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, type LeaderRow } from "../api/client";
 import { apiPatch } from "../api/leaders";
 import { LeaderInlineSettings } from "../components/LeaderInlineSettings";
+import { QuickAddLeader } from "../components/QuickAddLeader";
 import { UnfollowLeaderButton } from "../components/UnfollowLeaderButton";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ToggleSwitch } from "../components/ui/ToggleSwitch";
@@ -39,15 +40,20 @@ export function LeadersPage() {
         title={t("leaders.title")}
         subtitle={t("leaders.subtitle")}
         actions={
-          <Link to="/leaders/new" className="btn-link">
+          <a href="#quick-add-leader" className="btn-link">
             {t("leaders.add")}
-          </Link>
+          </a>
         }
       />
 
       {isError && (
         <div className="alert alert-error">{(error as Error).message}</div>
       )}
+
+      <QuickAddLeader />
+      <p className="muted form-hint" style={{ marginTop: "-0.25rem", marginBottom: "1rem" }}>
+        {t("leaders.disableVsDeleteHint")}
+      </p>
 
       <div className="panel panel-wide">
         <table>
@@ -120,7 +126,7 @@ export function LeadersPage() {
                 <td colSpan={8} className="table-empty">
                   <span className="muted">
                     {t("leaders.empty")}{" "}
-                    <Link to="/leaders/new">{t("leaders.addFirst")}</Link>
+                    <a href="#quick-add-leader">{t("leaders.addFirst")}</a>
                   </span>
                 </td>
               </tr>

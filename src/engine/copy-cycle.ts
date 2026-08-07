@@ -12,6 +12,7 @@ import { RiskGate, assertLiveTradingAllowed } from "../engine/risk.js";
 import type { StateStore } from "../state/store.js";
 import { processPendingOrders } from "../engine/pending-orders.js";
 import { adoptUntrackedOpenOrders } from "../engine/order-reconcile.js";
+import { tryBeginCycle, endCycle } from "../engine/cycle-lock.js";
 import {
   checkWalletDrifts,
   fetchWalletCollateralUsdc,
@@ -468,6 +469,13 @@ export async function runCopyCycle(
       const recovered = await executor.recoverOrderAfterFailure(orderReq);
       if (recovered) {
         orderResult = recovered;
+      } else if (orderResult.filledShares > 0) {
+        // Keep known fill; clear error so the live record path persists inventory.
+        orderResult = {
+          ...orderResult,
+          error: undefined,
+          pendingRemaining: 0,
+        };
       } else {
         errors.push(`${leaderId}: ${orderResult.error}`);
         store.audit({
@@ -480,7 +488,11 @@ export async function runCopyCycle(
           reason: orderResult.error,
           preview,
         });
-        if (isDefiniteOrderRejection(orderResult.error)) {
+        // Definite rejects and ambiguous accepts (no id / no retry) must not re-copy.
+        if (
+          isDefiniteOrderRejection(orderResult.error) ||
+          /ambiguous order submit|no order id returned/i.test(orderResult.error)
+        ) {
           store.markSeenMany(tradeKeys, leaderId);
         }
         telegram?.error(`${leaderId} ${activity.side} ${orderResult.error}`);
@@ -696,7 +708,6 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
   const apiState: ApiServerState = { server: null, port: 0 };
   syncApiServer(apiState, manager.healthPort, apiCtx);
 
-  let cycleRunning = false;
   let pollIntervalMs = manager.pollIntervalMs;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -715,11 +726,10 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
 
     syncApiServer(apiState, manager.healthPort, apiCtx);
 
-    if (cycleRunning) {
-      logInfo("Skipping poll tick — previous cycle still running");
+    if (!tryBeginCycle()) {
+      logInfo("Skipping poll tick — previous cycle or config reload in progress");
       return;
     }
-    cycleRunning = true;
     try {
       for (const account of manager.enabled()) {
         const tag = `[${account.id}]`;
@@ -744,7 +754,7 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
       }
       syncAggregateHealth(manager.list());
     } finally {
-      cycleRunning = false;
+      endCycle();
     }
   };
 
