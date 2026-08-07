@@ -368,11 +368,10 @@ export async function runCopyCycle(
       });
 
       if (sizing.belowMinimum) {
-        const reason = sizing.reasoning;
-        errors.push(`${leaderId}: ${reason}`);
+        // No inventory / dust is a normal skip — do not surface as lastError.
         store.markSeenMany(sourceTradeKeys, leaderId);
         skipped++;
-        skip(store, leaderId, activity, reason, preview);
+        skip(store, leaderId, activity, sizing.reasoning, preview);
         continue;
       }
 

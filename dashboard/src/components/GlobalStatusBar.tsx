@@ -266,7 +266,10 @@ export function GlobalStatusBar() {
       <div className={`status-bar status-bar-${tone}`} role="status">
         <div className="status-bar-items">
           {items.map((item) => (
-            <span key={item.key} className="status-bar-item">
+            <span
+              key={item.key}
+              className={`status-bar-item${item.tone ? ` status-bar-item-${item.tone}` : ""}`}
+            >
               {item.node}
             </span>
           ))}

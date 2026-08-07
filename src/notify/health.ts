@@ -66,7 +66,6 @@ export function updateHealthAfterPoll(
   healthSnapshot.lastPollAt = Date.now();
   healthSnapshot.lastPollResult = result;
   healthSnapshot.killSwitchActive = killSwitchActive;
-  if (result.errors.length > 0) {
-    healthSnapshot.lastError = result.errors[0] ?? null;
-  }
+  healthSnapshot.lastError =
+    result.errors.length > 0 ? (result.errors[0] ?? null) : null;
 }

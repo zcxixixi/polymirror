@@ -49,7 +49,5 @@ export function updateAccountHealthAfterPoll(
   health.killSwitchActive = killSwitchActive;
   health.pendingOrders = pendingOrders;
   health.walletDrifts = walletDrifts;
-  if (result.errors.length > 0) {
-    health.lastError = result.errors[0] ?? null;
-  }
+  health.lastError = result.errors.length > 0 ? (result.errors[0] ?? null) : null;
 }
