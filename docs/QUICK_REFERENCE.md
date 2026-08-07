@@ -11,7 +11,7 @@ npm install
 cp .env.example .env && cp config.preview.template.yaml config.yaml
 # 编辑 .env（私钥+地址）和 config.yaml（Leader）
 npm run dev
-curl http://127.0.0.1:8081/health   # 端口与 config.yaml 的 health_port 一致
+curl http://127.0.0.1:8080/health   # 端口与 config.yaml 的 health_port 一致（默认 8080）
 ```
 
 ---

@@ -2,6 +2,8 @@
 
 Complete this checklist in **`preview_mode: true`** before enabling live trading.
 
+Beginner path (plain language): [getting-started/zh/05-preview-7days.md](getting-started/zh/05-preview-7days.md) · [en](getting-started/en/05-preview-7days.md) · Day 0 ticks: [zh/CHECKLIST.md](getting-started/zh/CHECKLIST.md)
+
 Mark each item when done. Keep logs and `data/polymirror.db` for review.
 
 ---

@@ -1,6 +1,7 @@
 # PolyMirror Dashboard 操作文档
 
-> 控制台帮助中心 · 按功能分类 · 与侧边栏页面对应
+> 控制台帮助中心 · 按功能分类 · 与侧边栏页面对应  
+> 产品边界：自托管本地控制台，**非**多租户 SaaS — [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md)
 
 本文档已拆分为模块化章节，见 [`docs/dashboard/`](dashboard/) 目录。
 
@@ -8,7 +9,7 @@
 
 | 分类 | 章节 |
 |------|------|
-| **快速入门** | [产品概览与流程](dashboard/01-overview.md) · [安装与登录](dashboard/02-getting-started.md) |
+| **快速入门** | [小白入门 Getting Started](getting-started/README.md) · [产品概览](dashboard/01-overview.md) · [安装与登录（短版）](dashboard/02-getting-started.md) |
 | **账户与钱包** | [我的账户](dashboard/03-accounts.md) |
 | **跟单配置** | [发现与 Leaders](dashboard/04-leaders.md) |
 | **运行监控** | [总览 / 持仓 / 订单 / 活动流](dashboard/05-monitoring.md) |

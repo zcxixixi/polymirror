@@ -4,9 +4,11 @@
 
 Single-platform Polymarket multi-leader copy trading (mode A).
 
-Future: cross-venue execution (Kalshi, Limitless) via a separate matcher layer — not in v0.1.
+**Deployment model:** self-hosted, single-operator instance (your machine or private VPS). **Not** a multi-tenant SaaS. Canonical boundary: [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md).
 
-Future: **Web + Agent** website product (cloud control plane + local Agent signer, no hosted private keys) — see [WEB_AGENT_ARCHITECTURE.md](WEB_AGENT_ARCHITECTURE.md).
+Future (optional research only): cross-venue execution (Kalshi, Limitless) via a separate matcher layer — not in v1.0.
+
+**Archived / out of roadmap:** cloud “Web + Agent” control plane — see [WEB_AGENT_ARCHITECTURE.md](WEB_AGENT_ARCHITECTURE.md) (historical only).
 
 ## Data flow
 

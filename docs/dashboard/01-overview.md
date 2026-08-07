@@ -1,13 +1,15 @@
 ## 产品概览
 
-PolyMirror 是运行在本地或 VPS 上的 **Polymarket 跟单引擎**。Dashboard 是它的 **Web 管理控制台**，用于配置 Leader、查看持仓与 PnL、切换 Preview/Live，无需手改 `config.yaml`。
+PolyMirror 是运行在本地或私有 VPS 上的 **自托管 Polymarket 跟单引擎**（**不是**多租户 SaaS）。Dashboard 是同机的 **本地管理控制台**，用于配置 Leader、查看持仓与 PnL、切换 Preview/Live，无需手改 `config.yaml`。
+
+产品边界：[PRODUCT_SCOPE.md](../PRODUCT_SCOPE.md)。
 
 ### 核心能力
 
 | 能力 | 说明 |
 |------|------|
 | 多 Leader 跟单 | 同时跟踪多个地址 / 用户名 |
-| 多账户 | 单进程管理多个钱包，数据与 Leader 隔离 |
+| 多账户 | 同一运营商的多个自有钱包（≠ 多租户） |
 | Preview 模拟 | 默认不真实下单，先观察再实盘 |
 | 策略缩放 | 按比例 / 固定金额 / 自适应 |
 | 风控 | 日限额、Kill Switch、单笔上下限 |
@@ -17,7 +19,7 @@ PolyMirror 是运行在本地或 VPS 上的 **Polymarket 跟单引擎**。Dashbo
 | 能做 | 不能做 |
 |------|--------|
 | 添加 / 编辑 Leader 与策略 | 代替 Polymarket 官网手动下单 |
-| 管理钱包与多账户 | 托管或上传私钥到云端 |
+| 管理本机多钱包账户 | 托管私钥、多租户云登录、代运维 |
 | 查看 PnL、持仓、审计日志 | 跨平台（Kalshi 等）跟单 |
 
 ---

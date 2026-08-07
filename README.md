@@ -10,11 +10,13 @@
 
 **Version 1.0.0** · Single-platform Polymarket multi-leader copy trading (mode A)
 
+**第一次用？ / First time?** → [中文入门](docs/getting-started/zh/00-overview.md) · [English Getting Started](docs/getting-started/en/00-overview.md) · [语言选择 / Language](docs/getting-started/README.md)
+
 ---
 
 ## Table of contents
 
-- [Overview](#overview)
+- [Overview](#overview)（含 [产品边界](#product-scope--产品边界)）
 - [Features](#features)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
@@ -35,6 +37,13 @@
 
 PolyMirror is a **self-hosted copy-trading daemon** for [Polymarket](https://polymarket.com). It polls leader wallets via the Polymarket Data API, applies your sizing and risk rules, and places orders through the CLOB V2 API — or simulates them in **Preview mode** (default).
 
+### Product scope / 产品边界
+
+> **Not a multi-tenant SaaS.** You run your own instance on your machine or private VPS. We do not host private keys, operate shared copy-trading cloud, or provide multi-tenant accounts.  
+> **不是多租户 SaaS。** 每人在自己的服务器或电脑上跑自己的实例；不托管私钥、不代运维、不运营共享云端跟单服务。
+
+Canonical details: **[docs/PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md)**. Multi-account in config means **your own wallets on one instance**, not multi-tenant SaaS.
+
 PolyMirror 不是 Polymarket 交易前端，也不是 Leader 分析站。它专注 **研究之后 → Preview 验证 → Live 执行** 这一段：
 
 ```
@@ -47,11 +56,11 @@ Predicts.guru / PolyWallet   筛人、观察 PnL
 
 | 属性 | 说明 |
 |------|------|
-| 部署 | 本地机器或 VPS，单进程 + SQLite |
-| 私钥 | 仅存于 `.env`，不上传云端 |
+| 部署 | **自托管**：本地机器或私有 VPS，单进程 + SQLite（非 SaaS） |
+| 私钥 | 仅存于你本机 `.env`，不上传云端 |
 | 默认模式 | `preview_mode: true` — 模拟下单，不调 CLOB |
-| 多账户 | 单进程管理多个钱包，Leader 与数据隔离 |
-| 控制台 | 内置 React Dashboard，与引擎同端口 |
+| 多账户 | 同一运营商的多个自有钱包（≠ 多租户） |
+| 控制台 | 同机 React Dashboard，本地控制面 |
 
 ---
 
@@ -183,6 +192,8 @@ See [Architecture](docs/ARCHITECTURE.md) for module details and future roadmap (
 
 ### 1. Local (Preview recommended)
 
+Step-by-step for beginners (proxy, ports, checklist): **[Getting Started](docs/getting-started/README.md)**.
+
 ```bash
 git clone https://github.com/laoshalab/polymirror.git PolyMirror
 cd PolyMirror
@@ -195,6 +206,7 @@ cp config.preview.template.yaml config.yaml
 Edit `.env` (wallet) and `config.yaml` (at least one enabled leader). **Keep `preview_mode: true` for first run.**
 
 ```bash
+npm run build:dashboard
 npm run dev
 ```
 
@@ -405,8 +417,9 @@ Built-in Web console served at **`http://127.0.0.1:8080/`** after `npm run build
 # Terminal 1 — engine
 npm run dev
 
-# Terminal 2 — frontend hot reload (proxies API → :8080)
+# Terminal 2 — frontend hot reload (proxies API → health_port, default :8080)
 npm run dev:dashboard    # → http://localhost:5173
+# If health_port ≠ 8080: VITE_API_PORT=8081 npm run dev:dashboard
 ```
 
 | Concern | Detail |
@@ -514,6 +527,7 @@ PolyMirror/
 
 | Document | Description |
 |----------|-------------|
+| **[Getting Started 小白入门](docs/getting-started/README.md)** | Path A: local Preview → Dashboard (zh / en) |
 | **[User Guide 使用说明书](docs/USER_GUIDE.md)** | Complete configuration and operations |
 | [User Guide Summary 精简版](docs/USER_GUIDE_SUMMARY.md) | Print/PDF-friendly condensed guide |
 | [Quick Reference 速查表](docs/QUICK_REFERENCE.md) | One-page cheat sheet |
@@ -540,10 +554,16 @@ PolyMirror/
 
 | Document | Description |
 |----------|-------------|
+| **[Product Scope 产品边界](docs/PRODUCT_SCOPE.md)** | Self-hosted only · **not** multi-tenant SaaS |
 | [Ecosystem Workflow](docs/ECOSYSTEM_WORKFLOW.md) | Tool positioning and user journey |
 | [Feature Survey](docs/FEATURES_SURVEY.md) | Competitive landscape |
-| [Web + Agent Architecture](docs/WEB_AGENT_ARCHITECTURE.md) | Future cloud control plane (no hosted keys) |
 | [Changelog](CHANGELOG.md) | Release history |
+
+### Archived
+
+| Document | Description |
+|----------|-------------|
+| [Web + Agent Architecture](docs/WEB_AGENT_ARCHITECTURE.md) | **Archived / out of roadmap** — historical design only |
 
 ---
 

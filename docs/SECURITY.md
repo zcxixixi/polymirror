@@ -2,13 +2,15 @@
 
 ## Threat model (v1.0)
 
+**Assumption:** one self-hosted instance for a single operator (personal use or a small team sharing **the same** machine). PolyMirror is **not** a multi-tenant SaaS — see [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md).
+
 PolyMirror runs as a long-lived Node process with access to:
 
 - Your Polymarket wallet private key (`.env`)
 - Outbound HTTPS to Polymarket APIs (Data API + CLOB) and optional Telegram
 - Local SQLite state and `config.yaml`
 
-The bundled **Dashboard** exposes a REST API that can **read and mutate** config (leaders, risk, preview/live mode, proxy, accounts). Treat the HTTP server as a **control plane**, not read-only.
+The bundled **Dashboard** exposes a REST API that can **read and mutate** config (leaders, risk, preview/live mode, proxy, accounts). Treat the HTTP server as a **local control plane** for your instance, not a hosted multi-tenant cloud.
 
 ## Dashboard & API auth
 
@@ -56,9 +58,9 @@ npm audit --audit-level=critical  # passes on v1.0.0
 
 CI runs `npm audit --audit-level=critical`.
 
-## Future: Web + Agent deployment
+## Deployment model
 
-v1.0 is **self-hosted** (private key in local `.env`). A planned **Web + Agent** model keeps signing on the user’s device (Keychain / local Agent) while the cloud hosts only config and read-only telemetry — see [WEB_AGENT_ARCHITECTURE.md](WEB_AGENT_ARCHITECTURE.md).
+v1.0 is **self-hosted only** (private key in local `.env` on your machine/VPS). There is **no** hosted multi-tenant cloud product and **no** roadmap for a public “Web + Agent” control plane ([WEB_AGENT_ARCHITECTURE.md](WEB_AGENT_ARCHITECTURE.md) is archived).
 
 ## Reporting
 

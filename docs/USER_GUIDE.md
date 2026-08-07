@@ -27,7 +27,9 @@
 
 ## 1. 产品简介
 
-PolyMirror 是一个运行在本地或服务器上的 **Polymarket 跟单机器人**。它会：
+PolyMirror 是一个运行在**你自己的**本地机器或私有服务器上的 **Polymarket 跟单机器人**（自托管自用，**不是**多租户 SaaS）。产品边界见 [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md)。
+
+它会：
 
 1. 轮询你配置的多个 **Leader**（被跟单者）的近期成交；
 2. 按你为每个 Leader 设定的策略 **缩放仓位**；
@@ -50,7 +52,7 @@ PolyMirror 是一个运行在本地或服务器上的 **Polymarket 跟单机器�
 - 跨平台（Kalshi / Limitless 等）跟单
 - 全自动链上持仓校正（仅 drift 告警 + SELL 校验，不自动改写 SQLite）
 
-> **Web 管理界面：** 运行 `npm run dev` 且 `health_port > 0` 时，可通过 Dashboard（如 `http://127.0.0.1:8081`）完成配置与监控；详见控制台 **操作文档** 页。
+> **Web 管理界面：** 运行 `npm run dev` 且 `health_port > 0` 时，可通过 Dashboard（如 `http://127.0.0.1:8080`）完成配置与监控；开发时 `npm run dev:dashboard` 的 Vite 代理也指向 **8080**。详见控制台 **操作文档** 页。
 
 ---
 
@@ -818,6 +820,8 @@ POLYMIRROR_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING
 
 | 文档 | 内容 |
 |------|------|
+| [getting-started/](getting-started/README.md) | **小白入门（中英 · Preview 路径）** |
+| [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md) | **产品边界（自托管 · 非 SaaS）** |
 | [README.md](../README.md) | 项目概览与快速开始 |
 | [RUNBOOK.md](RUNBOOK.md) | 运维手册（英文） |
 | [PREVIEW_CHECKLIST.md](PREVIEW_CHECKLIST.md) | 7 天 Preview 验收清单 |
