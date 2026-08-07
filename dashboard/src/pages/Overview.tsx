@@ -6,6 +6,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { OverviewHourlyChart } from "../components/OverviewHourlyChart";
 import { useT } from "../i18n/I18nProvider";
 import { actionBadgeClass, SideBadge } from "../utils/auditDisplay";
+import { ModeSwitchButton } from "../components/ModeSwitchButton";
 import { StopCopyTradingButton } from "../components/StopCopyTradingButton";
 
 function fmtUsd(n: number) {
@@ -74,11 +75,14 @@ export function OverviewPage() {
         }
         actions={
           s ? (
-            <StopCopyTradingButton
-              previewMode={s.previewMode}
-              copyTradingEnabled={s.copyTradingEnabled}
-              compact
-            />
+            <>
+              {s.previewMode && <ModeSwitchButton previewMode={s.previewMode} compact />}
+              <StopCopyTradingButton
+                previewMode={s.previewMode}
+                copyTradingEnabled={s.copyTradingEnabled}
+                compact
+              />
+            </>
           ) : undefined
         }
       />

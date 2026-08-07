@@ -7,6 +7,8 @@ Published documentation for people who **run** PolyMirror (self-hosted).
 |------------|------------|
 | [Getting Started](getting-started/README.md) | [小白入门](getting-started/README.md) |
 
+**Community / 社区：** [Telegram · t.me/laoshalab](https://t.me/laoshalab)
+
 ### Contents
 
 | Doc | 说明 |

@@ -86,6 +86,16 @@ export const leaderYamlSchema = z
         max_daily_volume_usd: z.number().positive().optional(),
       })
       .optional(),
+    rate_limit: z
+      .object({
+        trade_aggregation_window_ms: z.number().int().nonnegative().optional(),
+        buy_dedup_window_ms: z.number().int().nonnegative().optional(),
+        min_copy_interval_ms: z.number().int().nonnegative().optional(),
+        max_copies_per_window: z.number().int().positive().optional(),
+        copy_rate_window_ms: z.number().int().positive().optional(),
+        slippage_tolerance: z.number().nonnegative().optional(),
+      })
+      .optional(),
     filters: z
       .object({
         min_price: z.number().min(0).max(1).optional(),

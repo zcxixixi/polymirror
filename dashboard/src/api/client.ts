@@ -31,7 +31,9 @@ export function accountApi(path: string): string {
     normalized.startsWith("/api/leaders/validate") ||
     normalized === "/api/config/reload" ||
     normalized === "/api/settings/proxy/test" ||
-    normalized === "/api/settings/telegram"
+    normalized === "/api/settings/telegram" ||
+    normalized === "/api/update" ||
+    normalized.startsWith("/api/update/")
   ) {
     return normalized;
   }
@@ -126,6 +128,46 @@ export interface StatusResponse {
   accounts?: AccountSummary[];
 }
 
+export interface UpdateJobView {
+  id: string;
+  action: "apply" | "rollback";
+  phase: string;
+  targetVersion: string;
+  fromVersion: string;
+  error: string | null;
+  startedAt: number;
+  updatedAt: number;
+  logTail: string[];
+  active: boolean;
+}
+
+export interface SelfUpdateInfo {
+  enabled: boolean;
+  supported: boolean;
+  blockReason: string | null;
+  canApply: boolean;
+  canRollback: boolean;
+  rollbackVersion: string | null;
+  confirmPhrase: string | null;
+  rollbackConfirmPhrase: string | null;
+  job: UpdateJobView | null;
+}
+
+export interface UpdateCheckResponse {
+  enabled: boolean;
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  releaseUrl: string | null;
+  releaseName: string | null;
+  publishedAt: string | null;
+  checkedAt: number | null;
+  source: "release" | "tag" | null;
+  prerelease?: boolean;
+  error: string | null;
+  selfUpdate?: SelfUpdateInfo;
+}
+
 export interface DailyStatsResponse {
   accountId: string;
   today: {
@@ -146,6 +188,14 @@ export interface LeaderRow {
   weight: number;
   strategy: { type: string; copySize: number };
   limits?: { maxOrderUsd?: number; maxPositionUsd?: number; maxDailyVolumeUsd?: number };
+  rateLimit?: {
+    tradeAggregationWindowMs?: number;
+    buyDedupWindowMs?: number;
+    minCopyIntervalMs?: number;
+    maxCopiesPerWindow?: number;
+    copyRateWindowMs?: number;
+    slippageTolerance?: number;
+  };
   filters?: { minPrice?: number; maxPrice?: number; sides?: string[] };
   todayVolumeUsd: number;
 }

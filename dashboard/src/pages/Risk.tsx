@@ -6,6 +6,7 @@ import { DataCard } from "../components/ui/DataCard";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ConfirmModal } from "../components/ui/ConfirmModal";
 import { useToast } from "../components/ui/Toast";
+import { ModeSwitchButton } from "../components/ModeSwitchButton";
 import { StopCopyTradingButton } from "../components/StopCopyTradingButton";
 import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
@@ -104,10 +105,13 @@ export function RiskPage() {
         }
         actions={
           r ? (
-            <StopCopyTradingButton
-              previewMode={r.previewMode}
-              copyTradingEnabled={r.copyTradingEnabled}
-            />
+            <>
+              {r.previewMode && <ModeSwitchButton previewMode={r.previewMode} />}
+              <StopCopyTradingButton
+                previewMode={r.previewMode}
+                copyTradingEnabled={r.copyTradingEnabled}
+              />
+            </>
           ) : undefined
         }
       />

@@ -113,6 +113,7 @@ export class StateStore {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_buy_dedup ON buy_dedup(leader_id, token_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_audit_leader_copy ON audit_log(leader_id, action, ts);
       CREATE TABLE IF NOT EXISTS pending_orders (
         order_id TEXT PRIMARY KEY,
         leader_id TEXT NOT NULL,
@@ -873,6 +874,26 @@ export class StateStore {
       .prepare("INSERT INTO buy_dedup (leader_id, token_id, created_at) VALUES (?, ?, ?)")
       .run(leaderId, tokenId, Date.now());
     this.db.prepare("DELETE FROM buy_dedup WHERE created_at < ?").run(Date.now() - 86400000);
+  }
+
+  countLeaderCopiesSince(leaderId: string, sinceTs: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM audit_log
+         WHERE leader_id = ? AND action = 'COPY' AND ts > ?`
+      )
+      .get(leaderId, sinceTs) as { c: number };
+    return row.c;
+  }
+
+  getLastLeaderCopyTs(leaderId: string): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(ts) AS ts FROM audit_log
+         WHERE leader_id = ? AND action = 'COPY'`
+      )
+      .get(leaderId) as { ts: number | null };
+    return row.ts;
   }
 
   listAuditLog(options: {

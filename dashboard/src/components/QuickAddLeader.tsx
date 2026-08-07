@@ -47,21 +47,9 @@ export function QuickAddLeader() {
     }
     try {
       const r = await validateLeader({
-        id: leaderId,
         mode: target.mode,
         address: target.mode === "address" ? target.address : "",
         username: target.mode === "username" ? target.username : "",
-        enabled: true,
-        weight: 1,
-        strategyType: "PERCENTAGE",
-        copySize: 5,
-        maxOrderUsd: "20",
-        maxPositionUsd: "",
-        maxDailyVolumeUsd: "",
-        minPrice: "",
-        maxPrice: "",
-        sideBuy: true,
-        sideSell: true,
       });
       if (r.valid) {
         if (r.resolvedAddress && target.mode === "username") {

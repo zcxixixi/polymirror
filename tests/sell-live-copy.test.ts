@@ -7,6 +7,7 @@ import type { RuntimeConfig } from "../src/config/types.js";
 import { testActivity, testLeader } from "./helpers/fixtures.js";
 
 const mockPlaceLimitOrder = vi.fn();
+const mockRecoverOrderAfterFailure = vi.fn(async () => null);
 const mockFetchLeaderBefore = vi.fn();
 const mockFetchConditional = vi.fn();
 const mockPollLeaders = vi.fn();
@@ -38,7 +39,7 @@ vi.mock("../src/executor/clob.js", () => ({
     getOrderStatus = vi.fn();
     cancelOrder = vi.fn(async () => ({ ok: true }));
     listOpenOrders = vi.fn(async () => []);
-    recoverOrderAfterFailure = vi.fn(async () => null);
+    recoverOrderAfterFailure = (...args: unknown[]) => mockRecoverOrderAfterFailure(...args);
   },
   isDefiniteOrderRejection: () => false,
 }));
@@ -70,6 +71,7 @@ vi.mock("../src/executor/balance.js", async (importOriginal) => {
 });
 
 import { runCopyCycle } from "../src/engine/copy-cycle.js";
+import { tradeEventKey } from "../src/monitor/data-api.js";
 
 function liveConfig(leaders = [testLeader()]): RuntimeConfig {
   return {
@@ -135,6 +137,8 @@ describe("Live SELL with sync_wallet_balance", () => {
     dir = mkdtempSync(join(tmpdir(), "pm-sell-live-"));
     store = new StateStore(join(dir, "test.db"));
     mockPlaceLimitOrder.mockReset();
+    mockRecoverOrderAfterFailure.mockReset();
+    mockRecoverOrderAfterFailure.mockResolvedValue(null);
     mockFetchLeaderBefore.mockReset();
     mockFetchConditional.mockReset();
     mockPollLeaders.mockReset();
@@ -184,6 +188,39 @@ describe("Live SELL with sync_wallet_balance", () => {
     );
     // Filled 10 of 20 tracked
     expect(store.getPosition("whale", token)).toBe(10);
+  });
+
+  it("marks seen when Live accept has no order id (never re-submit)", async () => {
+    const buy = testActivity({
+      asset: "token-no-oid",
+      side: "BUY",
+      size: 100,
+      price: 0.5,
+      transactionHash: "0xno-order-id",
+    });
+
+    mockPlaceLimitOrder.mockResolvedValue({
+      preview: false,
+      filledShares: 0,
+      filledUsd: 0,
+      pendingRemaining: 10,
+      orderStatus: "LIVE",
+    });
+    mockPollLeaders.mockResolvedValue([
+      { leaderId: "whale", fetched: 1, candidates: [buy] },
+    ]);
+
+    const config = liveConfig();
+    const first = await runCopyCycle(config, store);
+    expect(first.copied).toBe(0);
+    expect(first.errors.some((e) => /without order id/i.test(e))).toBe(true);
+    expect(store.hasSeen(tradeEventKey(buy))).toBe(true);
+    expect(mockRecoverOrderAfterFailure).toHaveBeenCalled();
+    expect(mockPlaceLimitOrder).toHaveBeenCalledTimes(1);
+
+    const second = await runCopyCycle(config, store);
+    expect(second.copied).toBe(0);
+    expect(mockPlaceLimitOrder).toHaveBeenCalledTimes(1);
   });
 
   it("skips when wallet token allowance check fails after sizing", async () => {

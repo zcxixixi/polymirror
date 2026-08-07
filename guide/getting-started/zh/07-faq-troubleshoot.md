@@ -62,7 +62,7 @@
 
 ## 如何确认成功 + 常见失败
 
-修好后重新勾选 [CHECKLIST.md](CHECKLIST.md)。仍解决不了 → [RUNBOOK.md](../../RUNBOOK.md) 与 [USER_GUIDE.md §13](../../USER_GUIDE.md)。
+修好后重新勾选 [CHECKLIST.md](CHECKLIST.md)。仍解决不了 → [RUNBOOK.md](../../RUNBOOK.md) 与 [USER_GUIDE.md §13](../../USER_GUIDE.md)，或加入 Telegram 社区 [t.me/laoshalab](https://t.me/laoshalab)（勿在群内粘贴 `.env` / 私钥）。
 
 **上一章 →** [06 — Live](06-go-live-careful.md)  
 **回到开头 →** [00 — 概览](00-overview.md)  

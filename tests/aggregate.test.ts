@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { aggregateTrades } from "../src/engine/aggregate.js";
+import { aggregateTrades, aggregateTradesPerLeader } from "../src/engine/aggregate.js";
 import type { Activity } from "../src/monitor/data-api.js";
 
 function act(ts: number, size: number, price: number): Activity {
@@ -40,5 +40,25 @@ describe("aggregateTrades", () => {
     ];
     const out = aggregateTrades(items, 1000);
     expect(out).toHaveLength(2);
+  });
+});
+
+describe("aggregateTradesPerLeader", () => {
+  it("applies per-leader windows", () => {
+    const items = [
+      { leaderId: "fast", activity: act(2001, 10, 0.5) },
+      { leaderId: "fast", activity: act(2000, 20, 0.6) },
+      { leaderId: "slow", activity: act(2001, 5, 0.4) },
+      { leaderId: "slow", activity: act(1000, 5, 0.45) },
+    ];
+    const out = aggregateTradesPerLeader(items, 0, (id) =>
+      id === "fast" ? 5000 : undefined
+    );
+    expect(out).toHaveLength(3);
+    const fast = out.filter((t) => t.leaderId === "fast");
+    const slow = out.filter((t) => t.leaderId === "slow");
+    expect(fast).toHaveLength(1);
+    expect(fast[0]!.sourceCount).toBe(2);
+    expect(slow).toHaveLength(2);
   });
 });

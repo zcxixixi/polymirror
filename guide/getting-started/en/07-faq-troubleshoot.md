@@ -60,7 +60,7 @@ Fix the most common beginner blockers: connectivity, proxy, ports, 403, no copy 
 
 ## Success / common failures
 
-Re-tick [CHECKLIST.md](CHECKLIST.md). Still stuck → [RUNBOOK.md](../../RUNBOOK.md) and [USER_GUIDE.md](../../USER_GUIDE.md).
+Re-tick [CHECKLIST.md](CHECKLIST.md). Still stuck → [RUNBOOK.md](../../RUNBOOK.md) and [USER_GUIDE.md](../../USER_GUIDE.md), or join the Telegram community [t.me/laoshalab](https://t.me/laoshalab) (never paste `.env` / private keys in chat).
 
 **Previous →** [06 — Live](06-go-live-careful.md)  
 **Back to start →** [00 — Overview](00-overview.md)  

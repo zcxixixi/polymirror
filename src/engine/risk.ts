@@ -1,4 +1,4 @@
-import type { GlobalConfig } from "../config/types.js";
+import type { GlobalConfig, LeaderConfig, LeaderRateLimit } from "../config/types.js";
 import type { StateStore } from "../state/store.js";
 import { logError } from "../notify/logger.js";
 
@@ -109,8 +109,12 @@ export class RiskGate {
     return { allow: true };
   }
 
-  checkSlippage(leaderPrice: number, referencePrice: number): RiskCheckResult {
-    const tol = this.global.risk.slippageTolerance;
+  checkSlippage(
+    leaderPrice: number,
+    referencePrice: number,
+    tolerance?: number
+  ): RiskCheckResult {
+    const tol = tolerance ?? this.global.risk.slippageTolerance;
     if (tol <= 0) return { allow: true };
     if (Math.abs(referencePrice - leaderPrice) > tol) {
       return {
@@ -118,6 +122,44 @@ export class RiskGate {
         reason: `slippage ${Math.abs(referencePrice - leaderPrice).toFixed(4)} > ${tol}`,
       };
     }
+    return { allow: true };
+  }
+
+  /** Throttle burst copies from a single fast leader. SELL exits are never blocked. */
+  checkLeaderCopyRate(
+    leaderId: string,
+    side: "BUY" | "SELL",
+    rateLimit?: LeaderRateLimit
+  ): RiskCheckResult {
+    if (side !== "BUY" || !rateLimit) return { allow: true };
+
+    const minInterval = rateLimit.minCopyIntervalMs ?? 0;
+    if (minInterval > 0) {
+      const lastCopyTs = this.store.getLastLeaderCopyTs(leaderId);
+      if (lastCopyTs !== null) {
+        const elapsed = Date.now() - lastCopyTs;
+        if (elapsed < minInterval) {
+          return {
+            allow: false,
+            reason: `leader copy cooldown ${Math.ceil((minInterval - elapsed) / 1000)}s remaining`,
+          };
+        }
+      }
+    }
+
+    const maxCopies = rateLimit.maxCopiesPerWindow;
+    if (maxCopies !== undefined && maxCopies > 0) {
+      const windowMs = rateLimit.copyRateWindowMs ?? 60_000;
+      const since = Date.now() - windowMs;
+      const count = this.store.countLeaderCopiesSince(leaderId, since);
+      if (count >= maxCopies) {
+        return {
+          allow: false,
+          reason: `leader copy rate ${count}/${maxCopies} in ${Math.round(windowMs / 1000)}s`,
+        };
+      }
+    }
+
     return { allow: true };
   }
 
@@ -150,4 +192,28 @@ export function assertLiveTradingForAccounts(
   for (const def of accounts) {
     assertLiveTradingAllowed(def.config.app.global.previewMode);
   }
+}
+
+export function resolveLeaderAggregationWindow(
+  leader: LeaderConfig,
+  globalWindowMs: number
+): number {
+  const override = leader.rateLimit?.tradeAggregationWindowMs;
+  return override !== undefined ? override : globalWindowMs;
+}
+
+export function resolveLeaderBuyDedupWindow(
+  leader: LeaderConfig,
+  globalWindowMs: number
+): number {
+  const override = leader.rateLimit?.buyDedupWindowMs;
+  return override !== undefined ? override : globalWindowMs;
+}
+
+export function resolveLeaderSlippageTolerance(
+  leader: LeaderConfig,
+  globalTolerance: number
+): number {
+  const override = leader.rateLimit?.slippageTolerance;
+  return override !== undefined ? override : globalTolerance;
 }

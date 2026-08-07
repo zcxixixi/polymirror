@@ -9,6 +9,7 @@ interface ConfirmModalProps {
   cancelLabel?: string;
   variant?: "danger" | "primary";
   loading?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -21,6 +22,7 @@ export function ConfirmModal({
   cancelLabel,
   variant = "primary",
   loading = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmModalProps) {
@@ -48,7 +50,7 @@ export function ConfirmModal({
           <button
             type="button"
             className={variant === "danger" ? "btn-danger" : "btn-primary"}
-            disabled={loading}
+            disabled={loading || confirmDisabled}
             onClick={onConfirm}
           >
             {loading ? t("common.processing") : (confirmLabel ?? t("confirm.defaultConfirm"))}

@@ -102,6 +102,22 @@ export interface LeaderLimits {
   maxDailyVolumeUsd?: number;
 }
 
+/** Per-leader anti-burst overrides for fast / HFT-style leaders. */
+export interface LeaderRateLimit {
+  /** Override global trade_aggregation_window_ms; omit = use global. */
+  tradeAggregationWindowMs?: number;
+  /** Override global buy_dedup_window_ms; omit = use global. */
+  buyDedupWindowMs?: number;
+  /** Min ms between successful COPY for this leader (any token). */
+  minCopyIntervalMs?: number;
+  /** Max successful COPY count within copyRateWindowMs. */
+  maxCopiesPerWindow?: number;
+  /** Window for maxCopiesPerWindow (default 60000). */
+  copyRateWindowMs?: number;
+  /** Override global slippage_tolerance for Live. */
+  slippageTolerance?: number;
+}
+
 export interface LeaderFilters {
   minPrice?: number;
   maxPrice?: number;
@@ -118,6 +134,7 @@ export interface LeaderConfig {
   weight: number;
   strategy: LeaderStrategy;
   limits?: LeaderLimits;
+  rateLimit?: LeaderRateLimit;
   filters?: LeaderFilters;
 }
 

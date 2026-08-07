@@ -252,6 +252,16 @@ function mapLeader(l: LeaderYaml): LeaderConfig {
           maxDailyVolumeUsd: l.limits.max_daily_volume_usd,
         }
       : undefined,
+    rateLimit: l.rate_limit
+      ? {
+          tradeAggregationWindowMs: l.rate_limit.trade_aggregation_window_ms,
+          buyDedupWindowMs: l.rate_limit.buy_dedup_window_ms,
+          minCopyIntervalMs: l.rate_limit.min_copy_interval_ms,
+          maxCopiesPerWindow: l.rate_limit.max_copies_per_window,
+          copyRateWindowMs: l.rate_limit.copy_rate_window_ms,
+          slippageTolerance: l.rate_limit.slippage_tolerance,
+        }
+      : undefined,
     filters: l.filters
       ? {
           minPrice: l.filters.min_price,

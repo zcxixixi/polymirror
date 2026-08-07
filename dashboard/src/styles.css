@@ -457,6 +457,12 @@ a:hover {
   border-bottom-color: rgba(52, 211, 153, 0.25);
 }
 
+.status-bar-update {
+  background: var(--accent-dim);
+  color: var(--text-secondary);
+  border-bottom-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
 .status-bar-info {
   background: var(--accent-dim);
   color: var(--text-secondary);
@@ -483,6 +489,19 @@ a:hover {
   opacity: 0.9;
 }
 
+button.status-bar-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.status-bar-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .status-bar-meta {
   font-size: 0.75rem;
   white-space: nowrap;
@@ -500,6 +519,11 @@ a:hover {
   background: var(--green);
   box-shadow: 0 0 8px var(--green-glow);
   animation: pulse-live 2s ease-in-out infinite;
+}
+
+.status-dot-update {
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .status-dot-preview {

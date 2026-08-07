@@ -7,8 +7,13 @@ import { calculateOrderSize, calculateSellSize } from "../engine/sizing.js";
 import { passActivityFilters } from "../engine/filters.js";
 import { isAnyTradeKeySeen, isRecentBuyDuplicate } from "../engine/dedup.js";
 import { ConflictTracker } from "../engine/conflict.js";
-import { aggregateTrades } from "../engine/aggregate.js";
-import { RiskGate, assertLiveTradingAllowed } from "../engine/risk.js";
+import { aggregateTradesPerLeader } from "../engine/aggregate.js";
+import {
+  RiskGate,
+  assertLiveTradingAllowed,
+  resolveLeaderBuyDedupWindow,
+  resolveLeaderSlippageTolerance,
+} from "../engine/risk.js";
 import type { StateStore } from "../state/store.js";
 import { processPendingOrders } from "../engine/pending-orders.js";
 import { adoptUntrackedOpenOrders } from "../engine/order-reconcile.js";
@@ -216,9 +221,12 @@ export async function runCopyCycle(
     }
   }
 
-  const aggregated = aggregateTrades(
+  const leaderById = new Map(config.app.leaders.map((l) => [l.id, l]));
+
+  const aggregated = aggregateTradesPerLeader(
     rawQueue,
-    config.app.global.tradeAggregationWindowMs
+    config.app.global.tradeAggregationWindowMs,
+    (leaderId) => leaderById.get(leaderId)?.rateLimit?.tradeAggregationWindowMs
   );
   const queue: QueuedTrade[] = aggregated.map((a) => ({
     leaderId: a.leaderId,
@@ -226,7 +234,7 @@ export async function runCopyCycle(
     sourceTradeKeys: a.sourceTradeKeys,
   }));
 
-  const buyWindow = config.app.global.buyDedupWindowMs;
+  const defaultBuyWindow = config.app.global.buyDedupWindowMs;
 
   let geoblockMsg: string | undefined;
   if (!preview) {
@@ -274,7 +282,12 @@ export async function runCopyCycle(
       continue;
     }
 
-    if (isRecentBuyDuplicate(store, leaderId, activity, buyWindow)) {
+    if (isRecentBuyDuplicate(
+      store,
+      leaderId,
+      activity,
+      resolveLeaderBuyDedupWindow(leader, defaultBuyWindow)
+    )) {
       skipped++;
       skip(store, leaderId, activity, "recent buy dedup", preview);
       continue;
@@ -289,6 +302,13 @@ export async function runCopyCycle(
     if (!conflictDecision.allow) {
       skipped++;
       skip(store, leaderId, activity, conflictDecision.reason ?? "conflict", preview);
+      continue;
+    }
+
+    const rateCheck = risk.checkLeaderCopyRate(leaderId, activity.side, leader.rateLimit);
+    if (!rateCheck.allow) {
+      skipped++;
+      skip(store, leaderId, activity, rateCheck.reason ?? "leader copy rate", preview);
       continue;
     }
 
@@ -457,7 +477,8 @@ export async function runCopyCycle(
       }
     }
 
-    if (!preview && config.app.global.risk.slippageTolerance > 0) {
+    const slipTol = resolveLeaderSlippageTolerance(leader, config.app.global.risk.slippageTolerance);
+    if (!preview && slipTol > 0) {
       const ref = await fetchBestExecutablePrice(
         config.wallet.clobUrl,
         config.wallet.chainId,
@@ -469,7 +490,7 @@ export async function runCopyCycle(
         skip(store, leaderId, activity, "slippage reference price unavailable", preview);
         continue;
       }
-      const slip = risk.checkSlippage(leaderPrice, ref);
+      const slip = risk.checkSlippage(leaderPrice, ref, slipTol);
       if (!slip.allow) {
         skipped++;
         skip(store, leaderId, activity, slip.reason ?? "slippage", preview);
@@ -567,6 +588,8 @@ export async function runCopyCycle(
         !orderResult.orderId &&
         (orderResult.pendingRemaining > 0 || orderResult.filledShares <= 0)
       ) {
+        // Recovery already attempted above when an order id is required.
+        // Fail closed: mark seen so the next poll never re-submits (no double-fill).
         const msg =
           orderResult.pendingRemaining > 0
             ? `GTC pending without order id (remaining ${orderResult.pendingRemaining})`
@@ -582,6 +605,8 @@ export async function runCopyCycle(
           reason: msg,
           preview,
         });
+        store.markSeenMany(tradeKeys, leaderId);
+        telegram?.error(`${leaderId} ${activity.side} ${msg}`);
         continue;
       }
 
@@ -751,7 +776,7 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
     syncApiServer(apiState, manager.healthPort, apiCtx);
 
     if (!tryBeginCycle()) {
-      logInfo("Skipping poll tick — previous cycle or config reload in progress");
+      logInfo("Skipping poll tick — previous cycle, config reload, or maintenance in progress");
       return;
     }
     try {

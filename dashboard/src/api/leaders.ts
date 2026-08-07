@@ -81,7 +81,24 @@ export interface LeaderFormData {
   maxPrice: string;
   sideBuy: boolean;
   sideSell: boolean;
+  /** Fast-bot throttle overrides (empty = inherit global / unset). */
+  rateLimitEnabled: boolean;
+  tradeAggregationWindowMs: string;
+  buyDedupWindowMs: string;
+  minCopyIntervalMs: string;
+  maxCopiesPerWindow: string;
+  copyRateWindowMs: string;
+  leaderSlippageTolerance: string;
 }
+
+export type LeaderRateLimitFields = {
+  tradeAggregationWindowMs?: number;
+  buyDedupWindowMs?: number;
+  minCopyIntervalMs?: number;
+  maxCopiesPerWindow?: number;
+  copyRateWindowMs?: number;
+  slippageTolerance?: number;
+};
 
 export function leaderToForm(leader?: {
   id: string;
@@ -91,9 +108,14 @@ export function leaderToForm(leader?: {
   weight: number;
   strategy: { type: string; copySize: number };
   limits?: { maxOrderUsd?: number; maxPositionUsd?: number; maxDailyVolumeUsd?: number };
+  rateLimit?: LeaderRateLimitFields;
   filters?: { minPrice?: number; maxPrice?: number; sides?: string[] };
 }): LeaderFormData {
   const sides = leader?.filters?.sides ?? [];
+  const rl = leader?.rateLimit;
+  const hasRate =
+    rl !== undefined &&
+    Object.values(rl).some((v) => v !== undefined && v !== null);
   return {
     id: leader?.id ?? "",
     mode: leader?.username && !leader?.address ? "username" : "address",
@@ -110,7 +132,21 @@ export function leaderToForm(leader?: {
     maxPrice: leader?.filters?.maxPrice?.toString() ?? "",
     sideBuy: sides.length === 0 || sides.includes("BUY"),
     sideSell: sides.length === 0 || sides.includes("SELL"),
+    rateLimitEnabled: hasRate,
+    tradeAggregationWindowMs: rl?.tradeAggregationWindowMs?.toString() ?? "",
+    buyDedupWindowMs: rl?.buyDedupWindowMs?.toString() ?? "",
+    minCopyIntervalMs: rl?.minCopyIntervalMs?.toString() ?? "",
+    maxCopiesPerWindow: rl?.maxCopiesPerWindow?.toString() ?? "",
+    copyRateWindowMs: rl?.copyRateWindowMs?.toString() ?? "",
+    leaderSlippageTolerance: rl?.slippageTolerance?.toString() ?? "",
   };
+}
+
+function parseOptNumber(raw: string): number | undefined {
+  const s = raw.trim();
+  if (!s) return undefined;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 export function formToPayload(form: LeaderFormData) {
@@ -136,6 +172,29 @@ export function formToPayload(form: LeaderFormData) {
   if (form.maxDailyVolumeUsd) limits.maxDailyVolumeUsd = parseFloat(form.maxDailyVolumeUsd);
   payload.limits = limits;
 
+  if (!form.rateLimitEnabled) {
+    payload.rateLimit = null;
+  } else {
+    const rateLimit: LeaderRateLimitFields = {};
+    const agg = parseOptNumber(form.tradeAggregationWindowMs);
+    const dedup = parseOptNumber(form.buyDedupWindowMs);
+    const interval = parseOptNumber(form.minCopyIntervalMs);
+    const maxCopies = parseOptNumber(form.maxCopiesPerWindow);
+    const windowMs = parseOptNumber(form.copyRateWindowMs);
+    const slip = parseOptNumber(form.leaderSlippageTolerance);
+    if (agg !== undefined) rateLimit.tradeAggregationWindowMs = agg;
+    if (dedup !== undefined) rateLimit.buyDedupWindowMs = dedup;
+    if (interval !== undefined) rateLimit.minCopyIntervalMs = interval;
+    if (maxCopies !== undefined) rateLimit.maxCopiesPerWindow = maxCopies;
+    if (windowMs !== undefined) rateLimit.copyRateWindowMs = windowMs;
+    if (slip !== undefined) rateLimit.slippageTolerance = slip;
+    if (Object.keys(rateLimit).length > 0) {
+      payload.rateLimit = rateLimit;
+    } else {
+      payload.rateLimit = null;
+    }
+  }
+
   const minP = form.minPrice ? parseFloat(form.minPrice) : undefined;
   const maxP = form.maxPrice ? parseFloat(form.maxPrice) : undefined;
   const sides: ("BUY" | "SELL")[] = [];
@@ -158,7 +217,9 @@ export interface ValidateResponse {
   error?: string;
 }
 
-export async function validateLeader(form: LeaderFormData): Promise<ValidateResponse> {
+export async function validateLeader(
+  form: Pick<LeaderFormData, "mode" | "address" | "username">
+): Promise<ValidateResponse> {
   const params = new URLSearchParams();
   if (form.mode === "address") {
     params.set("address", form.address.trim());

@@ -4,6 +4,10 @@ import {
   endCycle,
   withReloadLock,
   resetCycleLockForTests,
+  enterMaintenance,
+  exitMaintenance,
+  isMaintenanceActive,
+  waitForCycleIdle,
 } from "../src/engine/cycle-lock.js";
 
 describe("cycle-lock", () => {
@@ -52,5 +56,23 @@ describe("cycle-lock", () => {
     });
     await expect(Promise.all([a, b])).resolves.toEqual(["a", "b"]);
     expect(order).toEqual([1, 2, 3]);
+  });
+
+  it("maintenance blocks new poll cycles and config reload", async () => {
+    enterMaintenance();
+    expect(isMaintenanceActive()).toBe(true);
+    expect(tryBeginCycle()).toBe(false);
+    await expect(withReloadLock(async () => "x")).rejects.toThrow(/maintenance/i);
+    exitMaintenance();
+    expect(isMaintenanceActive()).toBe(false);
+    expect(tryBeginCycle()).toBe(true);
+    endCycle();
+  });
+
+  it("waitForCycleIdle resolves after endCycle", async () => {
+    expect(tryBeginCycle()).toBe(true);
+    const waiter = waitForCycleIdle(5_000);
+    setTimeout(() => endCycle(), 20);
+    await expect(waiter).resolves.toBeUndefined();
   });
 });

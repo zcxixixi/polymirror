@@ -95,6 +95,29 @@ leaders:
       max_price: 0.70
       sides: ["BUY", "SELL"]
 
+  # Fast / HFT-style leader: merge bursts, throttle copy rate, tighten slippage.
+  # - id: hft_bot
+  #   address: "0x..."
+  #   enabled: false
+  #   weight: 1.0
+  #   strategy:
+  #     type: ADAPTIVE
+  #     copy_size: 5
+  #     adaptive_min_percent: 2
+  #     adaptive_max_percent: 8
+  #     adaptive_threshold_usd: 200
+  #   limits:
+  #     max_order_usd: 10
+  #     max_position_usd: 50
+  #     max_daily_volume_usd: 100
+  #   rate_limit:
+  #     trade_aggregation_window_ms: 5000
+  #     buy_dedup_window_ms: 120000
+  #     min_copy_interval_ms: 30000
+  #     max_copies_per_window: 5
+  #     copy_rate_window_ms: 60000
+  #     slippage_tolerance: 0.02
+
   # Resolve proxy address from Polymarket username at startup:
   # - id: polymarket_user
   #   username: "some-trader"

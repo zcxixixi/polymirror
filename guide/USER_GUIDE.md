@@ -848,4 +848,5 @@ POLYMIRROR_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING
 
 ---
 
-**文档反馈：** 若发现说明与 v1.0.0 行为不符，请对照 `CHANGELOG.md` 或提交 Issue。
+**文档反馈：** 若发现说明与 v1.0.0 行为不符，请对照 `CHANGELOG.md` 或提交 Issue。  
+**社区：** [Telegram · t.me/laoshalab](https://t.me/laoshalab)（勿在群内粘贴 `.env` / 私钥）

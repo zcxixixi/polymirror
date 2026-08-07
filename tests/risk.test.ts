@@ -115,3 +115,61 @@ describe("RiskGate preview cash", () => {
     expect(risk.canAffordPreviewBuy(10, 100).allow).toBe(false);
   });
 });
+
+describe("RiskGate leader copy rate", () => {
+  it("blocks BUY when min copy interval not elapsed", () => {
+    store.audit({
+      leaderId: "bot",
+      action: "COPY",
+      tokenId: "t1",
+      side: "BUY",
+      size: 1,
+      price: 0.5,
+      reason: "test",
+      preview: true,
+    });
+    const risk = new RiskGate(globalBase, store);
+    const result = risk.checkLeaderCopyRate("bot", "BUY", { minCopyIntervalMs: 60_000 });
+    expect(result.allow).toBe(false);
+    expect(result.reason).toContain("cooldown");
+  });
+
+  it("allows SELL even when rate limit would block BUY", () => {
+    store.audit({
+      leaderId: "bot",
+      action: "COPY",
+      tokenId: "t1",
+      side: "BUY",
+      size: 1,
+      price: 0.5,
+      reason: "test",
+      preview: true,
+    });
+    const risk = new RiskGate(globalBase, store);
+    expect(
+      risk.checkLeaderCopyRate("bot", "SELL", { minCopyIntervalMs: 60_000 }).allow
+    ).toBe(true);
+  });
+
+  it("blocks BUY when max copies per window exceeded", () => {
+    for (let i = 0; i < 3; i++) {
+      store.audit({
+        leaderId: "bot",
+        action: "COPY",
+        tokenId: `t${i}`,
+        side: "BUY",
+        size: 1,
+        price: 0.5,
+        reason: "test",
+        preview: true,
+      });
+    }
+    const risk = new RiskGate(globalBase, store);
+    const result = risk.checkLeaderCopyRate("bot", "BUY", {
+      maxCopiesPerWindow: 3,
+      copyRateWindowMs: 60_000,
+    });
+    expect(result.allow).toBe(false);
+    expect(result.reason).toContain("copy rate");
+  });
+});

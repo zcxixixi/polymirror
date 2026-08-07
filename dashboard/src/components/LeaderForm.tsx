@@ -296,6 +296,105 @@ export function LeaderForm({ initial, isEdit }: Props) {
         </div>
       </details>
 
+      <details className="form-advanced" open={isEdit && form.rateLimitEnabled}>
+        <summary>{t("leaders.rateLimitSection")}</summary>
+        <p className="muted form-hint">{t("leaders.rateLimitHint")}</p>
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={form.rateLimitEnabled}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setForm((f) =>
+                on
+                  ? {
+                      ...f,
+                      rateLimitEnabled: true,
+                      tradeAggregationWindowMs: f.tradeAggregationWindowMs || "5000",
+                      buyDedupWindowMs: f.buyDedupWindowMs || "120000",
+                      minCopyIntervalMs: f.minCopyIntervalMs || "30000",
+                      maxCopiesPerWindow: f.maxCopiesPerWindow || "5",
+                      copyRateWindowMs: f.copyRateWindowMs || "60000",
+                      leaderSlippageTolerance: f.leaderSlippageTolerance || "0.02",
+                    }
+                  : { ...f, rateLimitEnabled: false }
+              );
+            }}
+          />
+          {t("leaders.rateLimitEnable")}
+        </label>
+        {form.rateLimitEnabled && (
+          <div className="form-row">
+            <label className="form-label">
+              {t("leaders.tradeAggregationWindowMs")}
+              <input
+                type="number"
+                step="1000"
+                min="0"
+                value={form.tradeAggregationWindowMs}
+                onChange={(e) => set("tradeAggregationWindowMs", e.target.value)}
+                placeholder="5000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.buyDedupWindowMs")}
+              <input
+                type="number"
+                step="1000"
+                min="0"
+                value={form.buyDedupWindowMs}
+                onChange={(e) => set("buyDedupWindowMs", e.target.value)}
+                placeholder="120000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.minCopyIntervalMs")}
+              <input
+                type="number"
+                step="1000"
+                min="0"
+                value={form.minCopyIntervalMs}
+                onChange={(e) => set("minCopyIntervalMs", e.target.value)}
+                placeholder="30000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.maxCopiesPerWindow")}
+              <input
+                type="number"
+                step="1"
+                min="1"
+                value={form.maxCopiesPerWindow}
+                onChange={(e) => set("maxCopiesPerWindow", e.target.value)}
+                placeholder="5"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.copyRateWindowMs")}
+              <input
+                type="number"
+                step="1000"
+                min="1000"
+                value={form.copyRateWindowMs}
+                onChange={(e) => set("copyRateWindowMs", e.target.value)}
+                placeholder="60000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.leaderSlippageTolerance")}
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={form.leaderSlippageTolerance}
+                onChange={(e) => set("leaderSlippageTolerance", e.target.value)}
+                placeholder="0.02"
+              />
+            </label>
+          </div>
+        )}
+      </details>
+
       <div className="form-actions">
         <button type="submit" disabled={save.isPending}>
           {save.isPending ? t("common.processing") : isEdit ? t("leaders.saveEdit") : t("leaders.addSubmit")}

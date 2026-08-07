@@ -41,6 +41,9 @@ import { createAccount, updateAccount } from "./accounts.js";
 import { buildAccountPnlSnapshot, parsePnlRange } from "./pnl.js";
 import { cancelPendingOrder } from "./orders.js";
 import { deleteLeader, findLeaderIdForTrader } from "./leaders.js";
+import { getUpdateApiResponse } from "../update/check.js";
+import { startApplyUpdate, startRollback } from "../update/apply.js";
+import { getAppVersion } from "../version.js";
 
 export interface ApiContext {
   manager: AccountManager;
@@ -148,6 +151,47 @@ export async function handleApiRequest(
 
   if (pathname === "/api/settings/telegram" && method === "PATCH") {
     return patchTelegramSettings(body);
+  }
+
+  if (pathname === "/api/update" && method === "GET") {
+    const force = searchParams.get("force") === "1" || searchParams.get("force") === "true";
+    const anyLive = ctx.manager
+      .list()
+      .some((a) => a.enabled && !a.config.app.global.previewMode);
+    const body = await getUpdateApiResponse({ force, anyLive });
+    return { status: 200, body };
+  }
+
+  if (pathname === "/api/update/apply" && method === "POST") {
+    const parsed = z
+      .object({
+        version: z.string().min(1),
+        confirm: z.string().min(1),
+      })
+      .safeParse(body);
+    if (!parsed.success) {
+      return {
+        status: 400,
+        body: { error: "version and confirm are required" },
+      };
+    }
+    const isAnyLive = () =>
+      ctx.manager.list().some((a) => a.enabled && !a.config.app.global.previewMode);
+    return startApplyUpdate({ ...parsed.data, anyLive: isAnyLive(), isAnyLive });
+  }
+
+  if (pathname === "/api/update/rollback" && method === "POST") {
+    const parsed = z
+      .object({
+        confirm: z.string().min(1),
+      })
+      .safeParse(body);
+    if (!parsed.success) {
+      return { status: 400, body: { error: "confirm is required" } };
+    }
+    const isAnyLive = () =>
+      ctx.manager.list().some((a) => a.enabled && !a.config.app.global.previewMode);
+    return startRollback({ confirm: parsed.data.confirm, anyLive: isAnyLive(), isAnyLive });
   }
 
   const { accountId, subPath } = parseRoute(pathname, searchParams);
@@ -532,6 +576,7 @@ async function handleCreateLeader(
     }
 
     const row = leaderWriteToYaml(input);
+    if (row.rate_limit === null) delete row.rate_limit;
     const next = upsertLeaderInAccount(normalized, actx.accountId, row);
     writeNormalizedConfigDocument(ctx.configPath, next);
     await ctx.reloadConfig();
@@ -630,7 +675,7 @@ function formatWriteError(e: unknown): { status: number; body: unknown } {
 function buildStatus(ctx: ApiContext, actx: AccountApiContext) {
   const rt = ctx.manager.require(actx.accountId);
   return {
-    version: "1.0.0",
+    version: getAppVersion(),
     accountId: actx.accountId,
     accountLabel: actx.label,
     status: rt.health.killSwitchActive ? "degraded" : "ok",
@@ -664,6 +709,7 @@ function buildLeaders(ctx: LegacyAccountContext) {
     weight: l.weight,
     strategy: l.strategy,
     limits: l.limits,
+    rateLimit: l.rateLimit,
     filters: l.filters,
     todayVolumeUsd: leaderStats.get(l.id) ?? 0,
   }));
