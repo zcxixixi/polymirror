@@ -10,7 +10,7 @@
 
 **Version 1.0.0** · Single-platform Polymarket multi-leader copy trading (mode A)
 
-**第一次用？ / First time?** → [中文入门](docs/getting-started/zh/00-overview.md) · [English Getting Started](docs/getting-started/en/00-overview.md) · [语言选择 / Language](docs/getting-started/README.md)
+**第一次用？ / First time?** → [中文入门](guide/getting-started/zh/00-overview.md) · [English Getting Started](guide/getting-started/en/00-overview.md) · [语言选择 / Language](guide/getting-started/README.md)
 
 ---
 
@@ -42,7 +42,7 @@ PolyMirror is a **self-hosted copy-trading daemon** for [Polymarket](https://pol
 > **Not a multi-tenant SaaS.** You run your own instance on your machine or private VPS. We do not host private keys, operate shared copy-trading cloud, or provide multi-tenant accounts.  
 > **不是多租户 SaaS。** 每人在自己的服务器或电脑上跑自己的实例；不托管私钥、不代运维、不运营共享云端跟单服务。
 
-Canonical details: **[docs/PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md)**. Multi-account in config means **your own wallets on one instance**, not multi-tenant SaaS.
+Canonical details: **[guide/PRODUCT_SCOPE.md](guide/PRODUCT_SCOPE.md)**. Multi-account in config means **your own wallets on one instance**, not multi-tenant SaaS.
 
 PolyMirror 不是 Polymarket 交易前端，也不是 Leader 分析站。它专注 **研究之后 → Preview 验证 → Live 执行** 这一段：
 
@@ -108,7 +108,7 @@ Predicts.guru / PolyWallet   筛人、观察 PnL
 | **Risk** | Kill switch, daily caps, preview/live mode |
 | **Account** | Wallet setup, multi-account management |
 | **Settings** | Global config, Telegram, proxy, reload |
-| **Docs** | In-app help center (links to `docs/dashboard/`) |
+| **Docs** | In-app help center (links to `guide/dashboard/`) |
 
 Dashboard writes back to `config.yaml` and `.env`; the daemon hot-reloads on change.
 
@@ -172,7 +172,7 @@ flowchart LR
 | Notify | `src/notify/` | Logger, Telegram, health HTTP + static Dashboard |
 | Dashboard | `dashboard/` | React 19 + Vite SPA |
 
-See [Architecture](docs/ARCHITECTURE.md) for module details and future roadmap (Web + Agent, cross-venue).
+See [Architecture](guide/ARCHITECTURE.md) for module details.
 
 ---
 
@@ -192,7 +192,7 @@ See [Architecture](docs/ARCHITECTURE.md) for module details and future roadmap (
 
 ### 1. Local (Preview recommended)
 
-Step-by-step for beginners (proxy, ports, checklist): **[Getting Started](docs/getting-started/README.md)**.
+Step-by-step for beginners (proxy, ports, checklist): **[Getting Started](guide/getting-started/README.md)**.
 
 ```bash
 git clone https://github.com/laoshalab/polymirror.git PolyMirror
@@ -427,7 +427,7 @@ npm run dev:dashboard    # → http://localhost:5173
 | Auth | Set `DASHBOARD_TOKEN` when binding non-localhost (Docker/VPS) |
 | Config writes | Leader edits, settings, wallet keys persist to `config.yaml` / `.env` |
 | Reload | Daemon reloads config after API writes — no manual restart in most cases |
-| Help | In-app **Docs** page + [Dashboard ops guide](docs/DASHBOARD_OPS.md) |
+| Help | In-app **Docs** page + [Dashboard ops guide](guide/DASHBOARD_OPS.md) |
 
 Recommended flow:
 
@@ -459,7 +459,7 @@ Each poll cycle, for every enabled leader:
 
 ## Live trading
 
-> **Only after completing the [7-day preview checklist](docs/PREVIEW_CHECKLIST.md).**
+> **Only after completing the [7-day preview checklist](guide/PREVIEW_CHECKLIST.md).**
 
 1. Use a **dedicated wallet with minimal USDC** (start ≤ $20)
 2. Set `preview_mode: false` in `config.yaml` (or switch via Dashboard **Risk**)
@@ -473,7 +473,7 @@ POLYMIRROR_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING
 5. **Manually verify first 3 orders** on Polymarket UI
 6. Gradually increase limits
 
-Operations and troubleshooting: [Runbook](docs/RUNBOOK.md).
+Operations and troubleshooting: [Runbook](guide/RUNBOOK.md).
 
 ---
 
@@ -511,7 +511,8 @@ PolyMirror/
 │   └── notify/            # Logger, Telegram, /health + static UI
 ├── dashboard/             # React 19 + Vite SPA
 ├── tests/                 # Vitest unit tests
-├── docs/                  # Architecture, runbook, user guide, dashboard help
+├── guide/                 # User-facing docs (GitHub) — getting-started, USER_GUIDE, …
+├── docs/                  # Developer-only notes (gitignored, not published)
 ├── config.example.yaml
 ├── config.preview.template.yaml
 ├── docker-compose.yml
@@ -523,47 +524,39 @@ PolyMirror/
 
 ## Documentation
 
+User-facing docs live in **[`guide/`](guide/README.md)**. Local developer notes stay in `docs/` (gitignored — not on GitHub).
+
 ### Getting started
 
 | Document | Description |
 |----------|-------------|
-| **[Getting Started 小白入门](docs/getting-started/README.md)** | Path A: local Preview → Dashboard (zh / en) |
-| **[User Guide 使用说明书](docs/USER_GUIDE.md)** | Complete configuration and operations |
-| [User Guide Summary 精简版](docs/USER_GUIDE_SUMMARY.md) | Print/PDF-friendly condensed guide |
-| [Quick Reference 速查表](docs/QUICK_REFERENCE.md) | One-page cheat sheet |
-| [Preview Checklist](docs/PREVIEW_CHECKLIST.md) | 7-day Preview before Live |
+| **[Getting Started 小白入门](guide/getting-started/README.md)** | Path A: local Preview → Dashboard (zh / en) |
+| **[User Guide 使用说明书](guide/USER_GUIDE.md)** | Complete configuration and operations |
+| [User Guide Summary 精简版](guide/USER_GUIDE_SUMMARY.md) | Print/PDF-friendly condensed guide |
+| [Quick Reference 速查表](guide/QUICK_REFERENCE.md) | One-page cheat sheet |
+| [Preview Checklist](guide/PREVIEW_CHECKLIST.md) | 7-day Preview before Live |
 
 ### Operations & architecture
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/ARCHITECTURE.md) | Module design and data flow |
-| [Runbook](docs/RUNBOOK.md) | Ops, troubleshooting, recovery |
-| [Security](docs/SECURITY.md) | Key handling, dependency audit |
-| [Development Plan](docs/DEVELOPMENT_PLAN.md) | Milestones and roadmap |
+| [Architecture](guide/ARCHITECTURE.md) | Module design and data flow |
+| [Runbook](guide/RUNBOOK.md) | Ops, troubleshooting, recovery |
+| [Security](guide/SECURITY.md) | Key handling, dependency audit |
 
 ### Dashboard
 
 | Document | Description |
 |----------|-------------|
-| [Dashboard Ops](docs/DASHBOARD_OPS.md) | Console help index |
-| [Dashboard Plan](docs/DASHBOARD_PLAN.md) | UI/UX design spec |
-| [docs/dashboard/](docs/dashboard/) | Per-page help (01–08) |
+| [Dashboard Ops](guide/DASHBOARD_OPS.md) | Console help index |
+| [guide/dashboard/](guide/dashboard/) | Per-page help (01–08) |
 
-### Product & ecosystem
+### Product
 
 | Document | Description |
 |----------|-------------|
-| **[Product Scope 产品边界](docs/PRODUCT_SCOPE.md)** | Self-hosted only · **not** multi-tenant SaaS |
-| [Ecosystem Workflow](docs/ECOSYSTEM_WORKFLOW.md) | Tool positioning and user journey |
-| [Feature Survey](docs/FEATURES_SURVEY.md) | Competitive landscape |
+| **[Product Scope 产品边界](guide/PRODUCT_SCOPE.md)** | Self-hosted only · **not** multi-tenant SaaS |
 | [Changelog](CHANGELOG.md) | Release history |
-
-### Archived
-
-| Document | Description |
-|----------|-------------|
-| [Web + Agent Architecture](docs/WEB_AGENT_ARCHITECTURE.md) | **Archived / out of roadmap** — historical design only |
 
 ---
 
@@ -575,7 +568,7 @@ PolyMirror/
 - Install dependencies from **official npm registry only**
 - Do not copy dependencies from unverified copy-bot repos (known malicious patterns)
 - When exposing Dashboard on VPS, always set **`DASHBOARD_TOKEN`** and prefer reverse proxy + TLS
-- Review [SECURITY.md](docs/SECURITY.md) for dependency advisories and wallet types
+- Review [SECURITY.md](guide/SECURITY.md) for dependency advisories and wallet types
 
 ---
 

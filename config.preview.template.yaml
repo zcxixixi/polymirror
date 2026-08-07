@@ -17,7 +17,7 @@
 # 数据 API 验证（可选）:
 #   curl "https://data-api.polymarket.com/activity?user=0xYOUR_LEADER&limit=5"
 #
-# 重要: 保持 preview_mode: true，直到完成 docs/PREVIEW_CHECKLIST.md
+# 重要: 保持 preview_mode: true，直到完成 guide/PREVIEW_CHECKLIST.md
 # =============================================================================
 
 global:

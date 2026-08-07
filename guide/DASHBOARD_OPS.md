@@ -3,7 +3,7 @@
 > 控制台帮助中心 · 按功能分类 · 与侧边栏页面对应  
 > 产品边界：自托管本地控制台，**非**多租户 SaaS — [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md)
 
-本文档已拆分为模块化章节，见 [`docs/dashboard/`](dashboard/) 目录。
+本文档已拆分为模块化章节，见 [`guide/dashboard/`](dashboard/) 目录。
 
 ## 文档结构
 

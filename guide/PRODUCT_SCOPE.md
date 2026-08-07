@@ -64,7 +64,7 @@ You run your own instance on your machine or private VPS. We do not host private
 
 ## 归档：Web + Agent
 
-[WEB_AGENT_ARCHITECTURE.md](WEB_AGENT_ARCHITECTURE.md) 描述过「云端 UI + 本机 Agent」设想。
+[本地 `docs/WEB_AGENT_ARCHITECTURE.md`](../docs/WEB_AGENT_ARCHITECTURE.md)（仅本机、不进 GitHub）描述过「云端 UI + 本机 Agent」设想。
 
 | 状态 | 说明 |
 |------|------|
@@ -94,4 +94,4 @@ You run your own instance on your machine or private VPS. We do not host private
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 单机模块与数据流 |
 | [SECURITY.md](SECURITY.md) | 自托管威胁模型 |
 | [ECOSYSTEM_WORKFLOW.md](ECOSYSTEM_WORKFLOW.md) | 与研究/盯盘工具的分工 |
-| [WEB_AGENT_ARCHITECTURE.md](WEB_AGENT_ARCHITECTURE.md) | **归档**历史设想 |
+| 本地 `docs/WEB_AGENT_ARCHITECTURE.md`（不进 GitHub） | **归档**历史设想 |

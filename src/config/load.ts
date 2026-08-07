@@ -54,7 +54,7 @@ function formatConfigValidationError(e: z.ZodError, configPath: string): string 
         `  • ${path}`,
         `    需要 Polymarket proxy 地址：0x 开头 + 40 位十六进制（共 42 字符）`,
         `    请编辑 ${configPath}，将 REPLACE_* 占位符换成真实地址，或改用 username`,
-        `    获取方式见 docs/USER_GUIDE.md 第 5 节`,
+        `    获取方式见 guide/USER_GUIDE.md 第 5 节`,
       ].join("\n");
     }
     if (err.path.includes("username")) {

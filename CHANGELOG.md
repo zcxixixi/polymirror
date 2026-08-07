@@ -33,7 +33,7 @@ First stable release — single-platform Polymarket multi-leader copy trading (m
 
 - Private keys loaded from `.env` only; never logged
 - Default `preview_mode: true`
-- Documented transitive dependency advisories in `docs/SECURITY.md`
+- Documented transitive dependency advisories in `guide/SECURITY.md`
 
 ## [0.1.0] - 2026-06-24
 
