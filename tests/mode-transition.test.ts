@@ -67,6 +67,7 @@ function minimalConfig(previewMode: boolean, enableCopy = true): RuntimeConfig {
           gtcFillTimeoutMs: 10_000,
           pendingOrderMaxAgeHours: 48,
           autoRedeemOnChain: true,
+          sellSizing: "position_fraction",
         },
         conflict: { mode: "priority_leader", priority: [] },
         notify: {

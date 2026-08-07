@@ -39,7 +39,7 @@ export function UnfollowLeaderButton({
       void queryClient.invalidateQueries({ queryKey: ["positions"] });
       onSuccess?.();
     },
-    onError: (e: Error) => toast(e.message, "error"),
+    onError: (e: Error) => toast(translateApiMessage(t, e.message), "error"),
   });
 
   const btnClass = className ?? (compact ? "secondary btn-sm btn-danger-text" : "secondary btn-danger-text");

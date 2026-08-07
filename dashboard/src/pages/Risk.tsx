@@ -7,6 +7,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { ConfirmModal } from "../components/ui/ConfirmModal";
 import { useToast } from "../components/ui/Toast";
 import { StopCopyTradingButton } from "../components/StopCopyTradingButton";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 
 function ProgressBar({ value, max, label }: { value: number; max: number; label: string }) {
@@ -63,7 +64,7 @@ export function RiskPage() {
       queryClient.invalidateQueries({ queryKey: ["risk"] });
       queryClient.invalidateQueries({ queryKey: ["status"] });
     },
-    onError: (e: Error) => toast(e.message, "error"),
+    onError: (e: Error) => toast(translateApiMessage(t, e.message), "error"),
   });
 
   function onResetKillSwitch() {
@@ -196,7 +197,13 @@ export function RiskPage() {
               {(r?.leaderVolumes ?? []).map((l) => (
                 <tr key={l.leaderId}>
                   <td>{l.leaderId}</td>
-                  <td>{l.enabled ? <span className="action-badge action-copy">ON</span> : t("common.none")}</td>
+                  <td>
+                    {l.enabled ? (
+                      <span className="action-badge action-copy">{t("common.on")}</span>
+                    ) : (
+                      t("common.none")
+                    )}
+                  </td>
                   <td className="mono">${l.volumeUsd.toFixed(2)}</td>
                   <td>{l.maxDailyVolumeUsd != null ? `$${l.maxDailyVolumeUsd}` : t("common.none")}</td>
                 </tr>

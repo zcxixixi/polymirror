@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { stopCopyTrading } from "../api/settings";
 import { ConfirmModal } from "./ui/ConfirmModal";
 import { useToast } from "./ui/Toast";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 
 interface StopCopyTradingButtonProps {
@@ -32,7 +33,7 @@ export function StopCopyTradingButton({
       queryClient.invalidateQueries({ queryKey: ["status"] });
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
-    onError: (e: Error) => toast(e.message, "error"),
+    onError: (e: Error) => toast(translateApiMessage(t, e.message), "error"),
   });
 
   function onConfirm() {

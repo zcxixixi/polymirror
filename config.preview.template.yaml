@@ -89,6 +89,8 @@ global:
     gtc_fill_timeout_ms: 10000
     # 超过此时间的 pending GTC 记录会被清理（小时）
     pending_order_max_age_hours: 48
+    # SELL：按 Leader 减仓比例镜像本地持仓（默认）；trade_notional 为旧按单笔名义金额
+    sell_sizing: position_fraction
 
   conflict:
     # 多 Leader 同 token 反向时的策略:

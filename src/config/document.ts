@@ -44,6 +44,8 @@ export const globalYamlSchema = z.object({
     gtc_fill_timeout_ms: z.number().int().nonnegative().default(10000),
     pending_order_max_age_hours: z.number().positive().default(48),
     auto_redeem_on_chain: z.boolean().default(true),
+    /** position_fraction (default) | trade_notional (legacy) */
+    sell_sizing: z.enum(["position_fraction", "trade_notional"]).default("position_fraction"),
   }),
   conflict: z.object({
     mode: conflictMode.default("priority_leader"),

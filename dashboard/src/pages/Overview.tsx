@@ -160,24 +160,24 @@ export function OverviewPage() {
             {s?.lastPoll && (
               <>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Fetched</span>
+                  <span className="engine-stat-label">{t("overview.pollFetched")}</span>
                   <span className="engine-stat-value mono">{s.lastPoll.fetched}</span>
                 </div>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Copied</span>
+                  <span className="engine-stat-label">{t("overview.pollCopied")}</span>
                   <span className="engine-stat-value mono engine-stat-good">{s.lastPoll.copied}</span>
                 </div>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Skipped</span>
+                  <span className="engine-stat-label">{t("overview.pollSkipped")}</span>
                   <span className="engine-stat-value mono">{s.lastPoll.skipped}</span>
                 </div>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Pending Filled</span>
+                  <span className="engine-stat-label">{t("overview.pollPendingFilled")}</span>
                   <span className="engine-stat-value mono">{s.lastPoll.pendingFilled}</span>
                 </div>
                 {s.lastPoll.errors.length > 0 && (
                   <div className="engine-stat">
-                    <span className="engine-stat-label">Errors</span>
+                    <span className="engine-stat-label">{t("overview.pollErrors")}</span>
                     <span className="engine-stat-value mono engine-stat-bad">{s.lastPoll.errors.length}</span>
                   </div>
                 )}

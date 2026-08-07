@@ -36,7 +36,7 @@ export function OrdersPage() {
       void queryClient.invalidateQueries({ queryKey: ["pending-orders"] });
       void queryClient.invalidateQueries({ queryKey: ["status"] });
     },
-    onError: (e: Error) => toast(e.message, "error"),
+    onError: (e: Error) => toast(translateApiMessage(t, e.message), "error"),
   });
 
   const orders = data?.orders ?? [];

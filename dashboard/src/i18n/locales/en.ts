@@ -110,6 +110,11 @@ export const en: Messages = {
     lastPollCopy: "Last copy poll",
     pollEngine: "Poll engine",
     lastPoll: "Last poll",
+    pollFetched: "Fetched",
+    pollCopied: "Copied",
+    pollSkipped: "Skipped",
+    pollPendingFilled: "Pending filled",
+    pollErrors: "Errors",
     recentActivity: "Recent activity",
     noAudit: "No audit records — wait for leader fills or check config",
     copyHint: "Copies {count} · Leaders {leaders}",
@@ -564,26 +569,56 @@ export const en: Messages = {
     accountCreated: "Account created. Private key saved to .env (not shown). Switch account to configure Leaders.",
     accountUpdatedWithKey: "Account updated; private key saved to .env (not shown).",
     telegramSaved: "Telegram credentials saved to .env (not shown). Restart engine to use new credentials.",
-    orderCancelled: "Order cancelled on CLOB and removed from pending list",
+    orderCancelled:
+      "Order cancelled on CLOB and removed from pending list (partial fills reconciled)",
     stopCopy: "Copy trading stopped: Preview mode, copy switch off.",
     switchedPreview: "Switched to Preview (engine hot-reloaded preview.db).",
     switchedLive: "Switched to Live (engine hot-reloaded polymirror.db).",
     confirmUsdc: "Ensure wallet USDC is sufficient.",
-    previewMerged: "Merged Preview: {seen} dedup entries, {positions} engine positions (tracking only; on-chain is authoritative).",
+    previewMerged:
+      "Merged Preview: {seen} dedup entries, {positions} engine positions (tracking only; on-chain is authoritative).",
     flushResolved: "Reconciled {resolved} Live pending order(s).",
-    flushPartial: "Reconciled {resolved} Live pending order(s); {remaining} still open (check Polymarket manually).",
+    flushPartial:
+      "Reconciled {resolved} Live pending order(s); {remaining} still open (check Polymarket manually).",
     configMigrated: "config.yaml migrated to multi-account format.",
     traderFetchFailed: "Could not fetch trader details — check network or HTTPS_PROXY",
-    dataApiFailed: "Could not reach Polymarket Data API. Configure proxy under Settings → Network, or set HTTPS_PROXY in .env.",
-    pnlFetchFailed: "Could not fetch Polymarket PnL curve. Configure proxy under Settings → Network.",
+    dataApiFailed:
+      "Could not reach Polymarket Data API. Configure proxy under Settings → Network, or set HTTPS_PROXY in .env.",
+    pnlFetchFailed:
+      "Could not fetch Polymarket PnL curve. Configure proxy under Settings → Network.",
     proxyConnectFailed: "Proxy connection failed — check URL, port, or credentials",
-    proxyNotConfigured: "No proxy configured. Choose static or dynamic proxy under Settings → Network.",
+    proxyNotConfigured:
+      "No proxy configured. Choose static or dynamic proxy under Settings → Network.",
     noFieldsToUpdate: "No fields to update",
     invalidBotToken: "Invalid Bot Token format (expected 123456789:AA...)",
     invalidChatId: "Chat ID must be numeric (groups may be negative)",
+    staticProxyRequired: "Static IP mode requires a proxy URL",
+    dynamicProxyRequired: "Dynamic IP mode requires a proxy URL",
+    invalidStaticProxyUrl: "Invalid static proxy URL (must start with http:// or https://)",
+    invalidDynamicProxyUrl: "Invalid dynamic proxy URL (must start with http:// or https://)",
+    invalidStaticProxyUrlShort: "Invalid static proxy URL",
+    invalidDynamicProxyUrlShort: "Invalid dynamic proxy URL",
+    geoblockRestricted:
+      "Proxy exit is still geoblocked by Polymarket — use a residential proxy in an allowed region (e.g. US).",
+    walletApiFailed:
+      "Could not reach Polymarket API. Configure proxy under Settings → Network, or set HTTPS_PROXY in .env.",
+    walletSecureClientHint:
+      "On-chain USDC balance requires SecureClient — confirm .env private key and Proxy address.",
+    retryOrCancelClob: "Retry later or cancel manually on CLOB.",
+    flushRejectPreview:
+      "{remaining} Live pending order(s) could not be cancelled; Preview switch refused.",
+    flushRejectStop:
+      "{remaining} Live pending order(s) could not be cancelled; stop-copy refused.",
+    cannotConnectHost: "Cannot connect to {host}{hint}",
+    proxyHintChina:
+      " (If in mainland China, configure proxy in Settings or set HTTPS_PROXY in .env)",
+    proxyNotConfiguredGeoblock: "No proxy configured{hint}.",
+    geoblockDetail:
+      "CLOB geoblock: IP {ip} ({country}/{region}). See https://docs.polymarket.com/developers/CLOB/geoblock",
     leaderUnfollowed: "Unfollowed leader {id}; removed from config.",
     leaderUnfollowPending: "Cancelled {count} pending order(s).",
-    leaderUnfollowPendingFailed: "{count} pending order(s) could not be cancelled — check Polymarket or Pending orders.",
+    leaderUnfollowPendingFailed:
+      "{count} pending order(s) could not be cancelled — check Polymarket or Pending orders.",
     leaderUnfollowPositions: "{count} tracked position(s) still remain.",
     leaderUnfollowSold: "Sold {count} position(s).",
     leaderUnfollowSellPending: "{count} sell order(s) resting — check Pending orders.",

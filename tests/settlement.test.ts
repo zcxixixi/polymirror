@@ -36,6 +36,7 @@ const globalBase: GlobalConfig = {
     gtcFillTimeoutMs: 10000,
     pendingOrderMaxAgeHours: 48,
     autoRedeemOnChain: true,
+    sellSizing: "position_fraction",
   },
   conflict: { mode: "priority_leader", priority: [] },
   notify: {

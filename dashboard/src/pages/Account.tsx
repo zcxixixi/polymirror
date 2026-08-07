@@ -71,7 +71,7 @@ function EditAccountPanel({
         setTimeout(onDone, 800);
       }
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => setError(translateApiMessage(t, e.message)),
   });
 
   return (
@@ -176,7 +176,7 @@ function AddAccountPanel({ onDone }: { onDone: () => void }) {
         onDone();
       }
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => setError(translateApiMessage(t, e.message)),
   });
 
   return (
@@ -441,13 +441,17 @@ export function AccountPage() {
 
       {data.error && (
         <div className="alert alert-error">
-          {data.error}
-          {data.hint && <p className="muted" style={{ margin: "0.5rem 0 0" }}>{data.hint}</p>}
+          {translateApiMessage(t, data.error)}
+          {data.hint && (
+            <p className="muted" style={{ margin: "0.5rem 0 0" }}>
+              {translateApiMessage(t, data.hint)}
+            </p>
+          )}
         </div>
       )}
 
       {data.collateralError && !data.error && (
-        <div className="alert alert-warn">{data.collateralError}</div>
+        <div className="alert alert-warn">{translateApiMessage(t, data.collateralError)}</div>
       )}
 
       {showPreviewMismatchHint && (
@@ -500,7 +504,7 @@ export function AccountPage() {
       )}
 
       {data.hint && !data.error && !showPreviewMismatchHint && !showClobChainMismatch && !showGeoblock && (
-        <div className="alert alert-warn">{data.hint}</div>
+        <div className="alert alert-warn">{translateApiMessage(t, data.hint)}</div>
       )}
 
       <div className="account-hero">
@@ -692,7 +696,7 @@ export function AccountPage() {
                 <th>{t("table.avgPrice")}</th>
                 <th>{t("account.currentPrice")}</th>
                 <th>{t("account.value")}</th>
-                <th>PnL</th>
+                <th>{t("table.pnl")}</th>
               </tr>
             </thead>
             <tbody>

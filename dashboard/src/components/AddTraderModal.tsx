@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiPost } from "../api/leaders";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import type { DiscoverTraderRow } from "../api/discover";
 
@@ -37,7 +38,7 @@ export function AddTraderModal({ trader, onClose, onSuccess }: Props) {
       onSuccess();
       onClose();
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => setError(translateApiMessage(t, e.message)),
   });
 
   const displayName = trader.userName ? `@${trader.userName.replace(/^@/, "")}` : trader.proxyWallet.slice(0, 10);

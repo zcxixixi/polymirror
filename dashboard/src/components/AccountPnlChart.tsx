@@ -7,6 +7,7 @@ import {
   type PnlRange,
 } from "../api/pnl";
 import { formatUsd } from "../api/discover";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 
 function buildChartPaths(points: { ts: number; pnl: number }[], width: number, height: number) {
@@ -99,7 +100,11 @@ export function AccountPnlChart() {
       {data?.error && (
         <div className="alert alert-error" style={{ margin: "0.75rem 0 0" }}>
           {data.error}
-          {data.hint && <p className="muted" style={{ margin: "0.35rem 0 0" }}>{data.hint}</p>}
+          {data.hint && (
+            <p className="muted" style={{ margin: "0.35rem 0 0" }}>
+              {translateApiMessage(t, data.hint)}
+            </p>
+          )}
         </div>
       )}
 

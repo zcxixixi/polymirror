@@ -206,6 +206,7 @@ function mapGlobal(raw: GlobalYaml) {
       gtcFillTimeoutMs: raw.execution.gtc_fill_timeout_ms,
       pendingOrderMaxAgeHours: raw.execution.pending_order_max_age_hours,
       autoRedeemOnChain: raw.execution.auto_redeem_on_chain,
+      sellSizing: raw.execution.sell_sizing ?? "position_fraction",
     },
     conflict: {
       mode: raw.conflict.mode,

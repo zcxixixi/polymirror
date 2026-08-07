@@ -7,6 +7,7 @@ import { AddTraderModal } from "../components/AddTraderModal";
 import { UnfollowLeaderButton } from "../components/UnfollowLeaderButton";
 import { DataCard } from "../components/ui/DataCard";
 import { PageHeader } from "../components/ui/PageHeader";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import type { DiscoverTraderRow } from "../api/discover";
 import { SideBadge } from "../utils/auditDisplay";
@@ -106,8 +107,12 @@ export function DiscoverTraderPage() {
         <>
           <PageHeader title={t("trader.detail")} />
           <div className="alert alert-error">
-            {(error as Error)?.message ?? data?.error}
-            {data?.hint && <p className="muted" style={{ margin: "0.5rem 0 0" }}>{data.hint}</p>}
+            {translateApiMessage(t, (error as Error)?.message ?? data?.error ?? "")}
+            {data?.hint && (
+              <p className="muted" style={{ margin: "0.5rem 0 0" }}>
+                {translateApiMessage(t, data.hint)}
+              </p>
+            )}
           </div>
         </>
       )}

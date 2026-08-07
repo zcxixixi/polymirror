@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiPatch } from "../api/leaders";
 import type { LeaderRow } from "../api/client";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import { useToast } from "./ui/Toast";
 
@@ -33,8 +34,9 @@ export function LeaderInlineSettings({ leader }: Props) {
       queryClient.invalidateQueries({ queryKey: ["leaders"] });
     },
     onError: (e: Error) => {
-      setMsg(e.message);
-      toast(e.message, "error");
+      const msg = translateApiMessage(t, e.message);
+      setMsg(msg);
+      toast(msg, "error");
     },
   });
 

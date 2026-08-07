@@ -9,6 +9,7 @@ import {
   apiPut,
 } from "../api/leaders";
 import { useToast } from "./ui/Toast";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import { suggestLeaderId } from "../utils/leaderId";
 
@@ -45,8 +46,9 @@ export function LeaderForm({ initial, isEdit }: Props) {
       navigate("/leaders");
     },
     onError: (e: Error) => {
-      setError(e.message);
-      toast(e.message, "error");
+      const msg = translateApiMessage(t, e.message);
+      setError(msg);
+      toast(msg, "error");
     },
   });
 
@@ -62,7 +64,9 @@ export function LeaderForm({ initial, isEdit }: Props) {
         setValidateMsg(r.error ?? t("leaders.validateFail"));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        translateApiMessage(t, e instanceof Error ? e.message : String(e))
+      );
     }
   }
 

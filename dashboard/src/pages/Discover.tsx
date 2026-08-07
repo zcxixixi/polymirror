@@ -15,6 +15,7 @@ import { AddTraderModal } from "../components/AddTraderModal";
 import { UnfollowLeaderButton } from "../components/UnfollowLeaderButton";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useToast } from "../components/ui/Toast";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import { parseFollowTarget } from "../utils/leaderId";
 
@@ -89,7 +90,7 @@ export function DiscoverPage() {
       />
 
       <form
-        className="panel discover-lookup"
+        className="discover-lookup"
         onSubmit={(e) => {
           e.preventDefault();
           const target = parseFollowTarget(lookup);
@@ -104,9 +105,12 @@ export function DiscoverPage() {
           navigate(`/leaders/new?username=${encodeURIComponent(target.username)}`);
         }}
       >
-        <label className="form-label">
+        <label className="discover-lookup-label" htmlFor="discover-lookup-input">
           {t("discover.lookupLabel")}
+        </label>
+        <div className="discover-lookup-row">
           <input
+            id="discover-lookup-input"
             type="text"
             className="mono"
             value={lookup}
@@ -115,8 +119,8 @@ export function DiscoverPage() {
             autoComplete="off"
             spellCheck={false}
           />
-        </label>
-        <button type="submit">{t("discover.lookupSubmit")}</button>
+          <button type="submit">{t("discover.lookupSubmit")}</button>
+        </div>
       </form>
 
       <div className="discover-filters">
@@ -174,7 +178,11 @@ export function DiscoverPage() {
       {apiError && (
         <div className="alert alert-error">
           {apiError}
-          {data?.hint && <p className="muted" style={{ margin: "0.5rem 0 0" }}>{data.hint}</p>}
+          {data?.hint && (
+            <p className="muted" style={{ margin: "0.5rem 0 0" }}>
+              {translateApiMessage(t, data.hint)}
+            </p>
+          )}
         </div>
       )}
 

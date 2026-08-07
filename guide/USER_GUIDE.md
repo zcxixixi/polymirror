@@ -232,6 +232,7 @@ global:
     network_retry_limit: 3
     gtc_fill_timeout_ms: 10000       # GTC 初次下单后等待成交的最长时间（毫秒）
     pending_order_max_age_hours: 48  # 超时未完结的 pending 记录保留上限
+    sell_sizing: position_fraction   # position_fraction | trade_notional（见 §7.3）
 ```
 
 | 类型 | 行为 |
@@ -458,14 +459,28 @@ Live + `order_type: GTC` 时：
 
 ### 7.3 SELL 规则
 
-跟 Leader 卖出时检查 **本地 SQLite 持仓**。Live 模式下若 `sync_wallet_balance: true`，还会：
+默认 `execution.sell_sizing: position_fraction`：按 **Leader 对该 token 的减仓比例** 缩放本地持仓，而不是只按单笔卖单名义金额 sizing。
+
+```
+ourSell ≈ ourHeld × (leaderSellSize / leaderSharesBefore)
+```
+
+- `leaderSharesBefore` 由 Data API `/positions` 的卖后仓位 + 本笔卖量反推（`current + sell`）。若仓位看起来仍是卖前快照（`current ≥ sell`），则直接用 `current` 作为卖前，避免把 `before` 估大导致少卖。
+- Leader 近似清仓（卖量 ≈ 卖前仓位）→ **卖光** 本地该 Leader+token 持仓。
+- 结果恒定 **clamp** 到可卖持仓（不会再因 `held < need` 整笔跳过而留下全部余仓）。
+- 拉不到 Leader 仓位时：回退到策略名义 sizing，再 clamp 到持仓；若策略也低于 `min_order_usd` 但本地仍有可卖仓，则卖光可卖持仓（避免 API 故障时余仓）。
+- 旧行为可设 `sell_sizing: trade_notional`（仍会 clamp）。
+
+Live 模式下若 `sync_wallet_balance: true`，还会：
 
 1. 通过 CLOB API 查询该 token **链上余额**；
-2. 按各 Leader 本地持仓比例分配可卖份额；
-3. 取 `min(Leader 本地持仓, 分配份额)` 作为实际上限。
+2. 按各 Leader 本地持仓比例分配可卖份额（`proportionalSellable`）；
+3. 取 `min(Leader 本地持仓, 分配份额)` 作为实际上限，再参与上述 clamp。
 
-- 若可卖份额 < 需要卖出的份额 → **SKIP**
+- 可卖份额过小、低于 `min_order_usd` → **SKIP**（尘埃仓，可等 redeem / unfollow 清算）
 - 每轮 drift 检查：链上余额与本地合计持仓偏差 > 0.02 时写入日志与 `/health`
+
+> **FIXED 策略说明：** 买单仍是每笔固定美元；卖单在 `position_fraction` 下按 Leader 减仓比例平仓，因此「多买一卖」会按比例减持，而不是只平掉一笔固定金额。
 
 ### 7.4 过滤跳过
 

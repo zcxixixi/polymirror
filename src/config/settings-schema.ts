@@ -51,6 +51,7 @@ export const globalSettingsPatchSchema = z.object({
       gtcFillTimeoutMs: z.number().int().nonnegative().optional(),
       pendingOrderMaxAgeHours: z.number().positive().optional(),
       autoRedeemOnChain: z.boolean().optional(),
+      sellSizing: z.enum(["position_fraction", "trade_notional"]).optional(),
     })
     .optional(),
   conflict: z
@@ -182,6 +183,9 @@ export function globalConfigToDto(global: Record<string, unknown>) {
       gtcFillTimeoutMs: e.gtc_fill_timeout_ms ?? 10000,
       pendingOrderMaxAgeHours: e.pending_order_max_age_hours ?? 48,
       autoRedeemOnChain: e.auto_redeem_on_chain ?? true,
+      sellSizing:
+        (e.sell_sizing as "position_fraction" | "trade_notional" | undefined) ??
+        "position_fraction",
     },
     conflict: {
       mode: c.mode ?? "priority_leader",
@@ -256,6 +260,9 @@ function applyGlobalPatchToRecord(g: Record<string, unknown>, patch: GlobalSetti
     }
     if (e.autoRedeemOnChain !== undefined) {
       execution.auto_redeem_on_chain = e.autoRedeemOnChain;
+    }
+    if (e.sellSizing !== undefined) {
+      execution.sell_sizing = e.sellSizing;
     }
     g.execution = execution;
   }

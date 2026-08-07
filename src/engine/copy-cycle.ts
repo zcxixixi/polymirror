@@ -1,9 +1,9 @@
 import type { RuntimeConfig } from "../config/types.js";
 import { pollLeaders } from "../monitor/poll.js";
-import { tradeEventKey } from "../monitor/data-api.js";
+import { tradeEventKey, fetchLeaderSharesBeforeSell } from "../monitor/data-api.js";
 import type { Activity } from "../monitor/data-api.js";
 import { processSettlements } from "../engine/settlement.js";
-import { calculateOrderSize } from "../engine/sizing.js";
+import { calculateOrderSize, calculateSellSize } from "../engine/sizing.js";
 import { passActivityFilters } from "../engine/filters.js";
 import { isAnyTradeKeySeen, isRecentBuyDuplicate } from "../engine/dedup.js";
 import { ConflictTracker } from "../engine/conflict.js";
@@ -292,12 +292,90 @@ export async function runCopyCycle(
       continue;
     }
 
-    const sizing = calculateOrderSize(leader, config.app.global, activity, store);
-    if (sizing.belowMinimum) {
+    const strategySizing = calculateOrderSize(leader, config.app.global, activity, store);
+    if (activity.side === "BUY" && strategySizing.belowMinimum) {
       store.markSeenMany(sourceTradeKeys, leaderId);
       skipped++;
-      skip(store, leaderId, activity, sizing.reasoning, preview);
+      skip(store, leaderId, activity, strategySizing.reasoning, preview);
       continue;
+    }
+
+    let sizing = strategySizing;
+
+    if (activity.side === "SELL") {
+      let held = store.getPosition(leaderId, activity.asset);
+      let sellSnap: Awaited<ReturnType<typeof fetchConditionalTokenSnapshot>> = null;
+
+      if (!preview && config.app.global.risk.syncWalletBalance) {
+        sellSnap = await fetchConditionalTokenSnapshot(
+          config.wallet,
+          activity.asset,
+          { refresh: true, ...sellBalanceFetchOpts }
+        );
+        if (sellSnap !== null) {
+          const totalTracked = store.getTotalTokenShares(activity.asset);
+          held = proportionalSellable(held, sellSnap.balance, totalTracked);
+        }
+      }
+
+      let leaderSharesBefore: number | null = null;
+      const sellMode = config.app.global.execution.sellSizing ?? "position_fraction";
+      if (sellMode === "position_fraction" && activity.asset) {
+        if (!leader.address) {
+          logInfo("SELL sizing: leader address unresolved — using fallback", {
+            leader: leaderId,
+            token: activity.asset.slice(0, 12),
+          });
+        } else {
+          leaderSharesBefore = await fetchLeaderSharesBeforeSell(
+            config.wallet.dataApiUrl,
+            leader.address,
+            activity.asset,
+            activity.size ?? 0,
+            config.app.global.execution.networkRetryLimit
+          );
+        }
+      }
+
+      sizing = calculateSellSize({
+        mode: sellMode,
+        ourHeld: held,
+        price: activity.price ?? 0,
+        minOrderUsd: config.app.global.risk.minOrderUsd,
+        leaderSellSize: activity.size ?? 0,
+        leaderSharesBefore,
+        strategyShares: strategySizing.belowMinimum ? 0 : strategySizing.finalShares,
+      });
+
+      if (sizing.belowMinimum) {
+        const reason = sizing.reasoning;
+        errors.push(`${leaderId}: ${reason}`);
+        store.markSeenMany(sourceTradeKeys, leaderId);
+        skipped++;
+        skip(store, leaderId, activity, reason, preview);
+        continue;
+      }
+
+      if (!preview) {
+        if (sellSnap === null) {
+          sellSnap = await fetchConditionalTokenSnapshot(
+            config.wallet,
+            activity.asset,
+            { refresh: true, ...sellBalanceFetchOpts }
+          );
+        }
+        const sellAllowance = sellSnap
+          ? checkLiveSellFromSnapshot(sellSnap, sizing.finalShares)
+          : {
+              allow: false as const,
+              reason: "token allowance check failed: CLOB balance unavailable",
+            };
+        if (!sellAllowance.allow) {
+          skipped++;
+          skip(store, leaderId, activity, sellAllowance.reason ?? "token allowance", preview);
+          continue;
+        }
+      }
     }
 
     const openCheck = risk.canOpenNewMarket(activity.asset, activity.side);
@@ -376,60 +454,6 @@ export async function runCopyCycle(
           skip(store, leaderId, activity, collateral.reason ?? "insufficient USDC", preview);
           continue;
         }
-      }
-    }
-
-    if (activity.side === "SELL") {
-      let held = store.getPosition(leaderId, activity.asset);
-      let sellSnap: Awaited<ReturnType<typeof fetchConditionalTokenSnapshot>> = null;
-
-      if (!preview) {
-        if (config.app.global.risk.syncWalletBalance) {
-          sellSnap = await fetchConditionalTokenSnapshot(
-            config.wallet,
-            activity.asset,
-            { refresh: true, ...sellBalanceFetchOpts }
-          );
-          if (sellSnap !== null) {
-            const totalTracked = store.getTotalTokenShares(activity.asset);
-            held = proportionalSellable(held, sellSnap.balance, totalTracked);
-          }
-        }
-
-        if (held < sizing.finalShares) {
-          const reason = `SELL held=${held} need=${sizing.finalShares}`;
-          errors.push(`${leaderId}: ${reason}`);
-          store.markSeenMany(sourceTradeKeys, leaderId);
-          skipped++;
-          skip(store, leaderId, activity, reason, preview);
-          continue;
-        }
-
-        if (sellSnap === null) {
-          sellSnap = await fetchConditionalTokenSnapshot(
-            config.wallet,
-            activity.asset,
-            { refresh: true, ...sellBalanceFetchOpts }
-          );
-        }
-        const sellAllowance = sellSnap
-          ? checkLiveSellFromSnapshot(sellSnap, sizing.finalShares)
-          : {
-              allow: false as const,
-              reason: "token allowance check failed: CLOB balance unavailable",
-            };
-        if (!sellAllowance.allow) {
-          skipped++;
-          skip(store, leaderId, activity, sellAllowance.reason ?? "token allowance", preview);
-          continue;
-        }
-      } else if (held < sizing.finalShares) {
-        const reason = `SELL held=${held} need=${sizing.finalShares}`;
-        errors.push(`${leaderId}: ${reason}`);
-        store.markSeenMany(sourceTradeKeys, leaderId);
-        skipped++;
-        skip(store, leaderId, activity, reason, preview);
-        continue;
       }
     }
 

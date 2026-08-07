@@ -2,6 +2,12 @@ export type CopyStrategyType = "PERCENTAGE" | "FIXED" | "ADAPTIVE";
 export type OrderType = "GTC" | "FAK" | "FOK";
 /** How `limits.max_position_usd` values a held position: live market price vs cost basis. */
 export type PositionCapBasis = "market" | "cost";
+/**
+ * How SELL copy size is derived:
+ * - position_fraction: ourHeld × (leaderSell / leaderSharesBefore), clamp to held
+ * - trade_notional: legacy calculateOrderSize on the sell trade, clamp to held
+ */
+export type SellSizingMode = "position_fraction" | "trade_notional";
 export type ConflictMode = "skip_both" | "net" | "priority_leader";
 export type TradeSide = "BUY" | "SELL";
 export type TradingBackendKind = "secure";
@@ -69,6 +75,11 @@ export interface ExecutionConfig {
   pendingOrderMaxAgeHours: number;
   /** Live: redeem resolved positions on-chain via SecureClient (default on; set false for local-only). */
   autoRedeemOnChain: boolean;
+  /**
+   * SELL inventory sizing (default position_fraction).
+   * Always clamps to sellable held — never all-or-nothing skip when held > 0.
+   */
+  sellSizing: SellSizingMode;
 }
 
 export interface ConflictConfig {

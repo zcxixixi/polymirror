@@ -107,7 +107,7 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["status"] });
       queryClient.invalidateQueries({ queryKey: ["risk"] });
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const toPreview = useMutation({
@@ -117,7 +117,7 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["status"] });
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const toLive = useMutation({
@@ -129,8 +129,9 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["status"] });
     },
     onError: (e: Error) => {
-      setErr(e.message);
-      toast(t("settings.liveSwitchFailed", { message: e.message }), "error");
+      const msg = translateApiMessage(t, e.message);
+      setErr(msg);
+      toast(t("settings.liveSwitchFailed", { message: msg }), "error");
     },
   });
 
@@ -140,7 +141,7 @@ export function SettingsPage() {
       toast(t("settings.reloaded"), "success");
       void queryClient.invalidateQueries();
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const saveProxy = useMutation({
@@ -160,7 +161,7 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["status"] });
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const testProxy = useMutation({
@@ -170,10 +171,10 @@ export function SettingsPage() {
         toast(translateApiMessage(t, r.message ?? t("settings.proxyOk")), "success");
         setErr(null);
       } else {
-        setErr([r.error, r.hint].filter(Boolean).join(" — "));
+        setErr(translateApiMessage(t, [r.error, r.hint].filter(Boolean).join(" — ")));
       }
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const saveTelegram = useMutation({
@@ -193,7 +194,7 @@ export function SettingsPage() {
       setTgChatId("");
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   function setProxy<K extends keyof SettingsSnapshot["global"]["proxy"]>(

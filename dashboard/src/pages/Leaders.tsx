@@ -8,6 +8,7 @@ import { UnfollowLeaderButton } from "../components/UnfollowLeaderButton";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ToggleSwitch } from "../components/ui/ToggleSwitch";
 import { useToast } from "../components/ui/Toast";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import { polymarketProfileUrl } from "../utils/polymarket";
 
@@ -31,7 +32,7 @@ export function LeadersPage() {
         "success"
       );
     },
-    onError: (e: Error) => toast(e.message, "error"),
+    onError: (e: Error) => toast(translateApiMessage(t, e.message), "error"),
   });
 
   return (

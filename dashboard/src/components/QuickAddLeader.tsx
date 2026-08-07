@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiPost, validateLeader } from "../api/leaders";
 import { useToast } from "./ui/Toast";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import { parseFollowTarget, suggestLeaderId } from "../utils/leaderId";
 
@@ -76,7 +77,9 @@ export function QuickAddLeader() {
         setStatus(r.error ?? t("leaders.validateFail"));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        translateApiMessage(t, e instanceof Error ? e.message : String(e))
+      );
     }
   }
 
@@ -111,8 +114,9 @@ export function QuickAddLeader() {
       setError(null);
     },
     onError: (e: Error) => {
-      setError(e.message);
-      toast(e.message, "error");
+      const msg = translateApiMessage(t, e.message);
+      setError(msg);
+      toast(msg, "error");
     },
   });
 

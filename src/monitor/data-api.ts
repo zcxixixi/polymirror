@@ -321,6 +321,163 @@ export function resetActivityCache(): void {
   activityCache.clear();
 }
 
+/** Fresh TTL for leader position reads used by SELL fraction sizing. */
+export const POSITION_CACHE_TTL_MS = 5_000;
+
+export interface DataApiPosition {
+  asset?: string;
+  size?: number;
+  conditionId?: string;
+}
+
+interface PositionCacheEntry {
+  at: number;
+  data: DataApiPosition[];
+}
+
+const positionCache = new Map<string, PositionCacheEntry>();
+
+export function buildPositionsUrl(
+  base: string,
+  params: { user: string; sizeThreshold?: number; limit?: number }
+): string {
+  const root = (base || DEFAULT_DATA_API).replace(/\/$/, "");
+  const q = new URLSearchParams({ user: params.user });
+  if (params.sizeThreshold != null) q.set("sizeThreshold", String(params.sizeThreshold));
+  if (params.limit != null) q.set("limit", String(params.limit));
+  return `${root}/positions?${q}`;
+}
+
+function mapRawPosition(raw: Record<string, unknown>): DataApiPosition | null {
+  const asset =
+    raw.asset != null && String(raw.asset) !== ""
+      ? String(raw.asset)
+      : raw.tokenId != null && String(raw.tokenId) !== ""
+        ? String(raw.tokenId)
+        : undefined;
+  if (!asset) return null;
+  return {
+    asset,
+    size: num(raw.size),
+    conditionId: raw.conditionId != null ? String(raw.conditionId) : undefined,
+  };
+}
+
+export async function getPositions(
+  base: string,
+  user: string,
+  networkRetryLimit = 0,
+  options: { sizeThreshold?: number; limit?: number } = {}
+): Promise<DataApiPosition[]> {
+  const sizeThreshold = options.sizeThreshold ?? 0;
+  const limit = options.limit ?? 500;
+  const key = JSON.stringify({ base, user: user.toLowerCase(), sizeThreshold, limit });
+  const hit = positionCache.get(key);
+  const now = Date.now();
+  if (hit && now - hit.at < POSITION_CACHE_TTL_MS) {
+    return hit.data;
+  }
+
+  const url = buildPositionsUrl(base, { user, sizeThreshold, limit });
+  try {
+    const raw = await fetchJsonWithRetry<unknown[]>(url, {}, networkRetryLimit);
+    const data = Array.isArray(raw)
+      ? raw
+          .map((row) =>
+            row && typeof row === "object"
+              ? mapRawPosition(row as Record<string, unknown>)
+              : null
+          )
+          .filter((p): p is DataApiPosition => p !== null)
+      : [];
+    positionCache.set(key, { at: now, data });
+    return data;
+  } catch (e) {
+    if (hit) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logInfo("Positions fetch failed — using stale cache", {
+        user: user.slice(0, 10),
+        ageMs: now - hit.at,
+        error: msg,
+      });
+      return hit.data;
+    }
+    throw e;
+  }
+}
+
+export function resetPositionCache(): void {
+  positionCache.clear();
+}
+
+/** Post-sell size for a token, or 0 when the position is absent from the feed. */
+export function findTokenPositionSize(
+  positions: DataApiPosition[],
+  tokenId: string
+): number {
+  const want = tokenId.toLowerCase();
+  let total = 0;
+  for (const p of positions) {
+    if (p.asset?.toLowerCase() === want) {
+      total += p.size ?? 0;
+    }
+  }
+  return Math.round(total * 100) / 100;
+}
+
+/**
+ * Estimate leader shares held *before* this sell.
+ *
+ * Prefer post-trade inventory from Data API `/positions`:
+ *   before ≈ current + sellSize
+ * When `current === 0`, the position disappeared after the sell → before = sellSize
+ * (full-exit basis). When `current >= sell`, the feed likely still shows the pre-sell
+ * snapshot (lag) → use before = current (do not add sell again).
+ *
+ * Returns null only when `currentShares` is unknown / non-finite (caller falls back).
+ */
+export function estimateLeaderSharesBeforeSell(
+  currentShares: number | null | undefined,
+  leaderSellSize: number
+): number | null {
+  if (currentShares == null || !Number.isFinite(currentShares)) return null;
+  const sell = Math.max(0, leaderSellSize);
+  const current = Math.max(0, currentShares);
+  // Lag: positions still looks like pre-sell inventory.
+  if (sell > 0 && current >= sell) {
+    return Math.round(current * 100) / 100;
+  }
+  return Math.round(Math.max(sell, current + sell) * 100) / 100;
+}
+
+/**
+ * Fetch leader token size after the sell (best effort) and estimate pre-sell size.
+ * Returns null on hard failure so SELL sizing can fall back to strategy+clamp.
+ */
+export async function fetchLeaderSharesBeforeSell(
+  dataApiUrl: string,
+  leaderAddress: string,
+  tokenId: string,
+  leaderSellSize: number,
+  networkRetryLimit = 0
+): Promise<number | null> {
+  try {
+    const positions = await getPositions(dataApiUrl, leaderAddress, networkRetryLimit, {
+      sizeThreshold: 0,
+    });
+    const current = findTokenPositionSize(positions, tokenId);
+    return estimateLeaderSharesBeforeSell(current, leaderSellSize);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    logInfo("Leader position fetch failed for SELL sizing", {
+      leader: leaderAddress.slice(0, 10),
+      token: tokenId.slice(0, 12),
+      error: msg,
+    });
+    return null;
+  }
+}
+
 export function tradeEventKey(a: Activity): string {
   const tx = a.transactionHash ?? "";
   const asset = a.asset ?? "";

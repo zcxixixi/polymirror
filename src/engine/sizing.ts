@@ -1,4 +1,9 @@
-import type { CopyStrategyType, LeaderConfig, GlobalConfig } from "../config/types.js";
+import type {
+  CopyStrategyType,
+  LeaderConfig,
+  GlobalConfig,
+  SellSizingMode,
+} from "../config/types.js";
 import type { Activity } from "../monitor/data-api.js";
 import type { StateStore } from "../state/store.js";
 
@@ -7,6 +12,24 @@ export interface OrderSizeResult {
   finalShares: number;
   reasoning: string;
   belowMinimum: boolean;
+}
+
+export interface SellSizeInput {
+  mode: SellSizingMode;
+  ourHeld: number;
+  price: number;
+  minOrderUsd: number;
+  leaderSellSize: number;
+  /** null when Data API / estimate unavailable */
+  leaderSharesBefore: number | null;
+  /** Shares from calculateOrderSize (trade-notional / fallback) */
+  strategyShares: number;
+  /** Treat leader exit as full when sell + eps >= before (shares). */
+  fullExitEpsilon?: number;
+}
+
+function roundShares(shares: number): number {
+  return Math.round(Math.max(0, shares) * 100) / 100;
 }
 
 export interface MultiplierTier {
@@ -146,6 +169,87 @@ export function calculateOrderSize(
   return {
     finalUsd: roundedShares * price,
     finalShares: roundedShares,
+    reasoning,
+    belowMinimum: false,
+  };
+}
+
+/**
+ * SELL sizing: mirror leader inventory change (position_fraction) or trade notional,
+ * always clamped to our sellable held. Never sizes above held (no all-or-nothing skip).
+ */
+export function calculateSellSize(input: SellSizeInput): OrderSizeResult {
+  const held = roundShares(input.ourHeld);
+  const price = input.price;
+  const eps = input.fullExitEpsilon ?? 0.01;
+
+  if (held < 0.01) {
+    return {
+      finalUsd: 0,
+      finalShares: 0,
+      reasoning: "no held shares",
+      belowMinimum: true,
+    };
+  }
+
+  let shares: number;
+  let reasoning: string;
+  const useFraction =
+    input.mode === "position_fraction" &&
+    input.leaderSharesBefore != null &&
+    input.leaderSharesBefore > 0 &&
+    Number.isFinite(input.leaderSharesBefore);
+
+  if (useFraction) {
+    const before = input.leaderSharesBefore!;
+    const sell = Math.max(0, input.leaderSellSize);
+    const fullExit = sell + eps >= before || (before > 0 && sell / before >= 0.999);
+    if (fullExit) {
+      shares = held;
+      reasoning = `leader full exit (${sell}/${before}); sell all held ${held}`;
+    } else {
+      const fraction = Math.min(1, sell / before);
+      shares = roundShares(held * fraction);
+      reasoning = `${(fraction * 100).toFixed(1)}% of held ${held} (leader sold ${sell}/${before})`;
+    }
+  } else {
+    shares = Math.max(0, input.strategyShares);
+    // When leader inventory is unknown and strategy sizes to ~0 (tiny leader sell /
+    // below min), still exit sellable inventory rather than leaving a residual.
+    if (
+      input.mode === "position_fraction" &&
+      shares < 0.01 &&
+      held * price >= input.minOrderUsd
+    ) {
+      shares = held;
+      reasoning = `fallback sell all held ${held} (strategy below min, leader position unknown)`;
+    } else {
+      reasoning =
+        input.mode === "position_fraction"
+          ? `fallback strategy ${shares} shares (leader position unknown)`
+          : `trade notional ${shares} shares`;
+    }
+  }
+
+  if (shares > held) {
+    shares = held;
+    reasoning += `; clamped to held ${held}`;
+  }
+  shares = roundShares(shares);
+
+  const finalUsd = shares * price;
+  if (shares < 0.01 || finalUsd < input.minOrderUsd) {
+    return {
+      finalUsd,
+      finalShares: shares,
+      reasoning: `${reasoning}; below min $${input.minOrderUsd}`,
+      belowMinimum: true,
+    };
+  }
+
+  return {
+    finalUsd,
+    finalShares: shares,
     reasoning,
     belowMinimum: false,
   };

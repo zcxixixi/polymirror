@@ -1570,6 +1570,7 @@ input[type="number"] {
 
 .quick-add-leader {
   margin-bottom: 1rem;
+  padding: 1.25rem 1.5rem 1.35rem;
 }
 
 .quick-add-header {
@@ -1585,19 +1586,30 @@ input[type="number"] {
 }
 
 .discover-lookup {
-  display: flex;
-  gap: 0.75rem;
-  align-items: flex-end;
   margin-bottom: 1rem;
 }
 
-.discover-lookup .form-label {
+.discover-lookup-label {
+  display: block;
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.discover-lookup-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.discover-lookup-row input {
   flex: 1;
   margin-bottom: 0;
 }
 
-.discover-lookup button {
+.discover-lookup-row button {
   flex-shrink: 0;
+  align-self: stretch;
 }
 
 .discover-filters {
