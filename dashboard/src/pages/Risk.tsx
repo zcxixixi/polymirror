@@ -106,7 +106,7 @@ export function RiskPage() {
         actions={
           r ? (
             <>
-              {r.previewMode && <ModeSwitchButton previewMode={r.previewMode} />}
+              <ModeSwitchButton previewMode={r.previewMode} />
               <StopCopyTradingButton
                 previewMode={r.previewMode}
                 copyTradingEnabled={r.copyTradingEnabled}

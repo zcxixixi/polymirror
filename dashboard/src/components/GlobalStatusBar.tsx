@@ -229,7 +229,7 @@ export function GlobalStatusBar() {
     });
   }
 
-  if (s && !s.previewMode && !s.killSwitchActive) {
+  if (s && !s.previewMode) {
     items.push({
       key: "live",
       tone: "live",

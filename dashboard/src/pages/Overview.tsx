@@ -76,7 +76,7 @@ export function OverviewPage() {
         actions={
           s ? (
             <>
-              {s.previewMode && <ModeSwitchButton previewMode={s.previewMode} compact />}
+              <ModeSwitchButton previewMode={s.previewMode} compact />
               <StopCopyTradingButton
                 previewMode={s.previewMode}
                 copyTradingEnabled={s.copyTradingEnabled}
