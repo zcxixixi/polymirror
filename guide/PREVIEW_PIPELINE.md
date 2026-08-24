@@ -7,9 +7,12 @@
 ```bash
 npm run preview:pipeline:discover -- reports/discovery/run-id 500
 npm run preview:pipeline:shard -- mass-cohort.json reports/shards/run-id
+npm run preview:pipeline:build-mass -- config.preview.template.yaml mass-cohort.json config.mass-preview.yaml 50
 ```
 
 每片仍生成 10 Leader × 3 档 = 30 账户；不同分片可按服务器容量串行或水平扩展。单个进程内同一 Leader 的三档账户共享官方 Activity 请求。
+
+`build-mass` 可把最多 100 个 Leader（300 账户）合并到一个共享采集进程；默认先启 50 Leader/150 账户，30 秒轮询，测量远端 CPU、内存和数据库增长后再扩容。
 
 ```bash
 npm install
