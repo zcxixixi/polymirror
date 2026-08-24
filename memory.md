@@ -870,3 +870,14 @@ Current run time: 2026-07-29 19:55 CST (about 3 minutes).
 - 手动单次 collector 首次因漏传隔离 `CONFIG_PATH` 生成范围无效报告 `preview-report-2026-08-24T01-55-38-956Z.json`（SHA256 `3e10f1f4444d66513ac365dcf0f21d29213b94bffe51415d0d63599967269c8c`，27 账户/18 missingDb，cohort fail-closed）；已原样保留且不作权威证据。随后使用隔离 config 单次收集成功，未影响持续 collector。
 
 Current run time: 2026-08-24 09:57 CST (about 4 minutes).
+
+
+## 2026-08-24 10:39–11:08 CST — AWS research reset and mass preview
+
+- User explicitly authorized a full remote research reset. Created EBS rollback snapshot `snap-01352f7c9f707844e` for volume `vol-0ce653c069e85d09c`, then stopped/removed all 8 legacy Docker containers, pruned legacy images/networks, and deleted only the old contents of `/opt/polymirror`. Snapshot remained pending but point-in-time frozen; no other host directory was deleted.
+- AWS authority: profile `cenxi`, region `eu-west-1`, instance `i-04d5b63abed72912b` (`c7i-flex.large`, 2 vCPU, 3.7GiB RAM, 80GiB gp3). Before reset: load ~3.4, 3670 zombies, 35GB under /opt/polymirror, 12.1GB/28 DBs, 34GB free. After reset/build: old services gone, 69GB free, swap use reduced from883MiB to ~139MiB.
+- Fresh GitHub deployment is branch `codex/polymirror-stability-checkpoint-20260710`, runtime revision `4a89e0748b066e6063cab6f64e5481d0824deb0a`, official `@polymarket/client 0.6.0`. Builder/runtime Docker images are tagged by exact revision.
+- Official discovery root: `/opt/polymirror/research/mass-20260824-v1`. Captured 6000 official leaderboard rows over 10 categories × DAY/WEEK/MONTH ×4 pages; froze500 unique wallets, SHA manifest under `discovery/manifest.json`; sharded to50×10-candidate artifacts.
+- First live-forward simulation uses top50 Leaders × FIXED1/2/5 =150 isolated preview accounts in one process, `config.mass-preview.yaml`; all data/reports remain remote under the research root. Official Activity fetches are shared across the three arms per Leader.
+- Initial serial cycle completed148/150 and captured234 preview orders; only Balthazar standard/aggressive failed closed on a duplicate terminal-decision invariant. Added and deployed bounded six-way account concurrency. Post-upgrade verification: health OK, preview-only,150/150 polled, lastError=null, pending0, settlement failures0, wallet drifts[], capacity OK;573 account polls and293 preview copies observed, container memory ~669MiB, host load0.92.
+- First report `reports/preview-report-2026-08-24T03-01-03-467Z.json` was generated during warm-up:150 accounts,3 copies,0 redeem, realized0U, open cost7.98U, liveReady0. It is an early baseline; next hourly reports are authoritative for continuing state. **Stable profitability remains unproven; no live trading.**
