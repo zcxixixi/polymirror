@@ -20,6 +20,7 @@ services:
     environment:
       - HEALTH_PORT=8080
       - HEALTH_BIND=0.0.0.0
+      - SHADOW_EXPECTED_ACCOUNT_COUNT=${SHADOW_EXPECTED_ACCOUNT_COUNT:-6}
       - POLYMIRROR_GIT_SHA=${POLYMIRROR_GIT_SHA:?POLYMIRROR_GIT_SHA is required}
       - POLYMIRROR_IMAGE_DIGEST=${POLYMIRROR_IMAGE_DIGEST:?POLYMIRROR_IMAGE_DIGEST is required}
     healthcheck:
@@ -31,13 +32,17 @@ services:
         - |
           const response = await fetch("http://127.0.0.1:8080/health");
           const health = await response.json();
+          const expectedAccountCount = Number(process.env.SHADOW_EXPECTED_ACCOUNT_COUNT);
+          if (!Number.isSafeInteger(expectedAccountCount) || expectedAccountCount < 1) process.exit(1);
           if (!response.ok || health.status !== "ok" || health.previewMode !== true
             || !Number.isFinite(health.lastPollAt) || health.lastError !== null
             || health.pendingOrders !== 0
             || health.settlementFailures !== 0 || health.closedMarketOpenPositions !== 0
             || !Array.isArray(health.walletDrifts) || health.walletDrifts.length !== 0
-            || health.enabledAccountCount !== 6 || health.polledAccountCount !== 6
-            || !Array.isArray(health.experiments) || health.experiments.length !== 6) process.exit(1);
+            || health.enabledAccountCount !== expectedAccountCount
+            || health.polledAccountCount !== expectedAccountCount
+            || !Array.isArray(health.experiments)
+            || health.experiments.length !== expectedAccountCount) process.exit(1);
       interval: 10s
       timeout: 5s
       start_period: 30s

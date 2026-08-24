@@ -32,6 +32,8 @@ function goalMetrics(): PreviewGoalMetrics {
       slippageSampleCount: 190,
       slippageCoveragePct: 95,
       slippageLossPct: 5,
+      slippageBasis: "preview_guarded_limit_full_fill",
+      slippageIsRealizedFill: false,
     },
     recent20: {
       marketCount: 20,
@@ -43,8 +45,86 @@ function goalMetrics(): PreviewGoalMetrics {
       slippageSampleCount: 35,
       slippageCoveragePct: 95,
       slippageLossPct: 8,
+      slippageBasis: "preview_guarded_limit_full_fill",
+      slippageIsRealizedFill: false,
+    },
+    pollTimeExecutableQuoteSlippage: {
+      basis: "poll_time_executable_order_book_quote",
+      experimentId: "experiment-test",
+      observationStartedAtMs: 1,
+      observationDays: 15,
+      quoteStageErrorCount: 0,
+      status: "valid",
+      attemptCount: 200,
+      executedCopyCount: 190,
+      rejectedSkipCount: 10,
+      decisionLinkedCount: 200,
+      decisionLinkMissingCount: 0,
+      decisionLinkCoveragePct: 100,
+      actionMismatchCount: 0,
+      experimentMismatchCount: 0,
+      jsonParseFailureCount: 0,
+      fieldMismatchCount: 0,
+      quoteEvidenceMismatchCount: 0,
+      unavailableCount: 0,
+      unfillableCount: 10,
+      belowMinOrderCount: 0,
+      sampleCount: 190,
+      totalNotionalUsd: 200,
+      sampledNotionalUsd: 190,
+      coveragePct: 95,
+      lossPct: 5,
+      blockers: [],
+      recent20: {
+        status: "valid",
+        attemptCount: 20,
+        executedCopyCount: 18,
+        rejectedSkipCount: 2,
+        decisionLinkedCount: 20,
+        decisionLinkMissingCount: 0,
+        decisionLinkCoveragePct: 100,
+        actionMismatchCount: 0,
+        experimentMismatchCount: 0,
+        jsonParseFailureCount: 0,
+        fieldMismatchCount: 0,
+        quoteEvidenceMismatchCount: 0,
+        unavailableCount: 0,
+        unfillableCount: 1,
+        belowMinOrderCount: 0,
+        sampleCount: 19,
+        totalNotionalUsd: 20,
+        sampledNotionalUsd: 19,
+        coveragePct: 95,
+        lossPct: 8,
+        blockers: [],
+      },
+    },
+    simulatedLimitSlippage: {
+      basis: "preview_guarded_limit_full_fill",
+      isRealizedFill: false,
+      status: "valid",
+      experimentId: "experiment-test",
+      copyCount: 200,
+      decisionLinkedCount: 200,
+      decisionLinkMissingCount: 0,
+      decisionLinkCoveragePct: 100,
+      actionMismatchCount: 0,
+      experimentMismatchCount: 0,
+      jsonParseFailureCount: 0,
+      fieldMismatchCount: 0,
+      quoteEvidenceMismatchCount: 0,
+      telemetryMissingCount: 0,
+      telemetryMismatchCount: 0,
+      sampleCount: 200,
+      totalNotionalUsd: 200,
+      sampledNotionalUsd: 200,
+      coveragePct: 100,
+      lossPct: 5,
+      blockers: [],
     },
     slippage: {
+      basis: "preview_guarded_limit_full_fill",
+      isRealizedFill: false,
       observationStartedAtMs: 1,
       observationDays: 15,
       copyCount: 200,
@@ -126,6 +206,26 @@ function report(): PreviewAccountReport {
       largestLossUsd: -1,
       largestWinContributionPct: 10,
       top3WinContributionPct: 35,
+      winningConditionConcentration: {
+        evidenceStatus: "complete",
+        redeemCount: 110,
+        conditionMappedRedeemCount: 110,
+        conditionMappingMissingCount: 0,
+        conditionMappingCoveragePct: 100,
+        pnlParsedRedeemCount: 110,
+        pnlParseFailureCount: 0,
+        pnlParseCoveragePct: 100,
+        settledConditionCount: 40,
+        winningConditionCount: 30,
+        netConditionPnlUsd: 20,
+        grossWinningConditionPnlUsd: 50,
+        top1WinningConditionGrossProfitSharePct: 10,
+        top2WinningConditionGrossProfitSharePct: 22,
+        top3WinningConditionGrossProfitSharePct: 35,
+        netPnlAfterRemovingTop1WinningConditionUsd: 15,
+        netPnlAfterRemovingTop2WinningConditionsUsd: 9,
+        netPnlAfterRemovingTop3WinningConditionsUsd: 2.5,
+      },
       dependencyIssue: "diversified",
       equityStabilityPct: 96,
       recent: {
@@ -188,6 +288,8 @@ describe("assessStabilityGoal", () => {
   it("treats unavailable slippage as missing evidence instead of zero loss", () => {
     const input = report();
     input.goalMetrics.slippage = {
+      basis: "preview_guarded_limit_full_fill",
+      isRealizedFill: false,
       observationStartedAtMs: null,
       observationDays: 0,
       copyCount: 0,
@@ -201,6 +303,28 @@ describe("assessStabilityGoal", () => {
     input.goalMetrics.overall.slippageLossPct = null;
     input.goalMetrics.recent20.slippageCoveragePct = 0;
     input.goalMetrics.recent20.slippageLossPct = null;
+    input.goalMetrics.pollTimeExecutableQuoteSlippage = {
+      ...input.goalMetrics.pollTimeExecutableQuoteSlippage,
+      status: "no_sample",
+      observationStartedAtMs: null,
+      observationDays: 0,
+      attemptCount: 0,
+      sampleCount: 0,
+      totalNotionalUsd: 0,
+      sampledNotionalUsd: 0,
+      coveragePct: 0,
+      lossPct: null,
+      recent20: {
+        ...input.goalMetrics.pollTimeExecutableQuoteSlippage.recent20,
+        status: "no_sample",
+        attemptCount: 0,
+        sampleCount: 0,
+        totalNotionalUsd: 0,
+        sampledNotionalUsd: 0,
+        coveragePct: 0,
+        lossPct: null,
+      },
+    };
 
     const result = assessStabilityGoal(input);
 
@@ -223,7 +347,8 @@ describe("assessStabilityGoal", () => {
     input.goalMetrics.overall.profitFactor = 1.99;
     input.goalMetrics.recent20.winRatePct = 69.99;
     input.goalMetrics.windows.d7.pnlUsd = 0;
-    input.performance.top3WinContributionPct = 40.01;
+    input.performance.winningConditionConcentration.top3WinningConditionGrossProfitSharePct =
+      40.01;
 
     const result = assessStabilityGoal(input);
 
@@ -246,6 +371,7 @@ describe("assessStabilityGoal", () => {
     input.redeemCount = 0;
     input.goalMetrics!.observationDays = 0;
     input.goalMetrics!.slippage.observationDays = 0;
+    input.goalMetrics!.pollTimeExecutableQuoteSlippage.observationDays = 0;
     input.goalMetrics!.settledMarketCount = 0;
     input.goalMetrics!.recent20.marketCount = 0;
 

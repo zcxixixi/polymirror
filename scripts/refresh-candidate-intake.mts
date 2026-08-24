@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   fetchFilteredCandidateActivity,
+  fetchCandidateClosedPositions,
+  fetchCandidateResolvedMarkets,
   persistCandidateIntakeRefresh,
   refreshCandidateIntake,
   type CandidateIntakeFetcher,
@@ -50,6 +52,14 @@ const fetcher: CandidateIntakeFetcher = {
       },
       items: page.items,
     };
+  },
+
+  async fetchClosedPositions(address) {
+    return fetchCandidateClosedPositions(client, address);
+  },
+
+  async fetchResolvedMarkets(conditionIds, _window, marketRefs) {
+    return fetchCandidateResolvedMarkets(client, conditionIds, marketRefs);
   },
 };
 

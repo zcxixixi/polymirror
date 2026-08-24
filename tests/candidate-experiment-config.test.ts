@@ -197,6 +197,104 @@ describe("buildCandidateExperimentConfig", () => {
     });
   });
 
+  it("enforces a declared fixedUsd experiment as a strict single-variable cohort", () => {
+    const singleVariable = cohort({
+      experimentFactor: "fixedUsd",
+      arms: {
+        conservative: {
+          fixedUsd: 1,
+          maxPositionUsd: 10,
+          maxDailyVolumeUsd: 40,
+          maxOpenMarkets: 10,
+          dailyLossCapPct: 5,
+          slippageTolerance: 0.015,
+          minPrice: 0.05,
+          maxPrice: 0.95,
+        },
+        standard: {
+          fixedUsd: 2,
+          maxPositionUsd: 10,
+          maxDailyVolumeUsd: 40,
+          maxOpenMarkets: 10,
+          dailyLossCapPct: 5,
+          slippageTolerance: 0.015,
+          minPrice: 0.05,
+          maxPrice: 0.95,
+        },
+        aggressive: {
+          fixedUsd: 5,
+          maxPositionUsd: 10,
+          maxDailyVolumeUsd: 40,
+          maxOpenMarkets: 10,
+          dailyLossCapPct: 5,
+          slippageTolerance: 0.015,
+          minPrice: 0.05,
+          maxPrice: 0.95,
+        },
+      },
+    });
+
+    expect(() => validateCandidateCohortJson(singleVariable)).not.toThrow();
+    expect(() => candidateCohortSchema.parse(singleVariable)).not.toThrow();
+    const result = buildCandidateExperimentConfig(defaults(), singleVariable);
+    expect(result.accounts.map((account) => ({
+      fixedUsd: account.leaders[0]?.strategy.copy_size,
+      maxPositionUsd: account.global.risk.max_position_per_token_usd,
+      maxDailyVolumeUsd: account.global.risk.max_daily_volume_usd,
+      maxOpenMarkets: account.global.risk.max_open_markets,
+      dailyLossCapPct: account.global.risk.daily_loss_cap_pct,
+      slippageTolerance: account.global.risk.slippage_tolerance,
+      minPrice: account.leaders[0]?.filters?.min_price,
+      maxPrice: account.leaders[0]?.filters?.max_price,
+    }))).toEqual([
+      { fixedUsd: 1, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+      { fixedUsd: 2, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+      { fixedUsd: 5, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+    ]);
+  });
+
+  it.each([
+    ["implicit legacy controls", {
+      experimentFactor: "fixedUsd",
+    }],
+    ["implicit price controls", {
+      experimentFactor: "fixedUsd",
+      arms: {
+        conservative: { fixedUsd: 1, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015 },
+        standard: { fixedUsd: 2, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015 },
+        aggressive: { fixedUsd: 5, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015 },
+      },
+    }],
+    ["changed control field", {
+      experimentFactor: "fixedUsd",
+      arms: {
+        conservative: { fixedUsd: 1, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+        standard: { fixedUsd: 2, maxPositionUsd: 20, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+        aggressive: { fixedUsd: 5, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+      },
+    }],
+    ["changed price control field", {
+      experimentFactor: "fixedUsd",
+      arms: {
+        conservative: { fixedUsd: 1, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+        standard: { fixedUsd: 2, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.1, maxPrice: 0.95 },
+        aggressive: { fixedUsd: 5, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+      },
+    }],
+    ["duplicate factor levels", {
+      experimentFactor: "fixedUsd",
+      arms: {
+        conservative: { fixedUsd: 1, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+        standard: { fixedUsd: 1, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+        aggressive: { fixedUsd: 5, maxPositionUsd: 10, maxDailyVolumeUsd: 40, maxOpenMarkets: 10, dailyLossCapPct: 5, slippageTolerance: 0.015, minPrice: 0.05, maxPrice: 0.95 },
+      },
+    }],
+  ])("rejects a mislabeled fixedUsd experiment through both schemas: %s", (_name, patch) => {
+    const input = cohort(patch as Partial<CandidateCohortInput>);
+    expect(() => validateCandidateCohortJson(input)).toThrow(/fixedUsd/i);
+    expect(() => candidateCohortSchema.parse(input)).toThrow(/fixedUsd/i);
+  });
+
   it.each([
     ["minimum only", { minPrice: 0.2 }],
     ["maximum only", { maxPrice: 0.8 }],
@@ -387,7 +485,9 @@ describe("buildCandidateExperimentConfig", () => {
       "x-candidateCohortRules": string[];
       $defs: { arm: { properties: Record<string, unknown>; "x-candidateArmRules": string[] } };
     };
-    expect(Object.keys(published.properties).sort()).toEqual(["arms", "candidates", "cohortId"]);
+    expect(Object.keys(published.properties).sort()).toEqual([
+      "arms", "candidates", "cohortId", "experimentFactor",
+    ]);
     const candidateItems = (published.properties.candidates as {
       items: {
         properties: Record<string, unknown>;
@@ -414,6 +514,9 @@ describe("buildCandidateExperimentConfig", () => {
       "slippageTolerance",
     ]);
     expect(published["x-candidateCohortRules"]).toContain("unique candidate IDs");
+    expect(published["x-candidateCohortRules"]).toContain(
+      "declared fixedUsd experiment varies only fixedUsd"
+    );
     expect(published.$defs.arm["x-candidateArmRules"]).toContain("minPrice < maxPrice");
     expect(published.$defs.arm["x-candidateArmRules"]).toContain(
       "minPrice and maxPrice must be supplied together"

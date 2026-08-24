@@ -535,6 +535,8 @@ User-facing docs live in **[`guide/`](guide/README.md)**. Local developer notes 
 | [User Guide Summary 精简版](guide/USER_GUIDE_SUMMARY.md) | Print/PDF-friendly condensed guide |
 | [Quick Reference 速查表](guide/QUICK_REFERENCE.md) | One-page cheat sheet |
 | [Preview Checklist](guide/PREVIEW_CHECKLIST.md) | 7-day Preview before Live |
+| [持续模拟盘 Pipeline](guide/PREVIEW_PIPELINE.md) | Fresh intake、批量模拟与小时评估 |
+| [跟单策略研究](guide/COPY_STRATEGY_RESEARCH.md) | 稳健组、探索组与统一淘汰规则 |
 
 ### Operations & architecture
 

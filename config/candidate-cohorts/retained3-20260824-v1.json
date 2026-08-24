@@ -1,0 +1,56 @@
+{
+  "cohortId": "retained3-20260824-v1",
+  "experimentFactor": "fixedUsd",
+  "candidates": [
+    {
+      "id": "pathf56_14",
+      "address": "0x9755458cc4f51228de267039b8c6feb967e8ab85",
+      "freshIntakePassed": false,
+      "simulationOnlyEnabled": true
+    },
+    {
+      "id": "pathf6_03",
+      "address": "0x7a469ebb8442e594f20f3b0577a8a54f796f9889",
+      "freshIntakePassed": false,
+      "simulationOnlyEnabled": true
+    },
+    {
+      "id": "pathf42_04",
+      "address": "0x5bc9a1d1ca6ed6d5d6a831a184b58a8e2078b2ee",
+      "freshIntakePassed": false,
+      "simulationOnlyEnabled": true
+    }
+  ],
+  "arms": {
+    "conservative": {
+      "fixedUsd": 1,
+      "maxPositionUsd": 30,
+      "maxDailyVolumeUsd": 100,
+      "maxOpenMarkets": 20,
+      "dailyLossCapPct": 10,
+      "slippageTolerance": 0.025,
+      "minPrice": 0.05,
+      "maxPrice": 0.95
+    },
+    "standard": {
+      "fixedUsd": 2,
+      "maxPositionUsd": 30,
+      "maxDailyVolumeUsd": 100,
+      "maxOpenMarkets": 20,
+      "dailyLossCapPct": 10,
+      "slippageTolerance": 0.025,
+      "minPrice": 0.05,
+      "maxPrice": 0.95
+    },
+    "aggressive": {
+      "fixedUsd": 5,
+      "maxPositionUsd": 30,
+      "maxDailyVolumeUsd": 100,
+      "maxOpenMarkets": 20,
+      "dailyLossCapPct": 10,
+      "slippageTolerance": 0.025,
+      "minPrice": 0.05,
+      "maxPrice": 0.95
+    }
+  }
+}

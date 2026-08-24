@@ -51,7 +51,7 @@ function roundUp(value: number, decimals: number): number {
  * Mirrors the pinned official SDK's protected BUY preparation:
  * `adjustBuyAmountForFees()` followed by `computeMarketOrderAmounts()`.
  * The SDK helpers are internal (absent from the package exports and public d.ts),
- * so this contract mirrors @polymarket/client@0.1.0-beta.14 source-map sources:
+ * so this contract mirrors the pinned official @polymarket/client source:
  * actions/orders/market.ts, actions/orders/math.ts, and actions/orders/context.ts.
  */
 export function prepareSdkMarketBuyWithinMaxSpend(input: {

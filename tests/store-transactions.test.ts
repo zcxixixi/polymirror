@@ -54,8 +54,19 @@ describe("StateStore transactions", () => {
           "idx_audit_log_action_reason",
           "idx_audit_log_action_id",
           "idx_audit_log_ts_action",
+          "idx_audit_log_experiment_preview_action_ts_id",
         ])
       );
+
+      const plan = db.prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT id FROM audit_log
+         WHERE experiment_id = ? AND preview = 1 AND action = 'COPY'
+         ORDER BY ts, id`
+      ).all("experiment-index-test") as Array<{ detail: string }>;
+      expect(plan.some((row) =>
+        row.detail.includes("idx_audit_log_experiment_preview_action_ts_id")
+      )).toBe(true);
     } finally {
       db.close();
     }

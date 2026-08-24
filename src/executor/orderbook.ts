@@ -43,7 +43,7 @@ export async function fetchOrderBookMeta(
   try {
     const client = await getPublicClient();
     const book = await client.fetchOrderBook({ tokenId });
-    const market = await fetchMarketInfo(client, { conditionId: book.market });
+    const market = await fetchMarketInfo(client, { conditionId: book.conditionId });
     return {
       tickSize: String(book.tickSize),
       negRisk: book.negRisk,
@@ -235,7 +235,7 @@ export async function fetchExecutableOrderBookSnapshot(
   try {
     const client = await getPublicClient();
     const book = await client.fetchOrderBook({ tokenId });
-    const market = await fetchMarketInfo(client, { conditionId: book.market });
+    const market = await fetchMarketInfo(client, { conditionId: book.conditionId });
     const tickSize = Number(book.tickSize);
     const minOrderShares = Number(book.minOrderSize);
     if (!Number.isFinite(tickSize) || tickSize <= 0) return null;

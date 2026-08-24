@@ -68,9 +68,16 @@ export async function fetchDiscoverLeaderboard(options: {
   const category = (options.category ?? "OVERALL").toUpperCase() as DiscoverCategory;
   const timePeriod = (options.timePeriod ?? "MONTH").toUpperCase() as DiscoverTimePeriod;
   const orderBy = (options.orderBy ?? "PNL").toUpperCase() as DiscoverOrderBy;
-  const pageSize = Math.min(50, Math.max(1, options.limit ?? 25));
+  const requestedLimit = Number.isFinite(options.limit)
+    ? Math.floor(options.limit!)
+    : 25;
+  const pageSize = Math.min(50, Math.max(1, requestedLimit));
+  const requestedOffset = Number.isFinite(options.offset)
+    ? Math.floor(options.offset!)
+    : 0;
+  const offset = Math.max(0, requestedOffset);
 
-  const key = cacheKey({ category, timePeriod, orderBy, pageSize, offset: options.offset ?? 0 });
+  const key = cacheKey({ category, timePeriod, orderBy, pageSize, offset });
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_MS) {
     return { traders: hit.traders, cached: true };
@@ -83,10 +90,18 @@ export async function fetchDiscoverLeaderboard(options: {
     orderBy,
     pageSize,
   });
-  const page = await paginator.firstPage();
-  const traders = page.items
-    .map((row, i) => normalizeTrader(row, i))
-    .filter((r): r is DiscoverTrader => r !== null);
+  const traders: DiscoverTrader[] = [];
+  let validRowsSeen = 0;
+  let rawRowsSeen = 0;
+  outer: for await (const page of paginator) {
+    for (const row of page.items) {
+      const trader = normalizeTrader(row, rawRowsSeen++);
+      if (!trader) continue;
+      if (validRowsSeen++ < offset) continue;
+      traders.push(trader);
+      if (traders.length >= pageSize) break outer;
+    }
+  }
 
   cache.set(key, { at: Date.now(), traders });
   return { traders, cached: false };

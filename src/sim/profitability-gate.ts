@@ -41,6 +41,9 @@ export interface ProfitabilityGateAssessment {
     maxDrawdownPct: number;
     dependencyIssue: string;
     equityStabilityPct: number;
+    top3WinningConditionGrossProfitSharePct: number | null;
+    conditionMappingCoveragePct: number;
+    pnlParseCoveragePct: number;
     recentPnlUsd: number;
     recentProfitFactor: number | null;
   };
@@ -78,13 +81,18 @@ function canTolerateLowPayoff(
   performance: PreviewAccountReport["performance"],
   thresholds: ProfitabilityGateThresholds
 ): boolean {
+  const concentration = performance.winningConditionConcentration;
+  const top3Share = concentration?.top3WinningConditionGrossProfitSharePct;
   return (
     !below(performance.sharpeRatio, thresholds.minLiveSharpeRatio) &&
     !below(performance.profitFactor, thresholds.minLiveProfitFactor) &&
     performance.winRatePct >= thresholds.minLiveWinRatePct &&
     performance.maxDrawdownPct <= thresholds.maxLiveDrawdownPct &&
     performance.equityStabilityPct >= thresholds.minLiveEquityStabilityPct &&
-    performance.top3WinContributionPct <= thresholds.maxLiveTop3WinContributionPct &&
+    concentration?.evidenceStatus === "complete" &&
+    top3Share !== null &&
+    top3Share !== undefined &&
+    top3Share <= thresholds.maxLiveTop3WinContributionPct &&
     performance.dependencyIssue === "diversified"
   );
 }
@@ -110,6 +118,19 @@ function safetyBlockers(report: PreviewAccountReport): string[] {
   if (report.copyQuality.primaryIssue.code === "safety_blocker") {
     addReason(blockers, "copy quality safety blocker");
   }
+  const concentration = report.performance.winningConditionConcentration;
+  if (
+    report.redeemCount > 0 &&
+    concentration?.conditionMappingCoveragePct !== 100
+  ) {
+    addReason(blockers, "redeem condition mapping coverage below 100%");
+  }
+  if (
+    report.redeemCount > 0 &&
+    concentration?.pnlParseCoveragePct !== 100
+  ) {
+    addReason(blockers, "redeem pnl parse coverage below 100%");
+  }
   return blockers;
 }
 
@@ -132,6 +153,9 @@ export function assessProfitabilityGate(
 ): ProfitabilityGateAssessment {
   const t = { ...DEFAULT_THRESHOLDS, ...thresholds };
   const performance = report.performance;
+  const concentration = performance.winningConditionConcentration;
+  const top3ConditionShare =
+    concentration?.top3WinningConditionGrossProfitSharePct ?? null;
   const recent = performance.recent;
   const blockers = safetyBlockers(report);
   const warnings: string[] = [];
@@ -190,7 +214,11 @@ export function assessProfitabilityGate(
   if (performance.equityStabilityPct < t.minLiveEquityStabilityPct) {
     addReason(liveBlockers, "equity stability below live gate");
   }
-  if (performance.top3WinContributionPct > t.maxLiveTop3WinContributionPct) {
+  if (
+    concentration?.evidenceStatus !== "complete" ||
+    top3ConditionShare === null ||
+    top3ConditionShare > t.maxLiveTop3WinContributionPct
+  ) {
     addReason(liveBlockers, "top winners contribute too much profit");
   }
   if (performance.dependencyIssue !== "diversified") {
@@ -230,7 +258,7 @@ export function assessProfitabilityGate(
       performance.winRatePct * 0.1 +
       (performance.payoffRatio ?? 0) * 4 -
       performance.maxDrawdownPct * 5 -
-      performance.top3WinContributionPct * 0.1 -
+      (top3ConditionShare ?? 100) * 0.1 -
       (grade === "reject" ? 100 : 0)
   );
 
@@ -254,6 +282,9 @@ export function assessProfitabilityGate(
       maxDrawdownPct: performance.maxDrawdownPct,
       dependencyIssue: performance.dependencyIssue,
       equityStabilityPct: performance.equityStabilityPct,
+      top3WinningConditionGrossProfitSharePct: top3ConditionShare,
+      conditionMappingCoveragePct: concentration?.conditionMappingCoveragePct ?? 0,
+      pnlParseCoveragePct: concentration?.pnlParseCoveragePct ?? 0,
       recentPnlUsd: recent.pnlUsd,
       recentProfitFactor: recent.profitFactor,
     },

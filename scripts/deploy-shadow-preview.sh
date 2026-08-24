@@ -129,7 +129,7 @@ fi
 
 # Bind every approval to the immutable evidence file and its canonical cohort
 # hash before the generated YAML is considered deployable.
-SHADOW_APPROVED_COHORT="$approved_real" \
+SHADOW_EXPECTED_ACCOUNT_COUNT="$(SHADOW_APPROVED_COHORT="$approved_real" \
 SHADOW_INTAKE_MANIFEST="$manifest_real" \
 SHADOW_MAX_INTAKE_AGE_HOURS="${SHADOW_MAX_INTAKE_AGE_HOURS:-6}" \
 node --input-type=module <<'NODE'
@@ -150,10 +150,6 @@ if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0
   || ageMs < -5 * 60_000) {
   throw new Error("intake evidence is stale or has an invalid capture time");
 }
-const expected = [
-  ["b55", "0xb55fa1296e6ec55d0ce53d93b9237389f11764d4"],
-  ["dance", "0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82"],
-];
 const normalized = (value) => Array.isArray(value)
   ? value.map(normalized)
   : value && typeof value === "object"
@@ -163,8 +159,8 @@ const normalized = (value) => Array.isArray(value)
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const canonicalHash = (value) => sha256(JSON.stringify(normalized(value)));
 
-if (approved.cohortId !== "quality6-20260711-v1") {
-  throw new Error("approved cohort ID mismatch");
+if (typeof approved.cohortId !== "string" || !/^[A-Za-z0-9_-]{1,24}$/.test(approved.cohortId)) {
+  throw new Error("approved cohort ID is invalid");
 }
 if (manifest.seedCohortId !== approved.cohortId) {
   throw new Error("intake manifest cohort mismatch");
@@ -172,20 +168,31 @@ if (manifest.seedCohortId !== approved.cohortId) {
 if (canonicalHash(approved) !== manifest.approvedCohortCanonicalSha256) {
   throw new Error("approvedCohortCanonicalSha256 mismatch");
 }
-if (!Array.isArray(approved.candidates) || approved.candidates.length !== expected.length) {
-  throw new Error("approved cohort roster mismatch");
+if (!Array.isArray(approved.candidates)
+  || approved.candidates.length < 1 || approved.candidates.length > 10) {
+  throw new Error("approved cohort roster must contain 1 to 10 Candidates");
 }
-if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length !== expected.length) {
+if (!Array.isArray(manifest.artifacts)
+  || manifest.artifacts.length !== approved.candidates.length) {
   throw new Error("intake evidence roster mismatch");
 }
 const evidenceRoot = realpathSync(dirname(manifestPath));
 let enabledCount = 0;
-for (const [id, address] of expected) {
-  const candidate = approved.candidates.find((row) => row.id === id);
-  const artifact = manifest.artifacts.find((row) => row.candidateId === id);
-  if (!candidate || String(candidate.address).toLowerCase() !== address) {
-    throw new Error(`approved Candidate identity mismatch: ${id}`);
+const candidateIds = new Set();
+const candidateAddresses = new Set();
+for (const candidate of approved.candidates) {
+  const id = candidate?.id;
+  const address = String(candidate?.address ?? "").toLowerCase();
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,20}$/.test(id)
+    || !/^0x[a-f0-9]{40}$/.test(address)) {
+    throw new Error("approved Candidate identity is invalid");
   }
+  if (candidateIds.has(id) || candidateAddresses.has(address)) {
+    throw new Error(`duplicate approved Candidate identity: ${id}`);
+  }
+  candidateIds.add(id);
+  candidateAddresses.add(address);
+  const artifact = manifest.artifacts.find((row) => row.candidateId === id);
   if (!artifact || String(artifact.address).toLowerCase() !== address) {
     throw new Error(`intake artifact identity mismatch: ${id}`);
   }
@@ -218,8 +225,11 @@ for (const [id, address] of expected) {
   }
 }
 if (enabledCount === 0) throw new Error("no approved or simulation-authorized Candidate");
-console.log(`validated ${enabledCount} preview Candidate(s)`);
+process.stdout.write(String(approved.candidates.length * 3));
 NODE
+)"
+export SHADOW_EXPECTED_ACCOUNT_COUNT
+echo "validated $SHADOW_EXPECTED_ACCOUNT_COUNT preview accounts against intake evidence"
 
 capacity_fields="$(node --input-type=module -e '
   import { statfsSync } from "node:fs";
@@ -270,83 +280,77 @@ fi
 
 # Validate the exact mounted document through the built application. This also
 # proves that the generated YAML enables exactly the Candidates approved above.
-# The same validated 6-account roster is the collector's fail-closed scope.
+# The same builder-validated account roster is the collector's fail-closed scope.
 SHADOW_REPORT_ACCOUNTS="$(docker run --rm \
   --env-file "$POLYMIRROR_ENV_FILE" \
+  -e "SHADOW_EXPECTED_ACCOUNT_COUNT=$SHADOW_EXPECTED_ACCOUNT_COUNT" \
   -v "$SHADOW_CONFIG:/app/config.yaml:ro" \
   -v "$SHADOW_APPROVED_COHORT:/app/approved-cohort.json:ro" \
   "$image" \
   node --input-type=module -e '
     const { readFileSync } = await import("node:fs");
     const { loadMultiAccountConfig } = await import("./dist/config/load.js");
+    const { readNormalizedConfigDocument } = await import("./dist/config/write.js");
+    const { buildCandidateExperimentConfig } = await import("./dist/experiments/candidate-cohort.js");
     const { serializeRequiredReportAccounts } = await import("./dist/sim/cohort-table-accounts.js");
     const loaded = loadMultiAccountConfig("/app/config.yaml");
+    const document = readNormalizedConfigDocument("/app/config.yaml");
     const approved = JSON.parse(readFileSync("/app/approved-cohort.json", "utf8"));
-    const addresses = new Map(approved.candidates.map((row) => [row.id, {
-      address: String(row.address).toLowerCase(),
-      enabled: row.freshIntakePassed === true || row.simulationOnlyEnabled === true,
-      simulationOnly: row.simulationOnlyEnabled === true,
-    }]));
-    const arms = new Map([
-      ["conservative", { fixed: 1, position: 10, volume: 40, markets: 10, loss: 5, slip: 0.015 }],
-      ["standard", { fixed: 2, position: 20, volume: 80, markets: 15, loss: 8, slip: 0.025 }],
-      ["aggressive", { fixed: 5, position: 40, volume: 160, markets: 20, loss: 10, slip: 0.04 }],
-    ]);
-    if (loaded.accounts.length !== 6) throw new Error("quality6 requires exactly 6 accounts");
+    const expected = buildCandidateExperimentConfig(document.defaultsGlobal, approved);
+    const expectedAccountCount = Number(process.env.SHADOW_EXPECTED_ACCOUNT_COUNT);
+    if (!Number.isSafeInteger(expectedAccountCount) || expectedAccountCount < 1
+      || document.accounts.length !== expectedAccountCount
+      || loaded.accounts.length !== expectedAccountCount
+      || expected.accounts.length !== expectedAccountCount) {
+      throw new Error("Candidate account count mismatch");
+    }
+    if (JSON.stringify(document.accounts) !== JSON.stringify(expected.accounts)) {
+      throw new Error("mounted config does not match project-native Candidate builder output");
+    }
     let copyEnabled = 0;
-    const expectedIds = new Set();
-    for (const [candidateId, candidate] of addresses) {
-      for (const [armName, arm] of arms) {
-        const id = `exp_quality6-20260711-v1_${candidateId}_${armName}_200`;
-        expectedIds.add(id);
-        const account = loaded.accounts.find((row) => row.id === id);
-        if (!account || account.enabled !== true) throw new Error(`missing enabled account: ${id}`);
-        const g = account.config.app.global;
-        const leader = account.config.app.leaders[0];
-        if (!g.previewMode) throw new Error(`live account rejected: ${id}`);
-        if (g.copyPriceMode !== "executable_guarded") throw new Error(`unguarded account rejected: ${id}`);
-        if (g.execution.orderType !== "FOK") throw new Error(`non-FOK account rejected: ${id}`);
-        if (g.risk.startingCapitalUsd !== 200) throw new Error(`non-200U account rejected: ${id}`);
-        if (g.risk.enableCopyTrading !== candidate.enabled
-          || leader?.enabled !== candidate.enabled) {
-          throw new Error(`approval/copy mismatch: ${id}`);
-        }
-        if (leader?.id !== candidateId || leader?.address?.toLowerCase() !== candidate.address) {
-          throw new Error(`leader identity mismatch: ${id}`);
-        }
-        if (leader.strategy.type !== "FIXED" || leader.strategy.copySize !== arm.fixed
-          || leader.limits?.maxOrderUsd !== arm.fixed
-          || leader.limits?.maxPositionUsd !== arm.position
-          || leader.limits?.maxDailyVolumeUsd !== arm.volume
-          || leader.filters?.minPrice !== undefined
-          || leader.filters?.maxPrice !== undefined
-          || JSON.stringify(leader.filters?.sides) !== JSON.stringify(["BUY", "SELL"])
-          || g.risk.maxOrderUsd !== arm.fixed
-          || g.risk.maxPositionPerTokenUsd !== arm.position
-          || g.risk.maxDailyVolumeUsd !== arm.volume
-          || g.risk.maxOpenMarkets !== arm.markets
-          || g.risk.dailyLossCapPct !== (candidate.simulationOnly ? 100 : arm.loss)
-          || g.risk.maxLiquidationDrawdownPct !== (candidate.simulationOnly ? 100 : 10)
-          || g.risk.slippageTolerance !== arm.slip
-          || g.risk.slippageToleranceMode !== "relative_pct"
-          || g.risk.positionCapBasis !== "cost"
-          || g.risk.syncWalletBalance !== false) {
-          throw new Error(`quality6 arm mismatch: ${id}`);
-        }
-        if (candidate.enabled) copyEnabled += 1;
+    const expectedIds = new Set(expected.accounts.map((account) => account.id));
+    for (const expectedAccount of expected.accounts) {
+      const account = loaded.accounts.find((row) => row.id === expectedAccount.id);
+      if (!account || account.enabled !== expectedAccount.enabled) {
+        throw new Error(`missing or disabled Candidate account: ${expectedAccount.id}`);
       }
+      const g = account.config.app.global;
+      const leader = account.config.app.leaders[0];
+      const expectedLeader = expectedAccount.leaders[0];
+      if (!g.previewMode) throw new Error(`live account rejected: ${expectedAccount.id}`);
+      if (g.copyPriceMode !== "executable_guarded") throw new Error(`unguarded account rejected: ${expectedAccount.id}`);
+      if (g.execution.orderType !== "FOK") throw new Error(`non-FOK account rejected: ${expectedAccount.id}`);
+      if (g.risk.startingCapitalUsd !== 200) throw new Error(`non-200U account rejected: ${expectedAccount.id}`);
+      if (g.risk.enableCopyTrading !== expectedAccount.global.risk.enable_copy_trading
+        || leader?.enabled !== expectedLeader?.enabled) {
+        throw new Error(`approval/copy mismatch: ${expectedAccount.id}`);
+      }
+      if (leader?.id !== expectedLeader?.id
+        || leader?.address?.toLowerCase() !== expectedLeader?.address?.toLowerCase()) {
+        throw new Error(`leader identity mismatch: ${expectedAccount.id}`);
+      }
+      if (leader?.strategy.type !== "FIXED"
+        || leader.filters?.minPrice !== undefined
+        || leader.filters?.maxPrice !== undefined
+        || JSON.stringify(leader.filters?.sides) !== JSON.stringify(["BUY", "SELL"])
+        || g.risk.slippageToleranceMode !== "relative_pct"
+        || g.risk.positionCapBasis !== "cost"
+        || g.risk.syncWalletBalance !== false) {
+        throw new Error(`Candidate safety invariant mismatch: ${expectedAccount.id}`);
+      }
+      if (g.risk.enableCopyTrading) copyEnabled += 1;
     }
     if (loaded.accounts.some((account) => !expectedIds.has(account.id))) {
-      throw new Error("unexpected account in quality6 config");
+      throw new Error("unexpected account in Candidate config");
     }
     if (copyEnabled === 0) throw new Error("no Candidate is copy-enabled");
     process.stdout.write(serializeRequiredReportAccounts(
       loaded.accounts.map((account) => account.id),
-      6
+      expectedAccountCount
     ));
   ')"
 export SHADOW_REPORT_ACCOUNTS
-echo "validated 6 preview accounts for collector scope"
+echo "validated $SHADOW_EXPECTED_ACCOUNT_COUNT preview accounts for collector scope"
 
 docker compose -p "$project" -f "$compose_file" config >/dev/null
 existing_running="$(docker compose -p "$project" -f "$compose_file" \
@@ -384,13 +388,17 @@ while [ "$attempt" -lt 60 ]; do
         let payload = "";
         for await (const chunk of process.stdin) payload += chunk;
         const health = JSON.parse(payload);
+        const expectedAccountCount = Number(process.env.SHADOW_EXPECTED_ACCOUNT_COUNT);
+        if (!Number.isSafeInteger(expectedAccountCount) || expectedAccountCount < 1) process.exit(1);
         if (health.status !== "ok" || health.previewMode !== true
           || !Number.isFinite(health.lastPollAt) || health.lastError !== null
           || health.pendingOrders !== 0
           || health.settlementFailures !== 0 || health.closedMarketOpenPositions !== 0
           || !Array.isArray(health.walletDrifts) || health.walletDrifts.length !== 0
-           || health.enabledAccountCount !== 6 || health.polledAccountCount !== 6
-           || !Array.isArray(health.experiments) || health.experiments.length !== 6) {
+          || health.enabledAccountCount !== expectedAccountCount
+          || health.polledAccountCount !== expectedAccountCount
+          || !Array.isArray(health.experiments)
+          || health.experiments.length !== expectedAccountCount) {
           process.exit(1);
         }
       '; then
@@ -407,7 +415,7 @@ while [ "$attempt" -lt 60 ]; do
       || fail "container image does not match validated image"
     collector_logs="$(docker compose -p "$project" -f "$compose_file" \
       logs --no-color --tail 200 polymirror-shadow-collector 2>/dev/null || true)"
-     if printf '%s' "$collector_logs" | grep -q '"accountCount":6'; then
+     if printf '%s' "$collector_logs" | grep -q "\"accountCount\":$SHADOW_EXPECTED_ACCOUNT_COUNT"; then
       collector_ready=1
     fi
   fi

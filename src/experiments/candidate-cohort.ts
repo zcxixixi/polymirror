@@ -11,6 +11,28 @@ import { fileURLToPath } from "node:url";
 
 export const candidateArmNames = ["conservative", "standard", "aggressive"] as const;
 export type CandidateArmName = (typeof candidateArmNames)[number];
+export const candidateExperimentFactors = ["fixedUsd"] as const;
+export type CandidateExperimentFactor = (typeof candidateExperimentFactors)[number];
+
+const singleVariableRequiredArmFields = [
+  "fixedUsd",
+  "maxPositionUsd",
+  "maxDailyVolumeUsd",
+  "maxOpenMarkets",
+  "dailyLossCapPct",
+  "slippageTolerance",
+  "minPrice",
+  "maxPrice",
+] as const;
+const singleVariableControlArmFields = [
+  "maxPositionUsd",
+  "maxDailyVolumeUsd",
+  "maxOpenMarkets",
+  "dailyLossCapPct",
+  "slippageTolerance",
+  "minPrice",
+  "maxPrice",
+] as const;
 
 const idSchema = z.string().min(1).regex(/^[A-Za-z0-9_-]+$/);
 const candidateArmSchema = z.object({
@@ -81,8 +103,46 @@ const candidateSchema = z.object({
   }
 });
 
+interface SingleVariableCohortInput {
+  experimentFactor?: CandidateExperimentFactor;
+  arms?: Partial<Record<CandidateArmName, CandidateArmInput>>;
+}
+
+function singleVariableExperimentError(cohort: SingleVariableCohortInput): string | undefined {
+  if (cohort.experimentFactor !== "fixedUsd") return undefined;
+  if (!cohort.arms) {
+    return "fixedUsd experiment requires explicit conservative, standard, and aggressive arms";
+  }
+
+  const arms = candidateArmNames.map((name) => ({ name, arm: cohort.arms?.[name] }));
+  for (const { name, arm } of arms) {
+    if (!arm) return `fixedUsd experiment requires explicit ${name} arm`;
+    for (const field of singleVariableRequiredArmFields) {
+      if (arm[field] === undefined) {
+        return `fixedUsd experiment requires explicit ${name}.${field}`;
+      }
+    }
+  }
+
+  const baseline = arms[0]!.arm!;
+  for (const { name, arm } of arms.slice(1)) {
+    for (const field of singleVariableControlArmFields) {
+      if (!Object.is(arm![field], baseline[field])) {
+        return `fixedUsd experiment control field ${field} must match across all arms (${name})`;
+      }
+    }
+  }
+
+  const fixedLevels = new Set(arms.map(({ arm }) => arm!.fixedUsd));
+  if (fixedLevels.size !== candidateArmNames.length) {
+    return "fixedUsd experiment requires three distinct fixedUsd levels";
+  }
+  return undefined;
+}
+
 export const candidateCohortSchema = z.object({
   cohortId: idSchema.max(24),
+  experimentFactor: z.enum(candidateExperimentFactors).optional(),
   candidates: z.array(candidateSchema).min(1).max(10),
   arms: z.object({
     conservative: candidateArmSchema.optional(),
@@ -113,6 +173,14 @@ export const candidateCohortSchema = z.object({
       addresses.add(address);
     }
   }
+  const singleVariableError = singleVariableExperimentError(cohort);
+  if (singleVariableError) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: singleVariableError,
+      path: ["arms"],
+    });
+  }
 });
 
 export type CandidateArmInput = z.infer<typeof candidateArmSchema>;
@@ -127,6 +195,8 @@ interface CandidateArmRuleInput {
 }
 
 interface CandidateRuleInput {
+  experimentFactor?: CandidateExperimentFactor;
+  arms?: Partial<Record<CandidateArmName, CandidateArmInput>>;
   candidates?: Array<{ id?: string; address?: string }>;
 }
 
@@ -193,7 +263,7 @@ const candidateSchemaValidator = (() => {
           addresses.add(address);
         }
       }
-      return true;
+      return singleVariableExperimentError(cohort) === undefined;
     },
   });
   return ajv.compile(publishedCandidateSchema);
@@ -209,7 +279,8 @@ export function validateCandidateCohortJson(input: unknown): unknown {
             return `${error.instancePath || "/"} unrecognized key: ${key ?? "unknown"}`;
           }
           if (error.keyword === "x-candidateCohortRules") {
-            const candidates = (input as CandidateRuleInput).candidates ?? [];
+            const cohort = input as CandidateRuleInput;
+            const candidates = cohort.candidates ?? [];
             const ids = new Set<string>();
             const addresses = new Set<string>();
             for (const candidate of candidates) {
@@ -223,6 +294,8 @@ export function validateCandidateCohortJson(input: unknown): unknown {
               }
               if (address) addresses.add(address);
             }
+            return singleVariableExperimentError(cohort)
+              ?? "candidate cohort semantic rules failed";
           }
           if (error.keyword === "x-candidateFreshIntakeRules") {
             const path = error.instancePath || "/";

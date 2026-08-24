@@ -1,4 +1,9 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
+
+function dataRoot(): string {
+  return process.env.POLYMIRROR_DATA_DIR?.trim() || "data";
+}
 
 const LIVE_DB = "data/polymirror.db";
 const PREVIEW_DB = "data/preview.db";
@@ -7,7 +12,8 @@ const PREVIEW_DB = "data/preview.db";
 export function resolveDbPath(previewMode: boolean): string {
   const override = process.env.POLYMIRROR_DB_PATH?.trim();
   if (override) return override;
-  return previewMode ? PREVIEW_DB : LIVE_DB;
+  const root = dataRoot();
+  return previewMode ? join(root, "preview.db") : join(root, "polymirror.db");
 }
 
 /** Per-account DB path. Legacy single-account DBs under data/preview.db are reused for id "default". */
@@ -16,9 +22,10 @@ export function resolveAccountDbPath(accountId: string, previewMode: boolean): s
   if (override) return override;
 
   const fileName = previewMode ? "preview.db" : "polymirror.db";
-  const newPath = `data/accounts/${accountId}/${fileName}`;
+  const root = dataRoot();
+  const newPath = join(root, "accounts", accountId, fileName);
 
-  if (accountId === "default") {
+  if (accountId === "default" && root === "data") {
     const legacyPath = previewMode ? PREVIEW_DB : LIVE_DB;
     if (existsSync(legacyPath) && !existsSync(newPath)) {
       return legacyPath;

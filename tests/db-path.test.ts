@@ -1,9 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveDbPath, resolveAccountDbPath } from "../src/state/db-path.js";
+
+afterEach(() => {
+  delete process.env.POLYMIRROR_DATA_DIR;
+  delete process.env.POLYMIRROR_DB_PATH;
+});
 
 describe("resolveDbPath", () => {
   it("uses preview db in preview mode", () => {
@@ -18,6 +23,14 @@ describe("resolveDbPath", () => {
 describe("resolveAccountDbPath", () => {
   it("uses per-account path for non-default accounts", () => {
     expect(resolveAccountDbPath("sub1", true)).toBe("data/accounts/sub1/preview.db");
+  });
+
+  it("isolates every account under POLYMIRROR_DATA_DIR", () => {
+    process.env.POLYMIRROR_DATA_DIR = "/tmp/polymirror-preview-run";
+    expect(resolveAccountDbPath("sub1", true)).toBe(
+      "/tmp/polymirror-preview-run/accounts/sub1/preview.db"
+    );
+    expect(resolveDbPath(false)).toBe("/tmp/polymirror-preview-run/polymirror.db");
   });
 
   it("uses legacy preview path for default when it exists", () => {

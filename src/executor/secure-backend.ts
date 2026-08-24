@@ -380,8 +380,11 @@ export class SecureTradingBackend implements TradingBackend {
     try {
       const client = await getSecureClient(this.wallet);
       const resp = await client.cancelOrder({ orderId });
-      if (resp.canceled.includes(orderId)) return { ok: true };
-      const err = resp.notCanceled[orderId];
+      if (resp.canceled.some((canceledId) => String(canceledId) === orderId)) {
+        return { ok: true };
+      }
+      const err = Object.entries(resp.notCanceled)
+        .find(([notCanceledId]) => notCanceledId === orderId)?.[1];
       if (err) return { ok: false, error: err };
       return { ok: true };
     } catch (e) {

@@ -8,10 +8,7 @@ import {
 import { signerFrom } from "@polymarket/client/ethers-v5";
 import type { WalletConfig } from "../config/types.js";
 import { fetchPusdAllowancesReady } from "./balance.js";
-import {
-  fetchRelayerWalletDeployed,
-  registerRelayerDeployedWallet,
-} from "./relayer-wallet.js";
+import { fetchRelayerWalletDeployed } from "./relayer-wallet.js";
 import { deriveDepositWalletClobCredentials } from "./deposit-wallet-clob-auth.js";
 import { logInfo, logError } from "../notify/logger.js";
 import { ensureUndiciGlobalProxy } from "../util/proxy.js";
@@ -42,7 +39,7 @@ function cacheKey(wallet: WalletConfig): string {
 
 /**
  * auto = SDK-derived deposit wallet (SecureClient default).
- * settings = pass POLYMARKET_ADDRESS (relayer-deployed wallets supported via SDK patch).
+ * settings = pass POLYMARKET_ADDRESS (validated by the official SDK).
  */
 function secureWalletMode(wallet: WalletConfig): "auto" | "settings" {
   const raw = (process.env.POLYMARKET_SECURE_WALLET ?? "").trim().toLowerCase();
@@ -72,8 +69,7 @@ async function prepareRelayerDeployedWallet(wallet: WalletConfig, mode: "auto" |
   if (mode !== "settings") return;
   const deployed = await fetchRelayerWalletDeployed(wallet.proxyAddress);
   if (deployed) {
-    registerRelayerDeployedWallet(wallet.proxyAddress);
-    logInfo("Relayer-deployed deposit wallet registered for SecureClient", {
+    logInfo("Relayer-deployed deposit wallet confirmed for official SecureClient", {
       wallet: wallet.proxyAddress.slice(0, 10),
     });
     return;
@@ -240,7 +236,7 @@ export async function ensureTradingReady(wallet: WalletConfig): Promise<void> {
           );
         } else if (/does not match the signer|deterministic wallet/i.test(msg)) {
           logError(
-            "SecureClient wallet classification failed — run: node scripts/patch-polymarket-client.mjs",
+            "Official SecureClient rejected the configured wallet; verify POLYMARKET_ADDRESS belongs to this signer",
             { error: msg }
           );
         } else {

@@ -76,7 +76,7 @@ describe("SecureTradingBackend", () => {
     }
   );
 
-  it("forwards an explicitly prepared BUY amount and all-in cap to beta.14", async () => {
+  it("forwards an explicitly prepared BUY amount and all-in cap to the official SDK", async () => {
     await new SecureTradingBackend(wallet).submitOrder({
       tokenId: "token-1",
       side: "BUY",

@@ -4,7 +4,11 @@
   "title": "PolyMirror preview Candidate cohort",
   "type": "object",
   "additionalProperties": false,
-  "x-candidateCohortRules": ["unique candidate IDs", "unique candidate addresses case-insensitively"],
+  "x-candidateCohortRules": [
+    "unique candidate IDs",
+    "unique candidate addresses case-insensitively",
+    "declared fixedUsd experiment varies only fixedUsd"
+  ],
   "required": ["cohortId", "candidates"],
   "properties": {
     "cohortId": {
@@ -12,6 +16,10 @@
       "pattern": "^[A-Za-z0-9_-]+$",
       "minLength": 1,
       "maxLength": 24
+    },
+    "experimentFactor": {
+      "type": "string",
+      "enum": ["fixedUsd"]
     },
     "candidates": {
       "type": "array",

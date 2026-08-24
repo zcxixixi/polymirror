@@ -142,8 +142,21 @@ export function assessStabilityGoal(
   const pendingClean =
     report.pendingOrderCount === 0 && report.liveOrderIntentCount === 0;
   const executableGuarded = report.copyPriceMode === "executable_guarded";
-  const overallSlip = goal.slippage.lossPct;
-  const recent20Slip = goal.recent20.slippageLossPct;
+  const pollTimeQuoteSlip = goal.pollTimeExecutableQuoteSlippage;
+  const overallSlip = pollTimeQuoteSlip.lossPct;
+  const recent20Slip = pollTimeQuoteSlip.recent20.lossPct;
+  const pollTimeQuoteIntegrityValid =
+    pollTimeQuoteSlip.status === "valid" ||
+    pollTimeQuoteSlip.status === "insufficient_coverage";
+  const concentration = report.performance.winningConditionConcentration;
+  const concentrationRedeemCount = concentration?.redeemCount ?? report.redeemCount;
+  const conditionMappingComplete =
+    concentrationRedeemCount > 0 &&
+    concentration?.conditionMappingCoveragePct === 100;
+  const pnlParseComplete =
+    concentrationRedeemCount > 0 && concentration?.pnlParseCoveragePct === 100;
+  const top3ConditionShare =
+    concentration?.top3WinningConditionGrossProfitSharePct ?? null;
 
   const checks: StabilityGoalCheck[] = [
     check(
@@ -180,11 +193,19 @@ export function assessStabilityGoal(
     ),
     check(
       "slippage_observation_days",
-      `真实 Slip 观察期 >= ${t.minObservationDays} 天`,
-      goal.slippage.observationDays,
+      `轮询时可执行报价 Slip 观察期 >= ${t.minObservationDays} 天`,
+      pollTimeQuoteSlip.observationDays,
       t.minObservationDays,
       ">=",
-      goal.slippage.observationDays >= t.minObservationDays
+      pollTimeQuoteSlip.observationDays >= t.minObservationDays
+    ),
+    check(
+      "poll_time_quote_integrity",
+      "轮询时报价证据关联、字段与订单簿重算完整",
+      pollTimeQuoteIntegrityValid ? 1 : 0,
+      1,
+      "=",
+      pollTimeQuoteIntegrityValid
     ),
     check(
       "redeem_sample",
@@ -193,6 +214,22 @@ export function assessStabilityGoal(
       t.minRedeemCount,
       ">=",
       report.redeemCount >= t.minRedeemCount
+    ),
+    check(
+      "redeem_condition_mapping_coverage",
+      "REDEEM condition 映射覆盖率 = 100%",
+      concentration?.conditionMappingCoveragePct ?? 0,
+      100,
+      "=",
+      conditionMappingComplete
+    ),
+    check(
+      "redeem_pnl_parse_coverage",
+      "REDEEM PnL 解析覆盖率 = 100%",
+      concentration?.pnlParseCoveragePct ?? 0,
+      100,
+      "=",
+      pnlParseComplete
     ),
     check(
       "settled_markets",
@@ -250,11 +287,11 @@ export function assessStabilityGoal(
     ),
     check(
       "overall_slip_coverage",
-      `整体 Slip 覆盖率 >= ${t.minSlipCoveragePct}%`,
-      goal.slippage.coveragePct,
+      `整体轮询时报价 Slip 覆盖率 >= ${t.minSlipCoveragePct}%`,
+      pollTimeQuoteSlip.coveragePct,
       t.minSlipCoveragePct,
       ">=",
-      goal.slippage.coveragePct >= t.minSlipCoveragePct
+      pollTimeQuoteSlip.coveragePct >= t.minSlipCoveragePct
     ),
     check(
       "overall_slip",
@@ -266,11 +303,11 @@ export function assessStabilityGoal(
     ),
     check(
       "recent20_slip_coverage",
-      `最近 20 Slip 覆盖率 >= ${t.minSlipCoveragePct}%`,
-      goal.recent20.slippageCoveragePct,
+      `最近 20 次轮询时报价 Slip 覆盖率 >= ${t.minSlipCoveragePct}%`,
+      pollTimeQuoteSlip.recent20.coveragePct,
       t.minSlipCoveragePct,
       ">=",
-      goal.recent20.slippageCoveragePct >= t.minSlipCoveragePct
+      pollTimeQuoteSlip.recent20.coveragePct >= t.minSlipCoveragePct
     ),
     check(
       "recent20_slip",
@@ -306,11 +343,13 @@ export function assessStabilityGoal(
     ),
     check(
       "top3_contribution",
-      `Top 3 盈利贡献 <= ${t.maxTop3WinContributionPct}%`,
-      report.performance.top3WinContributionPct,
+      `Top 3 condition 毛盈利占比 <= ${t.maxTop3WinContributionPct}%`,
+      top3ConditionShare,
       t.maxTop3WinContributionPct,
       "<=",
-      report.performance.top3WinContributionPct <= t.maxTop3WinContributionPct
+      concentration?.evidenceStatus === "complete" &&
+        top3ConditionShare !== null &&
+        top3ConditionShare <= t.maxTop3WinContributionPct
     ),
     check(
       "pnl_24h",
@@ -357,7 +396,10 @@ export function assessStabilityGoal(
     "observation_days",
     "active_trading_days",
     "slippage_observation_days",
+    "poll_time_quote_integrity",
     "redeem_sample",
+    "redeem_condition_mapping_coverage",
+    "redeem_pnl_parse_coverage",
     "settled_markets",
     "recent20_sample",
     "overall_slip_coverage",
@@ -377,10 +419,13 @@ export function assessStabilityGoal(
     lastCopyStale ||
     !accountingClean ||
     !pendingClean ||
+    pollTimeQuoteSlip.status === "invalid" ||
     recentErrorCount > 0 ||
     report.killSwitch ||
     report.copyQuality.primaryIssue.code === "safety_blocker" ||
     unclassifiedCopyGap > 0 ||
+    (concentrationRedeemCount > 0 && !conditionMappingComplete) ||
+    (concentrationRedeemCount > 0 && !pnlParseComplete) ||
     goal.copyPnlUsd < 0 ||
     (matureOverall && goal.copyPnlUsd <= 0) ||
     (matureOverall && goal.overall.winRatePct < t.minOverallWinRatePct) ||
@@ -396,14 +441,15 @@ export function assessStabilityGoal(
     (report.performance.tradeCount > 0 &&
       report.performance.maxDrawdownPct > t.maxDrawdownPct) ||
     (matureOverall &&
-      report.performance.top3WinContributionPct > t.maxTop3WinContributionPct) ||
+      (top3ConditionShare === null ||
+        top3ConditionShare > t.maxTop3WinContributionPct)) ||
     (matureOverall && report.performance.dependencyIssue === "concentrated") ||
     (matureRecent20 && goal.recent20.pnlUsd <= 0) ||
     (matureRecent20 && goal.recent20.winRatePct < t.minRecent20WinRatePct) ||
-    (goal.slippage.coveragePct >= t.minSlipCoveragePct &&
+    (pollTimeQuoteSlip.coveragePct >= t.minSlipCoveragePct &&
       overallSlip !== null &&
       overallSlip > t.maxOverallSlipPct) ||
-    (goal.recent20.slippageCoveragePct >= t.minSlipCoveragePct &&
+    (pollTimeQuoteSlip.recent20.coveragePct >= t.minSlipCoveragePct &&
       recent20Slip !== null &&
       recent20Slip > t.maxRecent20SlipPct) ||
     (goal.windows.h24.marketCount > 0 && goal.windows.h24.pnlUsd < 0) ||

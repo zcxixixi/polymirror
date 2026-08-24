@@ -34,7 +34,7 @@ describe("official SDK BUY maxSpend preview contract", () => {
     });
   });
 
-  it("matches beta.14 floating-point rounding at a fee-adjusted cent boundary", () => {
+  it("matches official SDK floating-point rounding at a fee-adjusted cent boundary", () => {
     expect(prepareSdkMarketBuyWithinMaxSpend({
       requestedAmountUsd: 2,
       maxSpendUsd: 2,

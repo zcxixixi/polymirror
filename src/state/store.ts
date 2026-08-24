@@ -567,6 +567,8 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_audit_log_action_reason ON audit_log(action, reason);
       CREATE INDEX IF NOT EXISTS idx_audit_log_action_id ON audit_log(action, id);
       CREATE INDEX IF NOT EXISTS idx_audit_log_ts_action ON audit_log(ts, action);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_experiment_preview_action_ts_id
+        ON audit_log(experiment_id, preview, action, ts, id);
       CREATE TABLE IF NOT EXISTS daily_stats (
         date TEXT PRIMARY KEY,
         volume_usd REAL NOT NULL DEFAULT 0,
