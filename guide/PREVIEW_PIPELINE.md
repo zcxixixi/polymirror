@@ -2,6 +2,14 @@
 
 当前链路固定使用官方 `@polymarket/client` 稳定版，流程为：fresh intake → 1U/2U/5U 单变量账户 → 可执行 orderbook 模拟 → SQLite 连续状态 → 小时报表与盈利门禁。任何候选即使以 `simulationOnlyEnabled` 进入观察，也不会获得实盘资格。
 
+大规模候选池不受单批 30 账户限制。先把最多 5000 个冻结候选拆成每片 10 个 Leader，再用现有完整门禁逐片执行：
+
+```bash
+npm run preview:pipeline:shard -- mass-cohort.json reports/shards/run-id
+```
+
+每片仍生成 10 Leader × 3 档 = 30 账户；不同分片可按服务器容量串行或水平扩展。单个进程内同一 Leader 的三档账户共享官方 Activity 请求。
+
 ```bash
 npm install
 npm run preview:pipeline:prepare
