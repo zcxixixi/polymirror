@@ -11,6 +11,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY dashboard/package.json dashboard/package-lock.json ./dashboard/
 COPY scripts ./scripts
+COPY config ./config
+COPY config.example.yaml config.preview.template.yaml ./
 RUN npm ci \
   && npm ci --prefix dashboard
 
