@@ -41,6 +41,7 @@ export function discoverQuery(params: {
   timePeriod: string;
   orderBy: string;
   limit?: number;
+  accountId?: string | null;
 }): string {
   const qs = new URLSearchParams({
     category: params.category,
@@ -48,6 +49,7 @@ export function discoverQuery(params: {
     orderBy: params.orderBy,
     limit: String(params.limit ?? 25),
   });
+  if (params.accountId) qs.set("accountId", params.accountId);
   return `/api/discover/leaderboard?${qs}`;
 }
 

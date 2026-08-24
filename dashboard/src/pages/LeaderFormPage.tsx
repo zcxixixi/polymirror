@@ -5,30 +5,46 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { leaderToForm } from "../api/leaders";
 import { apiFetch, getActiveAccountId, type LeaderRow } from "../api/client";
 import { useT } from "../i18n/I18nProvider";
+import { suggestLeaderId } from "../utils/leaderId";
 
 export function LeaderNewPage() {
   const t = useT();
   const [params] = useSearchParams();
   const address = params.get("address") ?? "";
+  const username = (params.get("username") ?? "").replace(/^@/, "");
   const id = params.get("id") ?? "";
+
+  const suggestedId =
+    id ||
+    (address ? suggestLeaderId(undefined, address) : "") ||
+    (username ? suggestLeaderId(username, "") : "");
 
   const initial = leaderToForm(
     address
       ? {
-          id,
+          id: suggestedId,
           address,
           enabled: true,
           weight: 1,
           strategy: { type: "PERCENTAGE", copySize: 5 },
           limits: { maxOrderUsd: 20 },
         }
-      : undefined
+      : username
+        ? {
+            id: suggestedId,
+            username,
+            enabled: true,
+            weight: 1,
+            strategy: { type: "PERCENTAGE", copySize: 5 },
+            limits: { maxOrderUsd: 20 },
+          }
+        : undefined
   );
 
   return (
     <>
       <p className="breadcrumb">
-        {address ? (
+        {address || username ? (
           <Link to="/discover">{t("leaders.backDiscover")}</Link>
         ) : (
           <Link to="/leaders">{t("leaders.backLeaders")}</Link>

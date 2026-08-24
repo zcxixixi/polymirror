@@ -114,18 +114,25 @@ describe("assertLiveTradingForAccounts", () => {
 });
 
 describe("patchGlobalSettings live gate", () => {
+  const mockActx = {
+    accountId: "main",
+    getConfig: () => ({
+      app: { global: { previewMode: true } },
+    }),
+    store: {},
+  } as unknown as AccountApiContext;
+
   const mockRoot = {
     configPath: "/tmp/unused-config.yaml",
     reloadConfig: async () => {},
     manager: {
       buildAccountsSummary: () => [],
       list: () => [],
+      toApiContext: () => mockActx,
+      require: () => ({ health: { previewMode: true }, store: {} }),
+      reloadConfigUnlocked: async () => {},
     },
   } as unknown as ApiContext;
-
-  const mockActx = {
-    accountId: "main",
-  } as AccountApiContext;
 
   it("rejects previewMode:false without live confirm", async () => {
     const prevConfirm = process.env.POLYMIRROR_LIVE_CONFIRM;

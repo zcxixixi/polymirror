@@ -14,6 +14,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { OverviewHourlyChart } from "../components/OverviewHourlyChart";
 import { useT } from "../i18n/I18nProvider";
 import { actionBadgeClass, SideBadge } from "../utils/auditDisplay";
+import { ModeSwitchButton } from "../components/ModeSwitchButton";
 import { StopCopyTradingButton } from "../components/StopCopyTradingButton";
 import type { AccountSummary } from "../api/client";
 
@@ -282,11 +283,14 @@ export function OverviewPage() {
         }
         actions={
           s ? (
-            <StopCopyTradingButton
-              previewMode={s.previewMode}
-              copyTradingEnabled={s.copyTradingEnabled}
-              compact
-            />
+            <>
+              <ModeSwitchButton previewMode={s.previewMode} compact />
+              <StopCopyTradingButton
+                previewMode={s.previewMode}
+                copyTradingEnabled={s.copyTradingEnabled}
+                compact
+              />
+            </>
           ) : undefined
         }
       />
@@ -582,24 +586,24 @@ export function OverviewPage() {
             {s?.lastPoll && (
               <>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Fetched</span>
+                  <span className="engine-stat-label">{t("overview.pollFetched")}</span>
                   <span className="engine-stat-value mono">{s.lastPoll.fetched}</span>
                 </div>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Copied</span>
+                  <span className="engine-stat-label">{t("overview.pollCopied")}</span>
                   <span className="engine-stat-value mono engine-stat-good">{s.lastPoll.copied}</span>
                 </div>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Skipped</span>
+                  <span className="engine-stat-label">{t("overview.pollSkipped")}</span>
                   <span className="engine-stat-value mono">{s.lastPoll.skipped}</span>
                 </div>
                 <div className="engine-stat">
-                  <span className="engine-stat-label">Pending Filled</span>
+                  <span className="engine-stat-label">{t("overview.pollPendingFilled")}</span>
                   <span className="engine-stat-value mono">{s.lastPoll.pendingFilled}</span>
                 </div>
                 {s.lastPoll.errors.length > 0 && (
                   <div className="engine-stat">
-                    <span className="engine-stat-label">Errors</span>
+                    <span className="engine-stat-label">{t("overview.pollErrors")}</span>
                     <span className="engine-stat-value mono engine-stat-bad">{s.lastPoll.errors.length}</span>
                   </div>
                 )}

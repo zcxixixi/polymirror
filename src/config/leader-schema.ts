@@ -26,6 +26,17 @@ export const leaderWriteSchema = z
         maxDailyVolumeUsd: z.number().positive().optional(),
       })
       .optional(),
+    rateLimit: z
+      .object({
+        tradeAggregationWindowMs: z.number().int().nonnegative().optional(),
+        buyDedupWindowMs: z.number().int().nonnegative().optional(),
+        minCopyIntervalMs: z.number().int().nonnegative().optional(),
+        maxCopiesPerWindow: z.number().int().positive().optional(),
+        copyRateWindowMs: z.number().int().positive().optional(),
+        slippageTolerance: z.number().nonnegative().optional(),
+      })
+      .nullable()
+      .optional(),
     filters: z
       .object({
         minPrice: z.number().min(0).max(1).optional(),
@@ -87,6 +98,34 @@ export function leaderWriteToYaml(input: LeaderWriteInput): Record<string, unkno
     };
   }
 
+  if (input.rateLimit === null) {
+    // Cleared by dashboard; mergeLeaderWrite deletes the YAML key.
+    row.rate_limit = null;
+  } else if (input.rateLimit) {
+    const rl: Record<string, number> = {};
+    if (input.rateLimit.tradeAggregationWindowMs !== undefined) {
+      rl.trade_aggregation_window_ms = input.rateLimit.tradeAggregationWindowMs;
+    }
+    if (input.rateLimit.buyDedupWindowMs !== undefined) {
+      rl.buy_dedup_window_ms = input.rateLimit.buyDedupWindowMs;
+    }
+    if (input.rateLimit.minCopyIntervalMs !== undefined) {
+      rl.min_copy_interval_ms = input.rateLimit.minCopyIntervalMs;
+    }
+    if (input.rateLimit.maxCopiesPerWindow !== undefined) {
+      rl.max_copies_per_window = input.rateLimit.maxCopiesPerWindow;
+    }
+    if (input.rateLimit.copyRateWindowMs !== undefined) {
+      rl.copy_rate_window_ms = input.rateLimit.copyRateWindowMs;
+    }
+    if (input.rateLimit.slippageTolerance !== undefined) {
+      rl.slippage_tolerance = input.rateLimit.slippageTolerance;
+    }
+    if (Object.keys(rl).length > 0) {
+      row.rate_limit = rl;
+    }
+  }
+
   if (input.filters) {
     row.filters = {
       ...(input.filters.minPrice !== undefined && { min_price: input.filters.minPrice }),
@@ -143,6 +182,15 @@ export function mergeLeaderWrite(
     merged.filters = {
       ...((existing.filters as Record<string, unknown>) ?? {}),
       ...((row.filters as Record<string, unknown>) ?? {}),
+    };
+  }
+
+  if (row.rate_limit === null) {
+    delete merged.rate_limit;
+  } else if (row.rate_limit && typeof row.rate_limit === "object") {
+    merged.rate_limit = {
+      ...((existing.rate_limit as Record<string, unknown>) ?? {}),
+      ...(row.rate_limit as Record<string, unknown>),
     };
   }
 

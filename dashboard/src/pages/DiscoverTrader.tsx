@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch } from "../api/client";
+import { apiFetch, getActiveAccountId } from "../api/client";
 import { formatUsd } from "../api/discover";
 import { AddTraderModal } from "../components/AddTraderModal";
 import { UnfollowLeaderButton } from "../components/UnfollowLeaderButton";
 import { DataCard } from "../components/ui/DataCard";
 import { PageHeader } from "../components/ui/PageHeader";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import type { DiscoverTraderRow } from "../api/discover";
 import { SideBadge } from "../utils/auditDisplay";
@@ -51,14 +52,18 @@ function fmtTime(ts: number) {
 export function DiscoverTraderPage() {
   const t = useT();
   const queryClient = useQueryClient();
+  const accountId = getActiveAccountId();
   const { address: rawAddress } = useParams<{ address: string }>();
   const address = rawAddress ? decodeURIComponent(rawAddress) : "";
   const [showModal, setShowModal] = useState(false);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["discover-trader", address],
-    queryFn: () =>
-      apiFetch<TraderDetailResponse>(`/api/discover/trader?address=${encodeURIComponent(address)}`),
+    queryKey: ["discover-trader", accountId, address],
+    queryFn: () => {
+      const qs = new URLSearchParams({ address });
+      if (accountId) qs.set("accountId", accountId);
+      return apiFetch<TraderDetailResponse>(`/api/discover/trader?${qs}`);
+    },
     enabled: Boolean(address),
   });
 
@@ -102,8 +107,12 @@ export function DiscoverTraderPage() {
         <>
           <PageHeader title={t("trader.detail")} />
           <div className="alert alert-error">
-            {(error as Error)?.message ?? data?.error}
-            {data?.hint && <p className="muted" style={{ margin: "0.5rem 0 0" }}>{data.hint}</p>}
+            {translateApiMessage(t, (error as Error)?.message ?? data?.error ?? "")}
+            {data?.hint && (
+              <p className="muted" style={{ margin: "0.5rem 0 0" }}>
+                {translateApiMessage(t, data.hint)}
+              </p>
+            )}
           </div>
         </>
       )}
@@ -129,7 +138,9 @@ export function DiscoverTraderPage() {
                       <UnfollowLeaderButton
                         leaderId={data.followingLeaderId}
                         onSuccess={() => {
-                          void queryClient.invalidateQueries({ queryKey: ["discover-trader", address] });
+                          void queryClient.invalidateQueries({
+                            queryKey: ["discover-trader", accountId, address],
+                          });
                         }}
                       />
                     ) : (
@@ -207,7 +218,14 @@ export function DiscoverTraderPage() {
       )}
 
       {showModal && modalTrader && (
-        <AddTraderModal trader={modalTrader} onClose={() => setShowModal(false)} onSuccess={() => setShowModal(false)} />
+        <AddTraderModal
+          trader={modalTrader}
+          onClose={() => setShowModal(false)}
+          onSuccess={() => {
+            setShowModal(false);
+            void queryClient.invalidateQueries({ queryKey: ["discover-trader", accountId, address] });
+          }}
+        />
       )}
     </>
   );

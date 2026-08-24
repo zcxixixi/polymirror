@@ -3,10 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, type LeaderRow } from "../api/client";
 import { apiPatch } from "../api/leaders";
 import { LeaderInlineSettings } from "../components/LeaderInlineSettings";
+import { QuickAddLeader } from "../components/QuickAddLeader";
 import { UnfollowLeaderButton } from "../components/UnfollowLeaderButton";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ToggleSwitch } from "../components/ui/ToggleSwitch";
 import { useToast } from "../components/ui/Toast";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
 import { polymarketProfileUrl } from "../utils/polymarket";
 
@@ -30,7 +32,7 @@ export function LeadersPage() {
         "success"
       );
     },
-    onError: (e: Error) => toast(e.message, "error"),
+    onError: (e: Error) => toast(translateApiMessage(t, e.message), "error"),
   });
 
   return (
@@ -39,9 +41,9 @@ export function LeadersPage() {
         title={t("leaders.title")}
         subtitle={t("leaders.subtitle")}
         actions={
-          <Link to="/leaders/new" className="btn-link">
+          <a href="#quick-add-leader" className="btn-link">
             {t("leaders.add")}
-          </Link>
+          </a>
         }
       />
 
@@ -49,16 +51,21 @@ export function LeadersPage() {
         <div className="alert alert-error">{(error as Error).message}</div>
       )}
 
+      <QuickAddLeader />
+      <p className="muted form-hint" style={{ marginTop: "-0.25rem", marginBottom: "1rem" }}>
+        {t("leaders.disableVsDeleteHint")}
+      </p>
+
       <div className="panel panel-wide">
         <table>
           <thead>
             <tr>
-              <th>ID</th>
+              <th>{t("table.id")}</th>
               <th>{t("table.address")}</th>
               <th>{t("common.enabled")}</th>
               <th>{t("leaders.ratioLabel")} / {t("leaders.capLabel")}</th>
-              <th>strategy</th>
-              <th>weight</th>
+              <th>{t("table.strategy")}</th>
+              <th>{t("leaders.weightLabel")}</th>
               <th>{t("table.volume")}</th>
               <th></th>
             </tr>
@@ -94,7 +101,10 @@ export function LeadersPage() {
                   <ToggleSwitch
                     checked={l.enabled}
                     disabled={toggle.isPending}
-                    label={`${l.enabled ? t("common.disabled") : t("common.enabled")} Leader ${l.id}`}
+                    label={t("leaders.toggleLeader", {
+                      action: l.enabled ? t("common.disabled") : t("common.enabled"),
+                      id: l.id,
+                    })}
                     onChange={(enabled) => toggle.mutate({ id: l.id, enabled })}
                   />
                 </td>
@@ -117,7 +127,7 @@ export function LeadersPage() {
                 <td colSpan={8} className="table-empty">
                   <span className="muted">
                     {t("leaders.empty")}{" "}
-                    <Link to="/leaders/new">{t("leaders.addFirst")}</Link>
+                    <a href="#quick-add-leader">{t("leaders.addFirst")}</a>
                   </span>
                 </td>
               </tr>

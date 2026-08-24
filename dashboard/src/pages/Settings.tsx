@@ -5,14 +5,12 @@ import {
   patchGlobalSettings,
   patchTelegramSettings,
   reloadConfig,
-  switchLiveMode,
-  switchPreviewMode,
   testProxyConnection,
   type SettingsSnapshot,
 } from "../api/settings";
+import { ModeSwitchButton } from "../components/ModeSwitchButton";
 import { PageHeader } from "../components/ui/PageHeader";
 import { SecretInput } from "../components/SecretInput";
-import { ConfirmModal } from "../components/ui/ConfirmModal";
 import { useToast } from "../components/ui/Toast";
 import { useT } from "../i18n/I18nProvider";
 import { translateApiMessage } from "../i18n/apiMessages";
@@ -57,7 +55,6 @@ export function SettingsPage() {
   const [form, setForm] = useState<SettingsSnapshot["global"] | null>(null);
   const [priorityText, setPriorityText] = useState("");
   const [err, setErr] = useState<string | null>(null);
-  const [confirmLive, setConfirmLive] = useState(false);
   const [tgToken, setTgToken] = useState("");
   const [tgChatId, setTgChatId] = useState("");
 
@@ -106,37 +103,16 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["status"] });
       queryClient.invalidateQueries({ queryKey: ["risk"] });
     },
-    onError: (e: Error) => setErr(e.message),
-  });
-
-  const toPreview = useMutation({
-    mutationFn: switchPreviewMode,
-    onSuccess: (r) => {
-      toast(translateApiMessage(t, r.message), "success");
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      queryClient.invalidateQueries({ queryKey: ["status"] });
-    },
-    onError: (e: Error) => setErr(e.message),
-  });
-
-  const toLive = useMutation({
-    mutationFn: switchLiveMode,
-    onSuccess: (r) => {
-      toast(translateApiMessage(t, r.message), "success");
-      setErr(null);
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      queryClient.invalidateQueries({ queryKey: ["status"] });
-    },
-    onError: (e: Error) => {
-      setErr(e.message);
-      toast(t("settings.liveSwitchFailed", { message: e.message }), "error");
-    },
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const reload = useMutation({
     mutationFn: reloadConfig,
-    onSuccess: () => toast(t("settings.reloaded"), "success"),
-    onError: (e: Error) => setErr(e.message),
+    onSuccess: () => {
+      toast(t("settings.reloaded"), "success");
+      void queryClient.invalidateQueries();
+    },
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const saveProxy = useMutation({
@@ -156,7 +132,7 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["status"] });
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const testProxy = useMutation({
@@ -166,10 +142,10 @@ export function SettingsPage() {
         toast(translateApiMessage(t, r.message ?? t("settings.proxyOk")), "success");
         setErr(null);
       } else {
-        setErr([r.error, r.hint].filter(Boolean).join(" — "));
+        setErr(translateApiMessage(t, [r.error, r.hint].filter(Boolean).join(" — ")));
       }
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   const saveTelegram = useMutation({
@@ -189,7 +165,7 @@ export function SettingsPage() {
       setTgChatId("");
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
-    onError: (e: Error) => setErr(e.message),
+    onError: (e: Error) => setErr(translateApiMessage(t, e.message)),
   });
 
   function setProxy<K extends keyof SettingsSnapshot["global"]["proxy"]>(
@@ -232,8 +208,6 @@ export function SettingsPage() {
   }
 
   const p = data.env.proxy ?? DEFAULT_ENV_PROXY;
-  const canSwitchLive =
-    data.previewMode && (data.env.liveConfirmSet || !data.env.requireLiveConfirm);
   const proxyStatusLabel = !p.configured
     ? p.envFallback
       ? t("settings.proxyStatusEnvDisabled")
@@ -361,6 +335,7 @@ export function SettingsPage() {
               />
               enable_copy_trading
             </label>
+            <p className="muted form-hint">{t("settings.enableCopyTradingHint")}</p>
             <div className="form-row">
               <label className="form-label">
                 daily_loss_cap_pct
@@ -699,6 +674,7 @@ export function SettingsPage() {
               </button>
             </div>
 
+            <p className="muted form-hint">{t("settings.proxyGlobalHint")}</p>
             <p className="muted form-hint">{t("settings.proxyEnvFallback")}</p>
           </>
         )}
@@ -716,23 +692,11 @@ export function SettingsPage() {
               </div>
             )}
             <div className="form-actions">
-              <button
-                type="button"
-                className="secondary"
-                disabled={toPreview.isPending || data.previewMode}
-                onClick={() => toPreview.mutate()}
-              >
-                {t("settings.toPreview")}
-              </button>
-              <button
-                type="button"
-                disabled={toLive.isPending || !canSwitchLive}
-                onClick={() => setConfirmLive(true)}
-              >
-                {t("settings.toLive")}
-              </button>
+              <ModeSwitchButton previewMode={data.previewMode} target="preview" />
+              <ModeSwitchButton previewMode={data.previewMode} target="live" />
             </div>
             <p className="muted form-hint">{t("settings.modeHint")}</p>
+            <p className="muted form-hint">{t("settings.stopVsModeHint")}</p>
           </>
         )}
 
@@ -748,28 +712,6 @@ export function SettingsPage() {
         )}
         </div>
       </div>
-
-      <ConfirmModal
-        open={confirmLive}
-        title={t("settings.confirmLiveTitle")}
-        variant="danger"
-        confirmLabel={t("settings.confirmLiveBtn")}
-        loading={toLive.isPending}
-        description={
-          <>
-            <p style={{ margin: "0 0 0.75rem" }}>{t("settings.confirmLiveP1")}</p>
-            <ul style={{ margin: 0, paddingLeft: "1.25rem", color: "var(--text-secondary)" }}>
-              <li>{t("settings.confirmLiveLi1")}</li>
-              <li>{t("settings.confirmLiveLi2")}</li>
-              <li>{t("settings.confirmLiveLi3")}</li>
-            </ul>
-          </>
-        }
-        onConfirm={() => {
-          toLive.mutate(undefined, { onSettled: () => setConfirmLive(false) });
-        }}
-        onCancel={() => setConfirmLive(false)}
-      />
     </>
   );
 }

@@ -1,5 +1,5 @@
 import type { AccountApiContext } from "../accounts/manager.js";
-import { ClobExecutor } from "../executor/clob.js";
+import { cancelPendingOrderWithFillReconcile } from "../engine/mode-transition.js";
 import { isPreviewOrderId } from "../engine/pending-orders.js";
 import { logInfo } from "../notify/logger.js";
 
@@ -28,8 +28,9 @@ export async function cancelPendingOrder(
     return { status: 404, body: { error: "Pending order not found" } };
   }
 
-  const executor = new ClobExecutor(config.wallet, config.app.global);
-  const cancel = await executor.cancelOrder(id);
+  const cancel = await cancelPendingOrderWithFillReconcile(config, actx.store, id, {
+    reasonTag: "manual",
+  });
   if (!cancel.ok) {
     return {
       status: 502,
@@ -40,7 +41,6 @@ export async function cancelPendingOrder(
     };
   }
 
-  actx.store.removePendingOrder(id);
   logInfo("Pending order cancelled via dashboard", {
     accountId: actx.accountId,
     orderId: id.slice(0, 12),
@@ -52,7 +52,7 @@ export async function cancelPendingOrder(
     body: {
       ok: true,
       orderId: id,
-      message: "订单已从 CLOB 撤销并移出 pending 列表",
+      message: "订单已从 CLOB 撤销并移出 pending 列表（已对账部分成交）",
       orders: actx.store.listPendingOrders(),
     },
   };

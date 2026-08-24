@@ -21,6 +21,11 @@ export function walletEnvSuffix(accountId: string): string {
     .replace(/[^A-Z0-9]/g, "_");
 }
 
+/** True when two account ids collapse to the same POLYMARKET_* env suffix. */
+export function walletEnvSuffixesCollide(a: string, b: string): boolean {
+  return walletEnvSuffix(a) === walletEnvSuffix(b);
+}
+
 export function envKey(base: string, walletEnv: string): string {
   const suffix = walletEnv.trim().toUpperCase();
   if (!suffix) return base;
@@ -31,27 +36,41 @@ export function defaultEnvPath(): string {
   return resolve(process.cwd(), ".env");
 }
 
-/** Upsert keys in .env; values must not contain newlines. Never log return value. */
+/**
+ * Upsert keys in .env; values must not contain newlines.
+ * Pass `null` to remove a key. Never log return value.
+ */
 export function upsertEnvFile(
-  updates: Record<string, string>,
+  updates: Record<string, string | null>,
   envPath = defaultEnvPath()
 ): void {
   const lines = existsSync(envPath) ? readFileSync(envPath, "utf8").split(/\r?\n/) : [];
   const updated = new Set<string>();
-  const out = lines.map((line) => {
+  const out: string[] = [];
+  for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) return line;
-    const eq = line.indexOf("=");
-    if (eq <= 0) return line;
-    const key = line.slice(0, eq).trim();
-    if (!(key in updates)) return line;
-    updated.add(key);
-    return `${key}=${updates[key]!}`;
-  });
-  for (const [key, value] of Object.entries(updates)) {
-    if (!updated.has(key)) {
-      out.push(`${key}=${value}`);
+    if (!trimmed || trimmed.startsWith("#")) {
+      out.push(line);
+      continue;
     }
+    const eq = line.indexOf("=");
+    if (eq <= 0) {
+      out.push(line);
+      continue;
+    }
+    const key = line.slice(0, eq).trim();
+    if (!(key in updates)) {
+      out.push(line);
+      continue;
+    }
+    updated.add(key);
+    const value = updates[key]!;
+    if (value === null) continue; // delete
+    out.push(`${key}=${value}`);
+  }
+  for (const [key, value] of Object.entries(updates)) {
+    if (updated.has(key) || value === null) continue;
+    out.push(`${key}=${value}`);
   }
   while (out.length > 0 && out[out.length - 1] === "") {
     out.pop();
@@ -67,22 +86,28 @@ export function upsertEnvFile(
   enforceOwnerOnlyPermissions(envPath);
 }
 
-export function applyEnvToProcess(updates: Record<string, string>): void {
+export function applyEnvToProcess(updates: Record<string, string | null>): void {
   for (const [key, value] of Object.entries(updates)) {
-    process.env[key] = value;
+    if (value === null) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
   }
 }
 
 export function walletEnvKeys(
   walletEnv: string,
   creds: { privateKey: string; address: string; signatureType?: number }
-): Record<string, string> {
-  const keys: Record<string, string> = {
+): Record<string, string | null> {
+  const keys: Record<string, string | null> = {
     [envKey("POLYMARKET_PRIVATE_KEY", walletEnv)]: creds.privateKey,
     [envKey("POLYMARKET_ADDRESS", walletEnv)]: creds.address,
   };
-  if (creds.signatureType !== undefined && creds.signatureType !== 0) {
-    keys[envKey("POLYMARKET_SIGNATURE_TYPE", walletEnv)] = String(creds.signatureType);
+  if (creds.signatureType !== undefined) {
+    const sigKey = envKey("POLYMARKET_SIGNATURE_TYPE", walletEnv);
+    // 0 = EOA: explicitly clear any prior proxy signature type.
+    keys[sigKey] = creds.signatureType === 0 ? null : String(creds.signatureType);
   }
   return keys;
 }

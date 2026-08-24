@@ -26,7 +26,10 @@ import {
   IconPositions,
   IconRisk,
   IconSettings,
+  IconTelegram,
 } from "./ui/icons";
+
+const PROJECT_TELEGRAM_URL = "https://t.me/laoshalab";
 
 function AccountSwitcher({
   accounts,
@@ -195,6 +198,16 @@ export function Layout() {
         <div className="sidebar-footer">
           <LanguageSwitcher />
           <ThemeToggleSegment />
+          <a
+            className="btn-ghost sidebar-footer-link"
+            href={PROJECT_TELEGRAM_URL}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={t("layout.contactAria")}
+          >
+            <IconTelegram width={16} height={16} aria-hidden />
+            <span>{t("layout.contact")}</span>
+          </a>
           <button type="button" className="btn-ghost" onClick={logout}>
             {t("layout.logout")}
           </button>

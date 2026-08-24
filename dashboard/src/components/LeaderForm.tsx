@@ -9,7 +9,9 @@ import {
   apiPut,
 } from "../api/leaders";
 import { useToast } from "./ui/Toast";
+import { translateApiMessage } from "../i18n/apiMessages";
 import { useT } from "../i18n/I18nProvider";
+import { suggestLeaderId } from "../utils/leaderId";
 
 interface Props {
   initial: LeaderFormData;
@@ -44,8 +46,9 @@ export function LeaderForm({ initial, isEdit }: Props) {
       navigate("/leaders");
     },
     onError: (e: Error) => {
-      setError(e.message);
-      toast(e.message, "error");
+      const msg = translateApiMessage(t, e.message);
+      setError(msg);
+      toast(msg, "error");
     },
   });
 
@@ -61,7 +64,9 @@ export function LeaderForm({ initial, isEdit }: Props) {
         setValidateMsg(r.error ?? t("leaders.validateFail"));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        translateApiMessage(t, e instanceof Error ? e.message : String(e))
+      );
     }
   }
 
@@ -120,7 +125,17 @@ export function LeaderForm({ initial, isEdit }: Props) {
             type="text"
             className="mono"
             value={form.address}
-            onChange={(e) => set("address", e.target.value)}
+            onChange={(e) => {
+              const address = e.target.value;
+              setForm((f) => ({
+                ...f,
+                address,
+                id:
+                  !isEdit && (!f.id || f.id.startsWith("trader_"))
+                    ? suggestLeaderId(undefined, address.trim())
+                    : f.id,
+              }));
+            }}
             placeholder="0x..."
             required
           />
@@ -131,7 +146,17 @@ export function LeaderForm({ initial, isEdit }: Props) {
           <input
             type="text"
             value={form.username}
-            onChange={(e) => set("username", e.target.value)}
+            onChange={(e) => {
+              const username = e.target.value;
+              setForm((f) => ({
+                ...f,
+                username,
+                id:
+                  !isEdit && (!f.id || f.id.startsWith("trader_"))
+                    ? suggestLeaderId(username, "")
+                    : f.id,
+              }));
+            }}
             placeholder="polymarket-handle"
             required
           />
@@ -181,7 +206,7 @@ export function LeaderForm({ initial, isEdit }: Props) {
           />
         </label>
         <label className="form-label">
-          weight
+          {t("leaders.weightLabel")}
           <input
             type="number"
             step="0.1"
@@ -206,7 +231,7 @@ export function LeaderForm({ initial, isEdit }: Props) {
         <summary>{t("leaders.advancedLimits")}</summary>
         <div className="form-row">
           <label className="form-label">
-            max_position_usd
+            {t("leaders.maxPositionUsd")}
             <input
               type="number"
               step="1"
@@ -217,7 +242,7 @@ export function LeaderForm({ initial, isEdit }: Props) {
             />
           </label>
           <label className="form-label">
-            max_daily_volume_usd
+            {t("leaders.maxDailyVolumeUsd")}
             <input
               type="number"
               step="1"
@@ -228,7 +253,7 @@ export function LeaderForm({ initial, isEdit }: Props) {
             />
           </label>
           <label className="form-label">
-            min_price
+            {t("leaders.minPrice")}
             <input
               type="number"
               step="0.01"
@@ -239,7 +264,7 @@ export function LeaderForm({ initial, isEdit }: Props) {
             />
           </label>
           <label className="form-label">
-            max_price
+            {t("leaders.maxPrice")}
             <input
               type="number"
               step="0.01"
@@ -258,7 +283,7 @@ export function LeaderForm({ initial, isEdit }: Props) {
               checked={form.sideBuy}
               onChange={(e) => set("sideBuy", e.target.checked)}
             />
-            BUY
+            {t("leaders.sideBuy")}
           </label>
           <label className="form-check">
             <input
@@ -266,9 +291,108 @@ export function LeaderForm({ initial, isEdit }: Props) {
               checked={form.sideSell}
               onChange={(e) => set("sideSell", e.target.checked)}
             />
-            SELL
+            {t("leaders.sideSell")}
           </label>
         </div>
+      </details>
+
+      <details className="form-advanced" open={isEdit && form.rateLimitEnabled}>
+        <summary>{t("leaders.rateLimitSection")}</summary>
+        <p className="muted form-hint">{t("leaders.rateLimitHint")}</p>
+        <label className="form-check">
+          <input
+            type="checkbox"
+            checked={form.rateLimitEnabled}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setForm((f) =>
+                on
+                  ? {
+                      ...f,
+                      rateLimitEnabled: true,
+                      tradeAggregationWindowMs: f.tradeAggregationWindowMs || "5000",
+                      buyDedupWindowMs: f.buyDedupWindowMs || "120000",
+                      minCopyIntervalMs: f.minCopyIntervalMs || "30000",
+                      maxCopiesPerWindow: f.maxCopiesPerWindow || "5",
+                      copyRateWindowMs: f.copyRateWindowMs || "60000",
+                      leaderSlippageTolerance: f.leaderSlippageTolerance || "0.02",
+                    }
+                  : { ...f, rateLimitEnabled: false }
+              );
+            }}
+          />
+          {t("leaders.rateLimitEnable")}
+        </label>
+        {form.rateLimitEnabled && (
+          <div className="form-row">
+            <label className="form-label">
+              {t("leaders.tradeAggregationWindowMs")}
+              <input
+                type="number"
+                step="1000"
+                min="0"
+                value={form.tradeAggregationWindowMs}
+                onChange={(e) => set("tradeAggregationWindowMs", e.target.value)}
+                placeholder="5000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.buyDedupWindowMs")}
+              <input
+                type="number"
+                step="1000"
+                min="0"
+                value={form.buyDedupWindowMs}
+                onChange={(e) => set("buyDedupWindowMs", e.target.value)}
+                placeholder="120000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.minCopyIntervalMs")}
+              <input
+                type="number"
+                step="1000"
+                min="0"
+                value={form.minCopyIntervalMs}
+                onChange={(e) => set("minCopyIntervalMs", e.target.value)}
+                placeholder="30000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.maxCopiesPerWindow")}
+              <input
+                type="number"
+                step="1"
+                min="1"
+                value={form.maxCopiesPerWindow}
+                onChange={(e) => set("maxCopiesPerWindow", e.target.value)}
+                placeholder="5"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.copyRateWindowMs")}
+              <input
+                type="number"
+                step="1000"
+                min="1000"
+                value={form.copyRateWindowMs}
+                onChange={(e) => set("copyRateWindowMs", e.target.value)}
+                placeholder="60000"
+              />
+            </label>
+            <label className="form-label">
+              {t("leaders.leaderSlippageTolerance")}
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={form.leaderSlippageTolerance}
+                onChange={(e) => set("leaderSlippageTolerance", e.target.value)}
+                placeholder="0.02"
+              />
+            </label>
+          </div>
+        )}
       </details>
 
       <div className="form-actions">

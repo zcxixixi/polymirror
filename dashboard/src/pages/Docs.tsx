@@ -3,16 +3,16 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import overview from "../../../docs/dashboard/01-overview.md?raw";
-import gettingStarted from "../../../docs/dashboard/02-getting-started.md?raw";
-import accounts from "../../../docs/dashboard/03-accounts.md?raw";
-import leaders from "../../../docs/dashboard/04-leaders.md?raw";
-import monitoring from "../../../docs/dashboard/05-monitoring.md?raw";
-import riskModes from "../../../docs/dashboard/06-risk-and-modes.md?raw";
-import settings from "../../../docs/dashboard/07-settings.md?raw";
-import faq from "../../../docs/dashboard/08-faq.md?raw";
-import quickRef from "../../../docs/QUICK_REFERENCE.md?raw";
-import userGuide from "../../../docs/USER_GUIDE.md?raw";
+import overview from "../../../guide/dashboard/01-overview.md?raw";
+import gettingStarted from "../../../guide/dashboard/02-getting-started.md?raw";
+import accounts from "../../../guide/dashboard/03-accounts.md?raw";
+import leaders from "../../../guide/dashboard/04-leaders.md?raw";
+import monitoring from "../../../guide/dashboard/05-monitoring.md?raw";
+import riskModes from "../../../guide/dashboard/06-risk-and-modes.md?raw";
+import settings from "../../../guide/dashboard/07-settings.md?raw";
+import faq from "../../../guide/dashboard/08-faq.md?raw";
+import quickRef from "../../../guide/QUICK_REFERENCE.md?raw";
+import userGuide from "../../../guide/USER_GUIDE.md?raw";
 import { useT } from "../i18n/I18nProvider";
 
 interface DocItem {
