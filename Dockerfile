@@ -19,7 +19,7 @@ RUN npm ci \
 COPY tsconfig.json ./
 COPY src ./src
 COPY dashboard ./dashboard
-COPY docs ./docs
+COPY guide ./guide
 RUN npm run build
 
 FROM node:24-bookworm-slim AS runner
