@@ -14,6 +14,8 @@ npm run preview:pipeline:build-mass -- config.preview.template.yaml mass-cohort.
 
 `build-mass` 可把最多 100 个 Leader（300 账户）合并到一个共享采集进程；默认先启 50 Leader/150 账户，30 秒轮询，测量远端 CPU、内存和数据库增长后再扩容。
 
+大规模运行可设置 `POLYMIRROR_ACCOUNT_CONCURRENCY=6` 启用有界账户并发。官方 Activity 仍按 Leader/查询参数在同一轮共享，不会因三档策略重复请求；每个账户继续使用独立 SQLite 事务。
+
 ```bash
 npm install
 npm run preview:pipeline:prepare

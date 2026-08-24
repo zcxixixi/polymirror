@@ -1736,37 +1736,42 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
         }
       }
       const pollActivityCache: PollActivityCache = new Map();
-      for (const account of manager.enabled()) {
-        const tag = `[${account.id}]`;
-        try {
-          const result = await runWithAccountDbGrowthSampling(
-            account,
-            () => runCopyCycle(account.config, account.store, telegram, {
-              pollActivityCache,
-            })
-          );
-          manager.updateHealthAfterPoll(account.id, result, result.walletDrifts);
-          if (result.fetched > 0 || result.copied > 0 || result.errors.length > 0) {
-            logInfo(`${tag} Poll complete`, result);
-          }
-          if (result.errors.length > 0) {
-            result.errors.slice(0, 5).forEach((e) => logError(`${tag} ${e}`));
-          }
-          if (account.store.isKillSwitchActive()) {
-            const control = account.store.getExperimentControl();
-            telegram.killSwitch(
-              `${tag} sticky ${control?.state ?? "kill switch"}`
-              + `${control?.reasonCode ? ` — ${control.reasonCode}` : ""}`
-              + "; settlements continue, no automatic UTC reset"
+      const accountsToPoll = manager.enabled();
+      await runWithConcurrency(
+        accountsToPoll,
+        resolveAccountPollConcurrency(),
+        async (account) => {
+          const tag = `[${account.id}]`;
+          try {
+            const result = await runWithAccountDbGrowthSampling(
+              account,
+              () => runCopyCycle(account.config, account.store, telegram, {
+                pollActivityCache,
+              })
             );
+            manager.updateHealthAfterPoll(account.id, result, result.walletDrifts);
+            if (result.fetched > 0 || result.copied > 0 || result.errors.length > 0) {
+              logInfo(`${tag} Poll complete`, result);
+            }
+            if (result.errors.length > 0) {
+              result.errors.slice(0, 5).forEach((e) => logError(`${tag} ${e}`));
+            }
+            if (account.store.isKillSwitchActive()) {
+              const control = account.store.getExperimentControl();
+              telegram.killSwitch(
+                `${tag} sticky ${control?.state ?? "kill switch"}`
+                + `${control?.reasonCode ? ` — ${control.reasonCode}` : ""}`
+                + "; settlements continue, no automatic UTC reset"
+              );
+            }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            logError(`${tag} Poll failed`, { error: msg });
+            account.health.lastError = msg;
+            telegram.error(`${tag} Poll failed: ${msg}`);
           }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          logError(`${tag} Poll failed`, { error: msg });
-          account.health.lastError = msg;
-          telegram.error(`${tag} Poll failed: ${msg}`);
         }
-      }
+      );
       syncAggregateHealth(manager.list());
     } finally {
       cycleRunning = false;
@@ -1788,4 +1793,36 @@ export async function startBot(configPath = "config.yaml"): Promise<void> {
 
   await tick();
   schedulePoll(pollIntervalMs);
+}
+
+export function resolveAccountPollConcurrency(
+  raw = process.env.POLYMIRROR_ACCOUNT_CONCURRENCY
+): number {
+  if (raw === undefined || raw.trim() === "") return 1;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 32) {
+    throw new Error("POLYMIRROR_ACCOUNT_CONCURRENCY must be an integer from 1 to 32");
+  }
+  return value;
+}
+
+export async function runWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error("concurrency must be a positive integer");
+  }
+  let nextIndex = 0;
+  const runWorker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      await worker(items[index]!, index);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker())
+  );
 }
