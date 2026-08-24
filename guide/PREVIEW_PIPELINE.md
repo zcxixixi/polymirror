@@ -5,6 +5,7 @@
 大规模候选池不受单批 30 账户限制。先把最多 5000 个冻结候选拆成每片 10 个 Leader，再用现有完整门禁逐片执行：
 
 ```bash
+npm run preview:pipeline:discover -- reports/discovery/run-id 500
 npm run preview:pipeline:shard -- mass-cohort.json reports/shards/run-id
 ```
 

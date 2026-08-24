@@ -29,6 +29,7 @@
     "preview:collect": "node dist/report-preview-collector.js",
     "preview:verify-experiment": "node dist/report-preview-experiment-verify.js",
     "preview:pipeline:prepare": "tsx scripts/prepare-preview-pipeline.mts",
+    "preview:pipeline:discover": "tsx scripts/discover-mass-candidates.mts",
     "preview:pipeline:shard": "tsx scripts/shard-candidate-cohort.mts",
     "preview:pipeline:start": "sh scripts/start-preview-pipeline.sh",
     "live:probe": "node dist/report-live-probe.js"
